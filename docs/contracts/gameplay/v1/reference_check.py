@@ -190,11 +190,13 @@ def apply_move(state, move):
         wave_no = len(waves) + 1
         delta = len(cleared) * 100 * wave_no
         waves.append({"wave": wave_no, "cleared": cleared, "scoreDelta": delta, "moved": moved})
+        # 20 is a review abort only. The contract does not define a wave cap.
         if wave_no > 20:
-            raise RuntimeError("runaway cascade")
+            raise RuntimeError("checker abort: cascade has no contracted wave cap")
     score_delta = sum(wave["scoreDelta"] for wave in waves)
+    # Empty futurePieces is unspecified. Abort instead of inventing a replacement.
     if not nxt["futurePieces"]:
-        raise RuntimeError("empty stream is not pinned")
+        raise RuntimeError("checker abort: empty piece stream is not specified")
     nxt["offers"][move["offerIndex"]] = nxt["futurePieces"].pop(0)
     nxt["turnsUsed"] += 1
     nxt["score"] += score_delta

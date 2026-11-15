@@ -64,24 +64,21 @@ cd docs/contracts/gameplay/v1 && shasum -a 256 -c CHECKSUMS.txt
 ```
 
 `reference_check.py` replays the twelve golden files.
-`validate.mjs` replays them with a separate implementation, checks structure, checks the eight rejection probes, and checks `CHECKSUMS.txt`.
+`validate.mjs` replays them in a separate program, checks structure, checks the eight rejection probes, and checks `CHECKSUMS.txt`.
 
-Executed on this change: those three commands. Results belong in the PR.
-Not executed: backend application tests, Dart/Flutter, and a client/backend engine diff. This repository has no application harness and no engine. The client repository is not modified from here.
+The two programs do not import each other. They still follow one reading of the contract, so their agreement is not a second source of rules. The `derivation` field on each fixture is the reviewable trace.
+
+Not executed, and not claimed: a Dart client engine, a TypeScript product engine, or backend application tests. Neither repository contains an engine. Cross-repo agreement for this suite is identical file bytes.
 
 ## Client / backend parity
 
-Canonical fixture bytes live in this backend repository at `docs/contracts/gameplay/v1/`.
-The client repository does not receive a copy in this change. Copy the directory unchanged, then check the sums from that directory:
+Both repositories keep `docs/contracts/gameplay/v1/` byte-identical. From that directory in either checkout:
 
 ```bash
-rm -rf puzzle-duel-client/docs/contracts/gameplay/v1
-mkdir -p puzzle-duel-client/docs/contracts
-cp -R puzzle-duel-backend/docs/contracts/gameplay/v1 puzzle-duel-client/docs/contracts/gameplay/v1
-cd puzzle-duel-client/docs/contracts/gameplay/v1 && shasum -a 256 -c CHECKSUMS.txt
+shasum -a 256 -c CHECKSUMS.txt
 ```
 
-Do not edit the copied JSON. A rules change needs a new directory such as `v2` after approval. `CHECKSUMS.txt` covers every file in this directory except itself.
+Copy the directory unchanged when the two sides drift. Do not edit one copy in place. A rules change needs a new directory such as `v2` after approval. `CHECKSUMS.txt` covers every file in this directory except itself.
 
 The specification markdown was compared, not rewritten:
 
@@ -95,10 +92,11 @@ Those blobs match client commit `335d2fc69bfd9b44613edc249504ca81876fa353` and b
 ## Unresolved decisions (not pinned)
 
 1. `in_progress` / `ended`, error codes `blocked_tap` / `occupied_tap` / `game_ended`, and `rulesVersion` `core-001.v1` are the names this suite uses for states and rejections the contract requires but does not literally name. Landings, clears, and scores do not depend on renaming them.
-2. What happens when a legal move is played and `futurePieces` is already empty is left to the generator spec. No fixture does that.
+2. What happens when a legal move is played and `futurePieces` is already empty is left to the generator spec. No fixture does that. If a fixture did, both checkers abort. That abort is not a defined game result.
 3. Whether a board that already contains a run of 3 resolves before the next tap is unspecified. Every full-move fixture starts with no run of 3.
 4. Whether a placement that fills the last empty cell and then clears space still ends the game for no-space is unspecified. The filled-board fixture does not match, so the cell stays occupied.
 5. When a tap after the game has ended is also blocked or occupied, the contract does not rank `game_ended` against the cell errors. The pinned post-end tap is an otherwise legal empty cell, and it is rejected with `game_ended`.
 6. `moved` omits pieces that stay. The post-shift board shows them. The contract requires source-index order and does not require stay records.
+7. The contract repeats match and shift until no match remains. It does not set a maximum wave count. If a match is still present after 20 waves, both checkers abort so a mistaken loop cannot hang the review command. A cascade that has already finished is not rejected for its length. Twenty is not a rule, and no fixture depends on it.
 
 Daily attempt lifecycle, RNG, seed versioning, and the all-time rank formula remain Proposed elsewhere and are not decided here.

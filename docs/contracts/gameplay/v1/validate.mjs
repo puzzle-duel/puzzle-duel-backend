@@ -303,6 +303,8 @@ function applyMove(state, move) {
   const land = inside(next, tr, tc) && !isBlocked(next, tr, tc) && next.cells[tr][tc] === null ? [tr, tc] : [row, col];
   next.cells[land[0]][land[1]] = { shape: piece.shape, direction: piece.direction };
   const waves = [];
+  // 20 is a review abort only. The contract does not define a wave cap.
+  // A cascade that finishes on wave 20 is valid; abort only if another match remains.
   while (waves.length < 20) {
     const cleared = findMatches(next.cells);
     if (cleared.length === 0) break;
@@ -311,9 +313,10 @@ function applyMove(state, move) {
     const waveNo = waves.length + 1;
     waves.push({ wave: waveNo, cleared, scoreDelta: cleared.length * 100 * waveNo, moved });
   }
-  if (waves.length >= 20) throw new Error("runaway cascade");
+  if (findMatches(next.cells).length > 0) throw new Error("checker abort: cascade has no contracted wave cap");
   const scoreDelta = waves.reduce((sum, wave) => sum + wave.scoreDelta, 0);
-  if (next.futurePieces.length === 0) throw new Error("empty stream is not pinned");
+  // Empty futurePieces is unspecified. Abort instead of inventing a replacement.
+  if (next.futurePieces.length === 0) throw new Error("checker abort: empty piece stream is not specified");
   const [taken] = next.futurePieces.splice(0, 1);
   next.offers[move.offerIndex] = taken;
   next.turnsUsed += 1;
