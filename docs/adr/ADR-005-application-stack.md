@@ -1,6 +1,6 @@
 # ADR-005 — Application stack
 
-Status: **Proposed**. Owner approval is required before this status becomes Accepted. This record selects an application stack only. It does not decide a host, create a database, or accept [ADR-001](ADR-001-service-isolation.md).
+Status: **Accepted** — owner-approved 2026-11-15 in PZD-14, **conditional on mandatory pre-scaffold executable smoke tests**. Accepted application stack: Node.js 26 LTS, NestJS 12, TypeScript and PostgreSQL 18, with pure TypeScript ranked replay. This acceptance does **not** choose a host, create a database, authorize deployment, or accept [ADR-001](ADR-001-service-isolation.md).
 
 Jira: [PZD-14](https://puzzle-duel-app.atlassian.net/browse/PZD-14). Evidence: [PZD-14-EVIDENCE.md](../architecture/PZD-14-EVIDENCE.md). Parity: [PZD-14-GAMEPLAY-PARITY.md](../architecture/PZD-14-GAMEPLAY-PARITY.md).
 
@@ -123,4 +123,4 @@ Use NestJS 12 and TypeScript on Node.js 26 Active LTS, with PostgreSQL 18 as the
 
 ## 14. Owner-approval requirements
 
-The owner decides whether this Proposed record becomes Accepted. Acceptance allows a later task to scaffold Nest and migrations. It does not authorize deployment, a host change, or acceptance of ADR-001. PZD-12 remains required before any isolation or capacity claim is accepted.
+**Owner decision: Accepted (2026-11-15)** with an explicit execution prerequisite. Before a later task commits any production NestJS scaffold or migrations, the disposable **Node.js 26 / NestJS 12 / TypeScript** install, compile, startup and shutdown smoke-test gate in [PZD-14-EVIDENCE.md](../architecture/PZD-14-EVIDENCE.md) **MUST PASS**. Exact resolved dependency versions must be pinned when authorized. Current result: **NOT_RUN**. If the gate fails, stop and obtain owner-reviewed remediation. This application-stack acceptance does **not** authorize deployment, a host change, or acceptance of backend host ADR-001; [PZD-12](https://puzzle-duel-app.atlassian.net/browse/PZD-12) remains required for infrastructure approval.
