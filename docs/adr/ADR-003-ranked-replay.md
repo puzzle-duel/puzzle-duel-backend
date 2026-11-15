@@ -1,0 +1,3 @@
+# ADR-003 — Ranked attempt protocol and server replay
+Status: Proposed
+Issue signed/opaque versioned challenge ID and deterministic piece stream. The server atomically reserves or records an eligible official attempt for (player, challenge); client submits move transcript with idempotency key. Replay every move using canonical rules, enforce bounds, move budget, configured obstacles, offered-piece selection, transitions, cascade score; reject impossible transcripts and tampered metadata. Do not compare only client supplied score. Require concurrency tests, tamper fuzzing, replay version compatibility, audit with retention limits.
