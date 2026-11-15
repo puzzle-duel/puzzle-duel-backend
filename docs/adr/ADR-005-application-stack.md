@@ -18,7 +18,7 @@ Which language, HTTP framework, and database should the Puzzle Duel application 
 | --- | --- |
 | Node.js 26 Active LTS, TypeScript, NestJS 12, PostgreSQL 18 | Recommended application stack. |
 | A smaller TypeScript HTTP framework alone, such as Fastify, Hono, or Express without Nest | Rejected as the primary structure. |
-| NestJS on Node 20 or 22 because the local machine has Node 20 | Rejected as the target. Node 20 can run Nest 12 and cannot run the documented CLI generators. |
+| Local Node 20, or any Node 20 CI image | Rejected. Node 20 Iron is EOL as of the Node.js release table, last updated 2026-03-24. Nest's FAQ still lists 20.19+ as a runtime floor. That floor is not a production or CI target. |
 | SQLite as the ranked store | Rejected. Concurrent official attempts want a server database with explicit transactions. |
 | PostgreSQL 14 | Rejected. Its listed final release date is 2026-11-12. |
 | PostgreSQL 19 | Rejected. It was a release candidate on the versioning page, not a supported final major. |
@@ -29,11 +29,12 @@ Nest's own docs, from v12.3, recommend the `node:http` adapter and say it is not
 
 Details and links are in [PZD-14-EVIDENCE.md](../architecture/PZD-14-EVIDENCE.md).
 
-- Node.js 26 is Active LTS. 26.13.1 is dated 2026-11-10. Node 24 and 22 are Maintenance LTS.
-- `@nestjs/core` 12.5.0 was the registry latest. `engines.node` is `>=20`. The version FAQ says applications run on Node 20.19+, or 22.12+ on the 22 line. CLI generators need 22.22.3+, 24.15+, or 26+.
-- The Nest 12 migration guide says `nest upgrade` moves TypeScript to v6. This review did not generate a project, so no TypeScript patch is pinned.
+- Node.js 26 is Active LTS. 26.13.1 is dated 2026-11-10. Node 24 and 22 are Maintenance LTS. Node 20 is EOL. Source: [Node.js releases](https://nodejs.org/en/about/previous-releases).
+- `@nestjs/core` 12.5.0 was the registry latest. `engines.node` is `>=20`. The [version FAQ](https://docs.nestjs.com/faq/versions) says applications run on Node 20.19+, or 22.12+ on the 22 line. CLI generators need 22.22.3+, 24.15+, or 26+. Node 26 meets the generator line. Node 20 does not, and it is EOL.
+- The Nest 12 migration guide says `nest upgrade` moves TypeScript to v6. This review did not generate a project, so no TypeScript, Nest, or RxJS patch is locked.
+- NestJS 12 on Node 26 with that TypeScript line has not had the smoke test in the evidence log. The result is **NOT_RUN**.
 - PostgreSQL 18.7 is the newest stable minor on the versioning page, supported until 2030-11-14. 17, 16, and 15 are also marked supported. 14's final release date is already past this review date.
-- Local `node --version` printed v20.20.2. `nest new` was not run.
+- Local `node --version` printed v20.20.2. That binary was not used as a target. `nest new` was not run.
 
 ## 5. Constraints
 
@@ -42,6 +43,8 @@ Details and links are in [PZD-14-EVIDENCE.md](../architecture/PZD-14-EVIDENCE.md
 - A submitted score is ignored as authority. The stored score is the replay score.
 - Identity and ranked-attempt protocol stay in [ADR-002](ADR-002-identity-and-linking.md) and [ADR-003](ADR-003-ranked-replay.md). This record does not expand them.
 - No endpoint, schema, migration, or credential is added here.
+- Production and CI use Node 26. They do not use the local Node 20 binary.
+- Package versions are locked in the scaffold commit that the owner authorizes. This record does not pin a patch that was not installed.
 - Host capacity, ports, proxy routes, and backup locations are not claimed. Those wait for PZD-12.
 
 Proposed module split:
@@ -86,6 +89,8 @@ Future jobs, not created here:
 
 Ubuntu runners are sufficient for those jobs. This PR does not add them. The existing workflow only runs the Python and Node reference checkers for fixture paths. Documentation pulls do not get a new docs linter in CI.
 
+Before a Nest scaffold is treated as verified, the evidence-log smoke test must pass on Node 26: install, TypeScript compile, startup, and shutdown. The lockfile from that run is the version pin. The current result is **NOT_RUN**. A passing test on Node 20 would fail the gate.
+
 ## 9. Performance considerations
 
 MVP boards are 5×5 to 7×7 with short move lists. Replay cost is small beside database transactions. No request-rate or query-time number was measured. Background workers are not required for replay. A later queue needs its own justification and is not part of this decision.
@@ -94,7 +99,7 @@ Connection pooling and statement timeouts belong to the deployment design after 
 
 ## 10. Maintenance and cost implications
 
-Node 26 Active LTS is the runtime target so the CLI generators and the application share one supported line. Nest and PostgreSQL majors are upgraded by later ADR or a reviewed bump, not by this document silently tracking latest.
+Node 26 Active LTS is the runtime target so the CLI generators and the application share one supported line. Node 20 is EOL and is excluded from production and CI. Nest and PostgreSQL majors are upgraded by later ADR or a reviewed bump, not by this document silently tracking latest. The exact Nest, TypeScript, and RxJS patches are locked when the authorized smoke test installs them.
 
 Dollar cost of PostgreSQL and of GitHub minutes is **NOT_MEASURED**. PZD-12 must supply host capacity before anyone claims the service fits on existing hardware.
 
@@ -108,13 +113,13 @@ Switching away from Nest later would keep the pure replay module and replace the
 
 - PZD-12: CPU, memory, disk, existing PostgreSQL, proxy, backups, and whether a new instance is required.
 - HTTP adapter: Nest recommends `platform-node` from v12.3 and has not made it the default. Choose it at scaffold time unless a measured defect appears. No measurement exists.
-- Exact TypeScript patch. The migration guide says v6. Pin the patch the Nest 12 toolchain resolves when scaffolding starts.
+- NestJS 12, Node 26, and TypeScript have not been installed together. The smoke test is **NOT_RUN**. The migration guide says TypeScript v6. The patch stays unknown until that test's lockfile exists.
 - Transport field names, status enums, and error strings. PD-13 did not freeze them.
 - Early board-full end with an empty piece stream. Engines fail closed until a product decision exists.
 
 ## 13. Recommendation
 
-Use NestJS 12 and TypeScript on Node.js 26 Active LTS, with PostgreSQL 18 as the application database. Keep replay in a pure TypeScript module. Do not treat a smaller HTTP framework as the primary structure. Do not deploy, create a database, or claim SportsDash capacity.
+Use NestJS 12 and TypeScript on Node.js 26 Active LTS, with PostgreSQL 18 as the application database. Keep replay in a pure TypeScript module. Do not treat a smaller HTTP framework as the primary structure. Do not use Node 20. Do not treat the combination as executed until the Node 26 smoke test passes. Do not deploy, create a database, or claim SportsDash capacity.
 
 ## 14. Owner-approval requirements
 
