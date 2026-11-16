@@ -1,0 +1,26 @@
+name: PZD-21 Generator parity
+on:
+  pull_request:
+  push:
+    branches:
+      - feature/PZD-21-generator-parity
+jobs:
+  generator-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: backend
+      - uses: actions/checkout@v4
+        with:
+          repository: puzzle-duel/puzzle-duel-client
+          ref: 236caf50564a03c1cf82b8a52b36a693509b7b08
+          path: client
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.0'
+      - name: Verify Accepted GEN-01 vectors and all 15 cross-runtime fixtures
+        working-directory: backend
+        env:
+          PZD_GENERATOR_FIXTURES: ../client/docs/contracts/generator/gen-001.v1/fixtures
+        run: node --experimental-strip-types --test test/generator.test.mts
