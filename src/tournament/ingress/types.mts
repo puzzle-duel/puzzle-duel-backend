@@ -23,6 +23,14 @@ export interface AdmitCommandInput {
   payloadHash: string;
   /** Optional client-declared time — ignored for eligibility. */
   clientDeclaredAt?: Date;
+  /** Expected board revision for move CAS (TD-03). */
+  expectedBoardRevision?: number;
+  /** Claimed writer generation (TD-05). */
+  writerGeneration?: number;
+  /** Optional score delta applied only on successful move. */
+  scoreDelta?: number;
+  /** Marks a move that completes H1 / six-game series when applied. */
+  completesSeries?: boolean;
 }
 
 export interface AdmittedCommand {
@@ -37,15 +45,20 @@ export interface AdmittedCommand {
   /** Monotonic per-series admission order. */
   admissionSeq: number;
   status: AdmissionStatus;
-}
-
-export interface IdempotencyConflict extends AdmittedCommand {
-  conflict: 'IDEMPOTENCY_PAYLOAD_CONFLICT';
+  expectedBoardRevision?: number;
+  writerGeneration?: number;
+  scoreDelta?: number;
+  completesSeries?: boolean;
 }
 
 export type AdmitResult =
-  | { ok: true; command: AdmittedCommand }
-  | { ok: false; reason: 'IDEMPOTENCY_PAYLOAD_CONFLICT'; existing: AdmittedCommand }
+  | { ok: true; command: AdmittedCommand; outcome: CommandOutcomeStatus }
+  | {
+      ok: false;
+      reason: 'IDEMPOTENCY_PAYLOAD_CONFLICT';
+      existing: AdmittedCommand;
+      outcome: CommandOutcomeStatus;
+    }
   | { ok: false; reason: 'INGRESS_UNAVAILABLE' };
 
 /**
@@ -78,4 +91,24 @@ export function applyThinkingExtension(
     return hardCutoff;
   }
   return extended;
+}
+
+export type SeriesTerminalStatus =
+  | 'ACTIVE'
+  | 'AWAIT_ADVANCE'
+  | 'COMPLETED'
+  | 'FORFEITED';
+
+export interface SeriesFenceState {
+  seriesKey: string;
+  boardRevision: number;
+  writerGeneration: number;
+  status: SeriesTerminalStatus;
+  idleDeadlineAt: Date;
+  hardCutoffAt: Date | null;
+  score: number;
+  /** Four-category atomic publish placeholder for H1 completion barrier proofs. */
+  resultsPublished: boolean;
+  /** Last admission that successfully mutated fence (duplicate-safe). */
+  lastAppliedAdmissionId: string | null;
 }

@@ -4,6 +4,7 @@ import type {
   AdmitCommandInput,
   AdmitResult,
   AdmittedCommand,
+  CommandOutcomeStatus,
 } from './types.mts';
 
 /**
@@ -18,6 +19,7 @@ export interface AdmissionJournal {
     playerId: string,
     idempotencyKey: string,
   ): Promise<AdmittedCommand | null>;
+  getOutcome(admissionId: string): Promise<CommandOutcomeStatus>;
   /**
    * Highest admission_seq observed for the series (watermark for barriers).
    */
@@ -29,10 +31,21 @@ export interface AdmissionJournal {
     seriesKey: string,
     cutoffExclusive: Date,
   ): Promise<AdmittedCommand[]>;
+  /**
+   * Eligible pending admissions across many series (weekly settlement barrier).
+   */
+  listEligiblePendingForSeries(
+    seriesKeys: string[],
+    cutoffExclusive: Date,
+  ): Promise<AdmittedCommand[]>;
+  /**
+   * Conditionally set outcome only while still pending.
+   * Returns true if this caller won the transition (prevents applied→rejected races).
+   */
   markOutcome(
     admissionId: string,
     outcome: 'applied' | 'rejected' | 'pending',
-  ): Promise<void>;
+  ): Promise<boolean>;
 }
 
 export interface MemoryJournalOptions {
@@ -41,16 +54,20 @@ export interface MemoryJournalOptions {
   failClosed?: boolean;
 }
 
+type Stored = AdmittedCommand & { outcome: CommandOutcomeStatus };
+
 /**
- * In-process durable journal for unit proofs and fault injection.
- * "Durable" here means survives simulated process restart via explicit snapshot.
+ * In-process journal for unit/fault proofs.
+ * Not evidence of durable production correctness — use PostgresAdmissionJournal.
  */
 export class MemoryAdmissionJournal implements AdmissionJournal {
   #clock: IngressClock;
   #failClosed: boolean;
-  #byId = new Map<string, AdmittedCommand & { outcome: string }>();
+  #byId = new Map<string, Stored>();
   #byIdempotency = new Map<string, string>();
   #seqBySeries = new Map<string, number>();
+  /** Per-series mutex so concurrent admits get deterministic seq order. */
+  #locks = new Map<string, Promise<void>>();
 
   constructor(options: MemoryJournalOptions) {
     this.#clock = options.clock;
@@ -62,17 +79,12 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
   }
 
   /** Simulate process crash recovery from persisted snapshot. */
-  restoreSnapshot(
-    rows: Array<AdmittedCommand & { outcome?: string }>,
-  ): void {
+  restoreSnapshot(rows: Stored[]): void {
     this.#byId.clear();
     this.#byIdempotency.clear();
     this.#seqBySeries.clear();
     for (const row of rows) {
-      this.#byId.set(row.admissionId, {
-        ...row,
-        outcome: row.outcome ?? 'pending',
-      });
+      this.#byId.set(row.admissionId, { ...row });
       this.#byIdempotency.set(
         this.#idemKey(row.seriesKey, row.playerId, row.idempotencyKey),
         row.admissionId,
@@ -84,7 +96,7 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
     }
   }
 
-  snapshot(): Array<AdmittedCommand & { outcome: string }> {
+  snapshot(): Stored[] {
     return [...this.#byId.values()].map((row) => ({ ...row }));
   }
 
@@ -93,50 +105,59 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
       return { ok: false, reason: 'INGRESS_UNAVAILABLE' };
     }
 
-    const idemKey = this.#idemKey(
-      input.seriesKey,
-      input.playerId,
-      input.idempotencyKey,
-    );
-    const existingId = this.#byIdempotency.get(idemKey);
-    if (existingId) {
-      const existing = this.#byId.get(existingId)!;
-      if (existing.payloadHash !== input.payloadHash) {
+    return this.#withSeriesLock(input.seriesKey, async () => {
+      const idemKey = this.#idemKey(
+        input.seriesKey,
+        input.playerId,
+        input.idempotencyKey,
+      );
+      const existingId = this.#byIdempotency.get(idemKey);
+      if (existingId) {
+        const existing = this.#byId.get(existingId)!;
+        if (existing.payloadHash !== input.payloadHash) {
+          return {
+            ok: false,
+            reason: 'IDEMPOTENCY_PAYLOAD_CONFLICT',
+            existing: this.#public(existing),
+            outcome: existing.outcome,
+          };
+        }
         return {
-          ok: false,
-          reason: 'IDEMPOTENCY_PAYLOAD_CONFLICT',
-          existing: { ...existing },
+          ok: true,
+          command: { ...this.#public(existing), status: 'duplicate' },
+          outcome: existing.outcome,
         };
       }
+
+      // Capture trusted time under series lock, before returning to adjudicator.
+      const trustedReceivedAt = this.#clock.now();
+      const admissionSeq = (this.#seqBySeries.get(input.seriesKey) ?? 0) + 1;
+      this.#seqBySeries.set(input.seriesKey, admissionSeq);
+
+      const command: Stored = {
+        admissionId: randomUUID(),
+        seriesKey: input.seriesKey,
+        playerId: input.playerId,
+        commandType: input.commandType,
+        idempotencyKey: input.idempotencyKey,
+        payloadHash: input.payloadHash,
+        trustedReceivedAt,
+        admissionSeq,
+        status: 'admitted',
+        outcome: 'pending',
+        expectedBoardRevision: input.expectedBoardRevision,
+        writerGeneration: input.writerGeneration,
+        scoreDelta: input.scoreDelta,
+        completesSeries: input.completesSeries,
+      };
+      this.#byId.set(command.admissionId, command);
+      this.#byIdempotency.set(idemKey, command.admissionId);
       return {
         ok: true,
-        command: {
-          ...existing,
-          status: 'duplicate',
-        },
+        command: this.#public(command),
+        outcome: 'pending',
       };
-    }
-
-    // Capture trusted time BEFORE any later series lock / adjudication wait.
-    const trustedReceivedAt = this.#clock.now();
-    const admissionSeq = (this.#seqBySeries.get(input.seriesKey) ?? 0) + 1;
-    this.#seqBySeries.set(input.seriesKey, admissionSeq);
-
-    const command: AdmittedCommand & { outcome: string } = {
-      admissionId: randomUUID(),
-      seriesKey: input.seriesKey,
-      playerId: input.playerId,
-      commandType: input.commandType,
-      idempotencyKey: input.idempotencyKey,
-      payloadHash: input.payloadHash,
-      trustedReceivedAt,
-      admissionSeq,
-      status: 'admitted',
-      outcome: 'pending',
-    };
-    this.#byId.set(command.admissionId, command);
-    this.#byIdempotency.set(idemKey, command.admissionId);
-    return { ok: true, command: { ...command } };
+    });
   }
 
   async getByIdempotency(
@@ -149,7 +170,11 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
     );
     if (!id) return null;
     const row = this.#byId.get(id);
-    return row ? { ...row } : null;
+    return row ? this.#public(row) : null;
+  }
+
+  async getOutcome(admissionId: string): Promise<CommandOutcomeStatus> {
+    return this.#byId.get(admissionId)?.outcome ?? 'unknown';
   }
 
   async maxAdmissionSeq(seriesKey: string): Promise<number> {
@@ -168,19 +193,65 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
           row.trustedReceivedAt.getTime() < cutoffExclusive.getTime(),
       )
       .sort((a, b) => a.admissionSeq - b.admissionSeq)
-      .map((row) => ({ ...row }));
+      .map((row) => this.#public(row));
+  }
+
+  async listEligiblePendingForSeries(
+    seriesKeys: string[],
+    cutoffExclusive: Date,
+  ): Promise<AdmittedCommand[]> {
+    const set = new Set(seriesKeys);
+    return [...this.#byId.values()]
+      .filter(
+        (row) =>
+          set.has(row.seriesKey) &&
+          row.outcome === 'pending' &&
+          row.trustedReceivedAt.getTime() < cutoffExclusive.getTime(),
+      )
+      .sort((a, b) => a.admissionSeq - b.admissionSeq)
+      .map((row) => this.#public(row));
   }
 
   async markOutcome(
     admissionId: string,
     outcome: 'applied' | 'rejected' | 'pending',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const row = this.#byId.get(admissionId);
-    if (!row) return;
+    if (!row) return false;
+    if (outcome !== 'pending' && row.outcome !== 'pending') {
+      return false;
+    }
     row.outcome = outcome;
+    return true;
+  }
+
+  #public(row: Stored): AdmittedCommand {
+    const {
+      outcome: _outcome,
+      ...command
+    } = row;
+    return { ...command };
   }
 
   #idemKey(seriesKey: string, playerId: string, key: string): string {
     return `${seriesKey}|${playerId}|${key}`;
+  }
+
+  async #withSeriesLock<T>(seriesKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.#locks.get(seriesKey) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#locks.set(
+      seriesKey,
+      prev.then(() => gate),
+    );
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 }

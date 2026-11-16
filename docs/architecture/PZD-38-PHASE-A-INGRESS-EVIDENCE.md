@@ -1,41 +1,23 @@
-# PZD-38 Phase A — Trusted ingress evidence log
+# PZD-38 Phase A — Trusted ingress verification evidence
 
 Branch: `feature/PZD-38-trusted-ingress`  
-Design basis: ADR-T02 Accepted design (Draft PR #12 HEAD `170d157`); ADR-T01 remains Proposed.  
-Scope: durable admission journal + deadline/fault proofs. No Nest scaffold, no merge/deploy.
+Base: `origin/main` @ `e3ca274` (ADR-T02 Accepted design squash-merge from PR #12)  
+Design: ADR-T02 Accepted — Design only; ADR-T01 remains Proposed.
 
-## Phase 0 baseline inventory
+## Repository integrity
 
-| Area | Existing | Missing | Dependency | Risk |
-| --- | --- | --- | --- | --- |
-| Authentication | None in backend runtime | Verified identity, sessions, writer binding | Provider feasibility; Blueprint v1.1 | High — ranked mutations blocked without it |
-| Series state | Architecture docs only (PR #12 / main docs) | Canonical six-game series persistence + state machine | Phase A ingress; ADR-T01 gates | High |
-| Persistence | Generator fixtures; no Nest/PG app schema on `main` | Series, results, leaderboard tables; migrations | ADR-005 Nest/PG18 smoke | High — smoke NOT_RUN |
-| Trusted ingress | **This branch** memory+Postgres journal + arbiter | Nest HTTP admission path; multi-region failover proof | PG18 ops | Medium after Gate A unit/PG proofs |
-| Gameplay engine | TS generator + client Dart rules (`core-001.v1/v2`) | Accepted `core-001.v3` natural termination | Separate ruleset ADR/review | Blocker for Phase C ranked play |
-| Tournament API | OpenAPI described in docs only | Versioned handlers | Phase B contracts | High |
-| Client | Offline board / PZD-23 UX; no tournament UI | Series indicator, pending move UX, recovery | Stable OpenAPI | High |
-| Leaderboard | Spec only | Atomic 4-category publish + weekly barrier | Settlement + engine | High |
-| Test infrastructure | Node strip-types generator tests; client widget tests | Nest e2e, failover, settlement, golden v3 parity | ADR-005 scaffold | Medium |
-
-**Jira PZD-38:** status `Analysis` (description still says analysis-only). Owner assignment for this workstream authorized Phase A implementation against Accepted ADR-T02 design. Do not mark Done / Accept ADR-T01.
-
-**Draft architecture PR #12:** preserved on `docs/pzd-38-core-protocol-security-contract` @ `170d157` — not mixed into this runtime branch.
-
-## Environment
-
-| Prerequisite | Result |
+| Item | Value |
 | --- | --- |
-| Node.js 26 | `v26.13.1` (nvm) |
-| ADR-005 Nest smoke | NOT_RUN (no Nest app scaffolded yet) |
-| PostgreSQL 18 (docker compose) | `postgres:18` healthy on `127.0.0.1:55432` for evidence run |
-| Draft docs PR #12 | Preserved |
+| Implementation baseline | Merged onto current `origin/main` (not Draft PR #12 branch) |
+| Accepted ADR files | Present from `main` (`docs/adr/ADR-T02-…`, contract, freeze, gate review) |
+| Runtime scope | Admission journal + series fence + arbiter only |
+| Nest / HTTP / auth | NOT implemented (Phase B) |
 
-## Module
+## What Phase A proves vs does not prove
 
-- `src/tournament/ingress/*` — clock, types, memory journal, postgres journal (`trusted_received_at_ms` BIGINT), arbiter
-- `test/tournament/ingress/*` — deadline, durability/fault, postgres
-- `docker-compose.ingress-test.yml` — isolated PG18 for proofs
+**Proves (with PG where noted):** trusted server receipt ms, durable admit, exclusive deadline, idempotent admit, advisory-locked seq, expire/weekly barriers, board CAS / writer fence at fence-store layer, X-01 fail-closed on ingress unavailable, H1 COMPLETED vs FORFEITED ordering at fence layer.
+
+**Does not prove:** Nest multi-process consumers, real DB failover/replica promotion, authenticated sessions, atomic Easy/Medium/Hard/All leaderboard rows, OpenAPI, engine v3, NTP multi-host skew SLA.
 
 ## Commands
 
@@ -47,61 +29,80 @@ PZD_INGRESS_DATABASE_URL=postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress \
   npm run test:ingress
 ```
 
-## Evidence run (executable)
-
-Captured locally 2026-11-17 after epoch-ms PG journal fix:
+## Evidence run
 
 ```
-▶ PZD-38 Gate A — deadline boundaries
-  ✔ P38-03: deadline−1ms eligible; equality expired; +1ms expired
-  ✔ thinking extension only when remaining idle in (0, 60s]
-  ✔ predeadline admit + postdeadline adjudication still eligible
-  ✔ deadline-equal ingress is rejected even if processing is immediate
-  ✔ clientDeclaredAt is ignored for eligibility
-▶ PZD-38 Gate A — durability and fault injection
-  ✔ P38-05: fail closed when durable ingress unavailable — no fabricated accept
-  ✔ crash before durable admission: no row, retry creates new admission
-  ✔ crash after durable admission: retry returns same trustedReceivedAt
-  ✔ same key different payload => IDEMPOTENCY_PAYLOAD_CONFLICT
-  ✔ timeout worker blocked while eligible pending admission exists
-  ✔ multi-instance competing admits: one seq order, stable idempotent winner
-▶ PZD-38 Gate A — PostgreSQL durable journal
-  ✔ admits predeadline H1, survives delayed commit past deadline
-ℹ tests 12  pass 12  fail 0
+ℹ tests 24
+ℹ pass 24
+ℹ fail 0
+ℹ skipped 0
 ```
 
-Final re-run after consumer-crash cases:
+Captured after verification repairs (duplicate outcome race, PG connect fail-closed, advisory locks, fence CAS).
 
-```
-ℹ tests 14  pass 14  fail 0  skipped 0
-```
+## Test matrix
 
-`npm run test:generator` without `PZD_GENERATOR_FIXTURES`: FAIL (assert requires fixtures; not silently skipped). Untouched by this branch; fixture path env not configured in this shell.
+| Test | Source | Assertion | Type | Result |
+| --- | --- | --- | --- | --- |
+| P38-03 ±1ms / equality | deadline-boundary.test.mts | exclusive `isTimely` | Unit | PASS |
+| thinking extension window | deadline-boundary.test.mts | (0,60s] only | Unit | PASS |
+| predeadline admit / postdeadline adjudicate | deadline-boundary.test.mts | apply uses original ms | Unit (memory journal) | PASS |
+| deadline-equal reject | deadline-boundary.test.mts | IDLE_EXPIRED | Unit | PASS |
+| clientDeclaredAt ignored | deadline-boundary.test.mts | spoof rejected | Unit / security | PASS |
+| X-01 fail-closed | durability-fault.test.mts | unavailable, no row | Fault (memory flag) | PASS |
+| crash before admit | durability-fault.test.mts | empty → new admit | Fault sim | PASS |
+| crash after admit | durability-fault.test.mts | same trustedReceivedAt | Fault sim | PASS |
+| idempotency payload conflict | durability-fault.test.mts | conflict | Unit | PASS |
+| timeout vs pending | durability-fault.test.mts | forfeit blocked | Unit | PASS |
+| consumer crash pending | durability-fault.test.mts | barrier + duplicate | Fault sim | PASS |
+| consumer crash after apply | durability-fault.test.mts | replay no double score | Fault sim | PASS |
+| multi-admit seq | durability-fault.test.mts | seq 1..n | Concurrency (memory lock) | PASS |
+| Case A revision CAS | concurrency-fence.test.mts | one apply / STATE_CONFLICT | Concurrency | PASS |
+| Case B duplicate | concurrency-fence.test.mts | score once | Concurrency | PASS |
+| Case C expiry vs pending | concurrency-fence.test.mts | forfeit blocked | Unit | PASS |
+| Case D H1 complete | concurrency-fence.test.mts | COMPLETED once; no FORFEITED overwrite | Unit | PASS |
+| Case E handoff | concurrency-fence.test.mts | NOT_ACTIVE_WRITER; idle unchanged | Unit | PASS |
+| Case F weekly barrier | concurrency-fence.test.mts | finalize blocked | Unit | PASS |
+| PG H1 delayed commit | postgres-journal.test.mts | apply + replay + no forfeit | **DB integration** | PASS |
+| PG concurrent seq | postgres-journal.test.mts | 20 distinct seq | **DB concurrency** | PASS |
+| PG unavailable | postgres-journal.test.mts | INGRESS_UNAVAILABLE | Fault / DB | PASS |
+| PG aborted admit | postgres-journal.test.mts | zero rows for key | Fault / DB | PASS |
+| PG Case A CAS | postgres-journal.test.mts | one mutation | **DB concurrency** | PASS |
 
-## Gate A checklist
+## Gate matrix
 
-| # | Oracle | Status |
+| Gate | Required evidence | Result |
 | --- | --- | --- |
-| 1 | Deadline −1ms | PASS |
-| 2 | Deadline equality | PASS |
-| 3 | Deadline +1ms | PASS |
-| 4 | Predeadline + postdeadline lock delay | PASS (unit + PG) |
-| 5 | Final H1 predeadline, commit after | PASS (unit + PG) |
-| 6 | Multi-instance competing admits | PASS (shared journal; not multi-host NTP) |
-| 7 | Duplicate admission / response loss | PASS |
-| 8 | Crash before durable admission | PASS |
-| 9 | Crash after durable admission | PASS |
-| 10 | Consumer crash before DB commit | PASS (journal pending barrier + duplicate retry; Nest consumer NOT_RUN) |
-| 11 | Consumer crash after commit before response | PASS (idempotent retry; Nest HTTP NOT_RUN) |
-| 12 | Database failover | NOT_RUN |
-| 13 | Clock skew / inconsistent ordering | PARTIAL (client clock ignored; multi-node NTP NOT_RUN) |
-| 14 | Timeout worker vs queued valid move | PASS |
-| 15 | Weekly snapshot + outstanding H1 | NOT_RUN (settlement module not built) |
+| A-01 | Trusted original server ingress | PASS (server clock under admit lock; client time ignored) |
+| A-02 | Durable admission persistence | PASS (Postgres journal + replay) |
+| A-03 | Deterministic command ordering | PASS (per-series advisory lock + admission_seq) |
+| A-04 | Strict deadline boundary | PASS (−1 / = / +1 ms) |
+| A-05 | Crash and restart recovery | PASS (sim + PG unavailable); **DB failover NOT_RUN** |
+| A-06 | Idempotent command admission | PASS |
+| A-07 | Timeout versus queued command | PASS |
+| A-08 | Multi-instance behavior | PARTIAL (shared PG journal + advisory locks; multi-host NTP NOT_RUN) |
+| A-09 | Active writer handoff race | PASS at fence layer; **auth/session binding Phase B** |
+| A-10 | H1 completion ordering | PASS barrier/`COMPLETED` fence; **four-category LB rows Phase C BLOCKED** |
+| A-11 | Weekly settlement barrier | PASS mechanism; **immutable snapshot publish Phase C BLOCKED** |
+| A-12 | X-01 fail-closed | PASS |
+
+## Security findings
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| S1 | P0 | Duplicate concurrent adjudication could mark `rejected` over `applied` | Fixed: conditional outcome update + `lastAppliedAdmissionId` |
+| S2 | P0 | PG `MAX(seq)+1` race without series lock | Fixed: `pg_advisory_xact_lock` |
+| S3 | P0 | `pool.connect()` failure escaped try/catch → thrown error instead of fail-closed | Fixed |
+| S4 | P1 | Memory journal alone is not durable evidence | Documented; PG tests mandatory for A-02 |
+| S5 | P1 | Writer fence without authenticated binding | Tracked for Phase B (A-09 partial) |
+| S6 | P2 | No retention/TTL policy for journal rows | Deferred |
+| S7 | P2 | No rate-limit / poisoned-command quarantine worker | Deferred |
+| S8 | P2 | Multi-region clock skew SLO unmeasured | NOT_RUN |
 
 ## Explicit non-claims
 
-- Does not mark ADR-T01 Accepted.
-- Does not implement Nest HTTP / auth / series persistence (Phase B).
-- Does not implement compensation (X-02 B deferred).
-- Does not claim production readiness or full Gate A #12/#15.
-- Does not weaken Q05/Q13 exclusive deadline semantics.
+- No ADR-T01 Acceptance.
+- No merge/deploy.
+- No Phase B start.
+- No compensation module (X-02 B).
+- No claim that 24 unit/DB tests equal production Nest readiness.

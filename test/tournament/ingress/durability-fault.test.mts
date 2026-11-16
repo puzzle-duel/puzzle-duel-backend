@@ -2,32 +2,48 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { ControllableClock } from '../../../src/tournament/ingress/clock.mts';
 import { MemoryAdmissionJournal } from '../../../src/tournament/ingress/journal.mts';
+import { MemorySeriesFenceStore } from '../../../src/tournament/ingress/series-fence.mts';
 import { SeriesCommandArbiter } from '../../../src/tournament/ingress/arbiter.mts';
 import { idleDeadlineFrom } from '../../../src/tournament/ingress/types.mts';
 
 const T0 = new Date('2026-11-16T12:00:00.000Z');
 
+async function ready(
+  clock: ControllableClock,
+  journal: MemoryAdmissionJournal,
+  fence: MemorySeriesFenceStore,
+  idleDeadlineAt = idleDeadlineFrom(T0, 300),
+) {
+  await fence.put({
+    seriesKey: 's1',
+    boardRevision: 0,
+    writerGeneration: 1,
+    status: 'ACTIVE',
+    idleDeadlineAt,
+    hardCutoffAt: null,
+    score: 0,
+    resultsPublished: false,
+    lastAppliedAdmissionId: null,
+  });
+  return new SeriesCommandArbiter(journal, fence);
+}
+
 describe('PZD-38 Gate A — durability and fault injection', () => {
   it('P38-05: fail closed when durable ingress unavailable — no fabricated accept', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock, failClosed: true });
-    const arbiter = new SeriesCommandArbiter(journal);
+    const fence = new MemorySeriesFenceStore();
+    const arbiter = await ready(clock, journal, fence);
 
-    const result = await arbiter.admitAndEvaluate(
-      {
-        seriesKey: 's1',
-        playerId: 'p1',
-        commandType: 'move',
-        idempotencyKey: 'k',
-        payloadHash: 'h',
-      },
-      {
-        seriesKey: 's1',
-        idleDeadlineAt: idleDeadlineFrom(T0, 300),
-        hardCutoffAt: null,
-        status: 'ACTIVE',
-      },
-    );
+    const result = await arbiter.admitAndEvaluate({
+      seriesKey: 's1',
+      playerId: 'p1',
+      commandType: 'move',
+      idempotencyKey: 'k',
+      payloadHash: 'h',
+      expectedBoardRevision: 0,
+      writerGeneration: 1,
+    });
 
     assert.equal(result.decision, 'unavailable');
     assert.equal(await journal.getByIdempotency('s1', 'p1', 'k'), null);
@@ -36,7 +52,6 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
   it('crash before durable admission: no row, retry creates new admission', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
-    // Simulate crash with empty durable store.
     journal.restoreSnapshot([]);
     clock.advanceMs(10);
     const admit = await journal.admit({
@@ -115,8 +130,9 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
   it('timeout worker blocked while eligible pending admission exists', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
-    const arbiter = new SeriesCommandArbiter(journal);
+    const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
+    const arbiter = await ready(clock, journal, fence, idleDeadlineAt);
 
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     const admit = await journal.admit({
@@ -128,11 +144,14 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     });
     assert.equal(admit.ok, true);
 
-    // Wall clock is past deadline, but pending timely admission remains.
     clock.set(new Date(idleDeadlineAt.getTime() + 10_000));
     const barrier = await arbiter.canSafelyForfeit('s1', idleDeadlineAt);
     assert.equal(barrier.allowed, false);
     assert.equal(barrier.blocking.length, 1);
+
+    const forfeit = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(forfeit.ok, false);
+    if (!forfeit.ok) assert.equal(forfeit.reason, 'BLOCKED_PENDING');
 
     if (admit.ok) {
       await journal.markOutcome(admit.command.admissionId, 'applied');
@@ -144,7 +163,9 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
   it('consumer crash after admit before outcome mark: pending blocks forfeit; retry is duplicate', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
+    const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
+    await ready(clock, journal, fence, idleDeadlineAt);
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
 
     const admit = await journal.admit({
@@ -155,12 +176,23 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
       payloadHash: 'h',
     });
     assert.equal(admit.ok, true);
-    // Crash before markOutcome / series commit — admission durable, outcome pending.
     const snap = journal.snapshot();
     clock.set(new Date(idleDeadlineAt.getTime() + 5_000));
     const recovered = new MemoryAdmissionJournal({ clock });
     recovered.restoreSnapshot(snap);
-    const arbiter = new SeriesCommandArbiter(recovered);
+    const recoveredFence = new MemorySeriesFenceStore();
+    await recoveredFence.put({
+      seriesKey: 's1',
+      boardRevision: 0,
+      writerGeneration: 1,
+      status: 'ACTIVE',
+      idleDeadlineAt,
+      hardCutoffAt: null,
+      score: 0,
+      resultsPublished: false,
+    lastAppliedAdmissionId: null,
+    });
+    const arbiter = new SeriesCommandArbiter(recovered, recoveredFence);
     const barrier = await arbiter.canSafelyForfeit('s1', idleDeadlineAt);
     assert.equal(barrier.allowed, false);
 
@@ -184,52 +216,54 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
   it('consumer crash after DB commit before response: retry returns applied duplicate identity', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
+    const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
+    const arbiter = await ready(clock, journal, fence, idleDeadlineAt);
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
-    const arbiter = new SeriesCommandArbiter(journal);
-    const first = await arbiter.admitAndEvaluate(
-      {
-        seriesKey: 's1',
-        playerId: 'p1',
-        commandType: 'move',
-        idempotencyKey: 'committed-h1',
-        payloadHash: 'h',
-      },
-      {
-        seriesKey: 's1',
-        idleDeadlineAt,
-        hardCutoffAt: null,
-        status: 'ACTIVE',
-      },
-    );
-    assert.equal(first.decision, 'apply');
-    const snap = journal.snapshot();
-    // Response lost; process restarts later with advanced wall clock.
-    const recovered = new MemoryAdmissionJournal({
-      clock: new ControllableClock(new Date(idleDeadlineAt.getTime() + 60_000)),
-    });
-    recovered.restoreSnapshot(snap);
-    const again = await recovered.admit({
+    const first = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
       playerId: 'p1',
       commandType: 'move',
       idempotencyKey: 'committed-h1',
       payloadHash: 'h',
+      expectedBoardRevision: 0,
+      writerGeneration: 1,
+      scoreDelta: 7,
     });
-    assert.equal(again.ok, true);
-    if (again.ok && first.decision === 'apply') {
-      assert.equal(again.command.status, 'duplicate');
+    assert.equal(first.decision, 'apply');
+    const snap = journal.snapshot();
+    const fenceSnap = await fence.get('s1');
+    const recoveredJournal = new MemoryAdmissionJournal({
+      clock: new ControllableClock(new Date(idleDeadlineAt.getTime() + 60_000)),
+    });
+    recoveredJournal.restoreSnapshot(snap);
+    const recoveredFence = new MemorySeriesFenceStore();
+    await recoveredFence.put(fenceSnap!);
+    const recoveredArbiter = new SeriesCommandArbiter(
+      recoveredJournal,
+      recoveredFence,
+    );
+    const again = await recoveredArbiter.admitAndEvaluate({
+      seriesKey: 's1',
+      playerId: 'p1',
+      commandType: 'move',
+      idempotencyKey: 'committed-h1',
+      payloadHash: 'h',
+      expectedBoardRevision: 0,
+      writerGeneration: 1,
+      scoreDelta: 7,
+    });
+    assert.equal(again.decision, 'apply');
+    if (again.decision === 'apply' && first.decision === 'apply') {
+      assert.equal(again.duplicateReplay, true);
       assert.equal(again.command.admissionId, first.command.admissionId);
-      assert.equal(
-        again.command.trustedReceivedAt.toISOString(),
-        first.command.trustedReceivedAt.toISOString(),
-      );
+      assert.equal(again.state.score, 7);
+      assert.equal(again.state.boardRevision, 1);
     }
   });
 
   it('multi-instance competing admits: one seq order, stable idempotent winner', async () => {
     const clock = new ControllableClock(T0);
-    // Shared durable store simulating multi-instance journal.
     const shared = new MemoryAdmissionJournal({ clock });
 
     const results = await Promise.all([
