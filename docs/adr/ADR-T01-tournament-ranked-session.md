@@ -13,7 +13,7 @@ Current DRAFT Blueprint excludes tournaments and provides a daily-only leaderboa
 3. **T-01 option B — latest owner-approved choice (2026-11-16), superseding prior A:** if no valid server activity is received for 300 seconds, atomically **forfeit the entire incomplete daily series**. The official claim stays spent; the player cannot resume or restart that date; no completed-day leaderboard score is awarded. Any server-verified move logs can remain for audit only. An actively played pre-cutoff series can still finish all six games after UTC rollover if it never hits the inactivity threshold. The precise valid-activity definition and race handling remain T-06. Prior A preservation/resume policy is revoked; the formerly open T-01B grace-period question is not applicable.
 4. Server replay verifies every move; clients cannot write scores. **T-02 owner-approved 2026-11-16:** publish a daily ranked result and all four category totals (Easy=E1+E2+E3, Medium=M1+M2, Hard=H1, All=Easy+Medium+Hard) **atomically only after all six subgames are completed and verified**. Incomplete/forfeited series have no daily or weekly leaderboard category scores, though their verified partial scores may be visible privately in the player's progress view. Weekly categories sum only eligible completed daily series. Practice is separate.
 5. At cutoff mark prior week settling; final snapshot only once eligible in-flight series are terminal. Maintain current and five previous weekly filters plus today's daily board; no month aggregate.
-6. On-time badge is non-scoring; exact eligibility is pending.
+6. **T-03 owner-approved (2026-11-16):** On-Time badge is earned only by a fully completed and server-verified six-game daily series whose **server-authoritative claim/start timestamp** lies inside that series' own UTC date. Finishing later does not disqualify. Retrospective series started outside their own UTC date and forfeited/incomplete series earn no badge. Badge never adds ranking points or breaks ties; award atomically/idempotently with completed-series finalization.
 
 ## Alternative considered
 - End all games at cutoff: simpler but violates owner-confirmed requirement.
@@ -33,5 +33,9 @@ Owner first selected T-01 option A (session closes, progress resumable) and then
 
 Owner approved all-or-nothing six-game daily ranking eligibility (2026-11-16). Partial scores stay private and do not affect daily, weekly or archived ranking categories. The ADR remains Proposed until other gates resolve.
 
+## T-03 product decision
+
+Owner selected option A (2026-11-16): the verified start/claim timestamp, not the completion timestamp, controls On-Time eligibility. Award badge only after complete verified series; timezone is UTC. This is owner-approved product input, while the ADR as a whole remains Proposed.
+
 ## Explicit acceptance gates
-Resolve T-03–T-10 (especially T-06) in linked Tournament V1 proposal before marking the **ADR** Accepted. No implementation/deploy permission follows from this Proposed ADR.
+Resolve T-04–T-10 (especially T-06) in linked Tournament V1 proposal before marking the **ADR** Accepted. No implementation/deploy permission follows from this Proposed ADR.
