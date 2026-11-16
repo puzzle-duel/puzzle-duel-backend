@@ -1,6 +1,6 @@
 # PZD-38 — Technical Decision Freeze Candidate
 
-Status: **PROPOSED — AWAITING OWNER REVIEW; NOT ACCEPTED**
+Status: **OWNER-ACCEPTED TECHNICAL DESIGN (TD-01…TD-18 + X-01 A + X-02 B); EXECUTABLE PROOF NOT_RUN**
 Date: 2026-11-16
 Sources: PZD-38 owner-approved Q01–Q31; Tournament V1 R-01; ADR-T01; existing PZD-38 core protocol and technical gate review on this branch.
 Scope: no development, executable test, merge or deploy. This decision bundle closes the architecture selection discussion without claiming an implementation is already proven.
@@ -28,7 +28,7 @@ Scope: no development, executable test, merge or deploy. This decision bundle cl
 | TD-17 | Compensation as separately isolated event/claim/result namespace, two distinct staff approvers, evidence-based outage causality, 72h entry and 73h finish, audit-only late upheld appeal | No normal daily/weekly scoreboard impact; event-only badge and four ranks |
 | TD-18 | OpenAPI-first stable request/response/error envelope and independent core-001.v3 + Blueprint v1.1 cross-repo release checks | Client/backend contract suite and TS/Dart golden vectors PASS before production |
 
-These are **engineering selections**, not claims of owner-approved SQL schema, journal product, full implementation or test success.
+**OWNER DECISION:** TD-01…TD-18 accepted together as the recommended architectural design. This does NOT claim that an exact SQL schema, vendor-specific journal product, implementation, runtime proof or release has been accepted.
 
 ## B. Precise temporal ordering (critical Gate A)
 
@@ -61,10 +61,10 @@ Compensation Q14–Q22 product behavior is APPROVED. Its backend incident eviden
 | C: parity/Blueprint/identity | Explicit prerequisite work packages identified | NOT_RUN: new v3 TS/Dart golden vectors, historic regression, two Blueprint changes, provider checks, stack smoke |
 | D: compensation | Owner Q14–Q22 approved; engineering design selected | NOT_RUN: incident/eligibility proof, two-staff audit, event entry/final cutoff, badge/appeal/score isolation |
 
-## Two owner-impacting decisions requiring one consolidated answer
+## Final owner resolutions (APPROVED 2026-11-16)
 
-**X-01 (rare full-ingress outage):** Approve proposed fail-closed handling when no trustworthy durable proof of a request's predeadline arrival exists, relying only on independently evidenced compensation eligibility; OR require an extra independent high-availability external receipt witness and defer launch until it is proven. Neither option silently weakens regular replay verification.
+**X-01 — ACCEPTED A:** If there is no reliable durable proof of timely server admission, **fail closed**; do not fabricate a move, receipt time, score, extra daily attempt or regular leaderboard adjustment. For verified outage-affected players, use only the separately approved evidence-based compensation event eligibility path (Q14–Q22); no automatic compensation without trustworthy causal evidence. Durable ingress, reproducible ordering and deadline proof remain mandatory for normal operations. This documented exceptional failure handling is not permission to relax Q05/Q13 when receipt evidence exists.
 
-**X-02 (release milestone):** Ship compensation functionality in the same public Tournament V1 launch; OR deliver it as a separately gated later release, without advertising unshipped functionality.
+**X-02 — ACCEPTED B:** Launch **ordinary Tournament V1 first** when its own release gates pass; implement, test and deploy the outage-compensation module in a **separately gated later release**. Do not advertise, expose UI controls for, or promise access to compensation functionality that has not shipped. Product rules Q14–Q22 remain approved, not cancelled.
 
-All other TD-01…TD-18 decisions are recommended for **batch technical sign-off** after the owner sees these two product-impacting choices. Technical design acceptance must be distinct from runtime evidence, ADR final acceptance and permission to merge/deploy.
+**Owner has explicitly batch-approved TD-01…TD-18 and both X resolutions.** Technical architecture selection is decision-complete. Runtime evidence, the independently versioned core-001.v3 contract, Blueprint migration, provider feasibility, ADR-005 smoke and release gates are still outstanding. No implementation, merge, deploy or Jira Done is authorized by this approval.
