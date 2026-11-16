@@ -1,6 +1,6 @@
 # Tournament V1 — Implementation-Ready Architecture / Decision Gate
 
-Status: **PROPOSED FOR OWNER REVIEW — NOT ACCEPTED**
+Status: **R-01 PRODUCT DECISION ACCEPTED (2026-11-16); REMAINING TECHNICAL ARCHITECTURE PROPOSED — NOT ACCEPTED**
 Date: 2026-11-16
 Tracking: [PZD-37](https://puzzle-duel-app.atlassian.net/browse/PZD-37) · [Draft PR #11](https://github.com/puzzle-duel/puzzle-duel-backend/pull/11)
 Relationship: companion to [TOURNAMENT-V1-BLUEPRINT-PROPOSAL.md](../product/TOURNAMENT-V1-BLUEPRINT-PROPOSAL.md), [ADR-T01](../adr/ADR-T01-tournament-ranked-session.md). This is a proposed **normative implementation contract**; product decisions T-01–T-10 are owner-approved, but *technical recommendations below are not automatically owner-approved*. No merge/deploy or ADR acceptance is implied.
@@ -29,18 +29,18 @@ Inspected on 2026-11-16:
 - If **no legal move remains**, the subgame successfully ends at accumulated server-replayed score and the six-game series progresses to the next ordinal (new ruleset contract, not a retroactive reinterpretation of `core-001.v2`).
 - Tournament gameplay displays a six-step E1 E2 E3 M1 M2 H1 progress bar with verified done/current/upcoming states; top/bottom placement is UAT choice.
 
-## 2. Critical ambiguity and proposed resolution: 15-minute daily close versus retroactive days
+## 2. R-01 — OWNER-APPROVED: 15-minute in-flight close versus retroactive days
 
 **REAL CONFLICT IN EARLIER PROPOSAL:** It simultaneously says Monday's leaderboard is immutable Tuesday 00:15 **and** a player may start an unplayed Monday series as late as Sunday of that same week. Both cannot hold. Likewise an assertion "no new old-day starts after midnight" is **false** for still-open-week retroactive dates; only no new **old-week** starts at Monday rollover is approved.
 
-**Proposed resolution R-01 (requires explicit owner sign-off):**
+**R-01 — OWNER-APPROVED 2026-11-16 (confirmed explicitly, preserving T-03 On-Time):**
 1. **15 minutes limits only a series that was already in progress across an ordinary day boundary**. A Monday session claimed Monday 23:59 must finish by Tuesday 00:15 (or 300s idle earlier), otherwise forfeits. It does not block **new** Monday-backfill claims created on Tuesday–Sunday of the same open UTC week. For a backfilled Monday game claimed Tuesday 10:00, the day-specific 00:15 deadline has already elapsed and **must not** be applied retroactively; its eligibility instead ends on Monday of the *following* UTC week (subject to the 300s inactivity and weekly rollover window only if claimed before the next Monday 00:00). This applies to all dates of the week consistently.
 2. Daily ranking for a date is **LIVE/PROVISIONAL during the whole enclosing UTC week** and may change when completed backfill series post. The 00:15 deadline **settles only the over-midnight in-flight cohort**, NOT the date's final leaderboard. A date's **FINAL immutable rank snapshot** is taken only after the enclosing week settles. Any daily “closed for On-Time” indicator must not be misrepresented as “final ranking.”
 3. Monday 00:00 weekly cutoff forbids **new claims for every previous-week date**. It permits all already-claimed old-week series to finish by Monday 01:00 (Türkiye 04:00), provided none has idled for 300s. All daily category scores and the weekly aggregation for that week finalize together after the last accepted write at/before that hard deadline has settled.
 4. Boundary policy proposal: `server_received_at < hard_deadline` (strict), `server_received_at < last_valid_activity_at + 300s` (strict). Exact boundary (00:15:00.000 and 01:00:00.000) is **expired**, not eligible. The old claim must exist before Monday 00:00; claim at exactly Monday 00:00 belongs to a new-week date only.
 5. Example: UTC Monday Nov 16 23:58 → Tuesday Nov 17 00:03 completion valid for Nov 16; at Tuesday 00:16 an **already-running** Nov 16 claim cannot finish, but a *new* never-claimed Nov 16 backfill can still be started on Tuesday and successfully scored into Nov 16. Previous week's Monday after following Monday 00:00 can **never** receive a new claim.
 
-**Do not Accept ADR-T01 until R-01 is explicitly approved**: the older language calling a normal daily ranking immutable at 00:15 must be superseded and cross-repo UI/API expectations reconciled. This is a product-observable behavior, not an invisible implementation detail.
+**R-01 acceptance consequence:** the older language calling a daily ranking immutable at 00:15 is **superseded**. 00:15 is an already-running previous-day series' deadline, not final leaderboard settlement. A day's ranking remains provisional through its containing UTC week and finalizes after that week's Monday 01:00 cutoff and accepted writes settle. On-Time (T-03) remains independent: a series started within its OWN UTC date and subsequently successfully completed earns the badge; retrospectively started series do not, even when both contribute identically to rankings. Other technical architecture gates remain PROPOSED; ADR-T01 is not yet Accepted.
 
 ## 3. Proposed canonical data model and consistency
 
@@ -185,7 +185,7 @@ Current **both** `BLUEPRINT.md` files are unchanged **DRAFT v1.0** and currently
 | G05 | Valid move at t=299.999s survives; t=300.000s forfeits; automatic heartbeat at t=299s cannot extend; spam taps do not extend |
 | G06 | Crash/GET reconnect at t=299s does not reset clock; legal move under deadline resumes same cursor; after deadline is terminal |
 | G07 | Two devices submit same/stale move concurrently: one canonical transition, no lost revision, no double points |
-| G08 | Ordinary day crossing: prior-date in-flight 00:14:59 valid; 00:15:00 expired; later new prior-date backfill **within same UTC week** is permitted under R-01 (if accepted) |
+| G08 | Ordinary day crossing: prior-date in-flight 00:14:59 valid; 00:15:00 expired; later new prior-date backfill **within same UTC week** is permitted under OWNER-APPROVED R-01 |
 | G09 | Monday 00:00 prohibits new old-week claim; already claimed Sunday or any old-week date completes by 00:59:59; at 01:00:00 expires |
 | G10 | Monday 00:15 daily limit does not override approved weekly 01:00 previous-week completion deadline |
 | G11 | Backfilled day completion modifies original UTC day and enclosing provisional week, not today's scores; archived final data unchanged |
@@ -207,7 +207,7 @@ Current **both** `BLUEPRINT.md` files are unchanged **DRAFT v1.0** and currently
 
 | ID | Proposed resolution / next artifact | Approval owner |
 | --- | --- | --- |
-| **R-01** | 15m = in-flight midnight crossover only; day ranking provisional until enclosing weekly close because backfill remains allowed | **Product owner (material behavior)** |
+| **R-01 — ACCEPTED 2026-11-16** | 15m = in-flight midnight crossover only; day ranking provisional until enclosing weekly close because backfill remains allowed; On-Time based on series' own UTC start date | **Owner approved; no further product gate** |
 | **S-01** | Limit valid activity to legal moves + reviewed purposeful UI actions with finite anti-spam extension allowance | Product owner + security |
 | **S-02/S-03** | Strict server-received deadlines; locked atomic verification; identical retry response; reconnect only while active | Architecture/security gate |
 | **L-01** | `RANK()`, stable internal ID display ordering, revision-bound cursor, page 50/max100 | Architecture gate |
@@ -223,7 +223,7 @@ Do **not** mark ADR-T01 Accepted or alter `BLUEPRINT.md` without review of the n
 1. Engine rules v3 schema + cross-runtime parity fixtures and CI hard gate (E-01).
 2. Identity adapters, sign-in linking conflict handling, authenticated player model, privacy (I-01).
 3. Daily manifest publication, atomic E1 claim, serialized move/terminal ledger, inactivity + reconnect state machine (S-01/02/03).
-4. UTC period boundaries and backfill semantics R-01; transactional daily/weekly projections; immutable archive L-01/A-01.
+4. UTC period boundaries and owner-approved backfill semantics R-01; transactional daily/weekly projections; immutable archive L-01/A-01.
 5. Flutter Practice/ Tournament/ Leaderboard UI, six-step progress bar, accessible error/forfeit states.
 6. End-to-end adversarial, load, clock-boundary, multi-device tests G01–G22; on-device UAT; release/runbook only after infrastructure PZD-12 host decision.
 
