@@ -1,6 +1,9 @@
 # ADR-T01 — Tournament time, attempt ownership and ranked truth
 
-Status: **PROPOSED — NOT ACCEPTED**
+> **Implementation-ready architecture review (2026-11-16):** [TOURNAMENT-V1-IMPLEMENTATION-READY-ARCHITECTURE.md](../architecture/TOURNAMENT-V1-IMPLEMENTATION-READY-ARCHITECTURE.md) includes proposed DB/API/security/state machine/contracts and 22 acceptance tests. **Important unresolved product-visible conflict R-01:** prior text saying a daily leaderboard becomes FINAL at UTC 00:15 contradicts owner-approved retroactive play of that day later in the current week. The reviewed proposal recommends using 15 minutes only for *already-active previous-day series crossing midnight* and keeping the daily ranking PROVISIONAL until the containing week finally closes. This resolution is a **new proposal needing explicit owner acceptance**; it does NOT silently amend T-07. Do not mark this ADR or overall Blueprint Accepted solely because this document exists. 
+
+
+Status: **PROPOSED — NOT ACCEPTED** (implementation-ready companion review exists; R-01 and other technical gates remain unresolved)
 Date: 2026-11-16
 Related: Tournament V1 Blueprint Change Proposal; original DRAFT BLUEPRINT.md; PZD-10 PD-01..PD-13; GEN-01..07 Accepted; ADR-001 Accepted.
 
