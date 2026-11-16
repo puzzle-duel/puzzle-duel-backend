@@ -35,6 +35,7 @@ Source-of-truth precedence: owner statements > Accepted ADRs; existing cross-rep
 - Archived week selector: last week, 2, 3, 4 and 5 weeks ago, each with same four category filters. **No monthly aggregate and no all-time aggregate.** Archive stable after settlement.
 - Day attribution never moves due to a later completion or backfill. Historical leaderboards display original UTC dates. Rank/identity/avatar privacy must be handled in a separate approved UX/security spec.
 - On-time badge visible as a non-scoring indicator. Display logic must be derivable from server-verified timestamps.
+- **T-05A OWNER-APPROVED (2026-11-16):** apply **competition ranking** independently to each leaderboard filter (daily/weekly/archived × All/Easy/Medium/Hard). Players with identical verified aggregate points share the same rank; the next rank skips the number of tied positions (e.g. scores 500,500,450 → ranks 1,1,3). On-Time badge, finish/start timestamps and completion order **do not** break ties. UI may use a deterministic non-ranking secondary order for stable display/pagination; the precise order and pagination contract remain open.
 
 ## 2. Architecture and trust boundaries
 
@@ -52,7 +53,7 @@ Cross-repo TypeScript/Dart generation and resolution parity on `gen-001.v1` / `c
 - `move_events`: unique (series_game_id, monotonically increasing sequence); canonical input, validation/replay result, idempotency key/digest; never allow two different commands for one sequence.
 - `daily_scores`: unique (player_id,utc_date); 3 category aggregates + all, posted only when series completion is authorized and replay verified.
 - `weekly_scores`: unique (player_id,week_start); transactional projection (or reliable derived query), category totals, version/updated_at.
-- `weekly_archive`: finalized snapshot with stable ordering and tie-break contract.
+- `weekly_archive`: finalized snapshot retains each player's verified score and **competition rank** (ties share rank; following positions skipped). Stable row display ordering/pagination to be specified separately; never alter rank using a secondary sort.
 - `practice_bests`: player/local-profile origin, difficulty, score, update/version; not shared into ranked ledger.
 
 ### Suggested transport outline (not endpoint approval)
@@ -76,7 +77,7 @@ Cross-repo TypeScript/Dart generation and resolution parity on `gen-001.v1` / `c
 ## 4. Ranking math and test vectors (proposed proof cases)
 
 Example player completes day 1 with E1=100,E2=200,E3=300,M1=400,M2=500,H1=600: Easy=600, Medium=900, Hard=600, All=2100. Week aggregate is per-day category sum; unplayed days = 0. Completing day 1 at next week's 00:03 UTC still updates old week while it is settling.
-Compare separate player who completed same challenge on its day; equal gameplay scores produce equal ranking points irrespective of on-time badge.
+Compare separate player who completed same challenge on its day; equal gameplay scores produce **the same competition rank** irrespective of On-Time badge, start/finish order, or completion timestamp. Example 500,500,450 yields ranks **1,1,3**, not 1,2,3 or 1,1,2.
 
 Mandatory regression cases:
 1. Two players same UTC day → identical six manifest hashes; all seeds/configs/version pinned.
@@ -93,6 +94,7 @@ Mandatory regression cases:
 12. Dates near leap year/month/year crossover, five archived weeks, DST irrelevant under UTC.
 13. Rank filters category All/Easy/Medium/Hard mutually consistent, no practice contamination.
 14. Sound/animation/network loss never changes canonical rule outcome.
+15. Same verified scores in daily/weekly/archived and every category result in shared competition rank (500/500/450 => 1/1/3); On-Time badge and submit time never alter rank. Deterministic display order may be used only within tied rows.
 
 ## 5. Implementation order (proposed Jira epic and scoped tickets)
 
@@ -110,7 +112,7 @@ All work feature branches + PRs, CI, no merge or deploy without new authorizatio
 **T-02 — OWNER-APPROVED (2026-11-16):** leaderboard displays **only fully completed and verified six-game daily series**; subgame/partial scores are visible only to their player inside tournament progress and are excluded from **all four** daily and weekly ranking category filters. Publish all four category totals atomically on completed-series finalization; failed/forfeited series cannot enter leaderboards.
 **T-03 — OWNER-APPROVED (2026-11-16):** On-Time badge eligibility uses the server-authoritative **daily-series start/claim timestamp**, which must fall within the series' own UTC date. Award only after all six subgames are completed and verified; late finish is allowed. A series started retrospectively on a different UTC date or forfeited on timeout receives no badge. The badge is non-scoring and cannot break leaderboard ties.
 **T-04 — OWNER-APPROVED PRODUCT RULE (2026-11-16):** **a verified social login is mandatory for tournament**, while practice remains usable anonymously/offline. Requested login provider set: **Apple, Google, Instagram, Facebook, TikTok and X (Twitter)**. All verified identities map to one server-owned Puzzle Duel `player_id`; linked providers cannot yield extra attempts. **Feasibility/launch approval remains OPEN per provider**, particularly Instagram personal consumer accounts (Meta's documented Instagram Login is professional-account oriented) and X developer OAuth app/access/pricing. TikTok Login Kit officially supports iOS/Android. No fallback to unauthenticated ranked claims if a provider is unavailable; show only usable, reviewed buttons. Server-side code/token verification, provider-subject uniqueness, OAuth state/PKCE/nonce where applicable, privacy-minimal scopes, Apple store review/sign-in requirements, account link/unlink, deletion and recovery need detailed design. The platform's separate providers are login methods, not a blanket guarantee they can merge unverified accounts; linking requires explicit secure proof of both identities.
-**T-05** Ranks ties (equal rank vs deterministic server tie-break), page size, archived-week immutable snapshot and late data reconciliation.
+**T-05A — OWNER-APPROVED (2026-11-16):** all daily, current weekly and archived weekly leaderboards, across All/Easy/Medium/Hard, use **competition ranking**: equal verified score = equal rank, next rank skips tied positions (1,1,3). On-Time badge, timing and completion order do not affect ranking. **T-05B — OPEN technical detail:** stable display ordering of tied rows, pagination/page size, and archived-week immutable snapshots/late data reconciliation; these cannot change competition ranks.
 **T-06** Valid activity rule for 5-minute liveness (authenticated move vs server-approved limited heartbeat), session concurrency, disconnected device and resume policy.
 **T-07** Weekly archive display while settling; historic period retention beyond five visible weeks.
 **T-08** Daily-series six-round atomic claim vs subgame claims, resume after crash, and whether old-week series may legitimately remain active indefinitely while moving.
@@ -140,6 +142,10 @@ Official external references reviewed 2026-11-16:
 - Meta Instagram IG User: https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/v21.0/ (professional Creator/Business)
 - X OAuth developer integration: https://docs.x.com/ ; provider/app access, approval and current pricing must be checked before enabling X Sign In.
 - Apple App Review §4.8 and account deletion obligations: https://developer.apple.com/app-store/review/guidelines/
+
+## T-05A owner decision (recorded 2026-11-16)
+
+Owner selected option A for ranking ties. Use **competition ranking** (`rank = 1 + count(players with strictly greater verified score)`), with equal score producing equal rank and subsequent numbers skipped. Example A=500, B=500, C=450 → A=#1, B=#1, C=#3. This applies independently to each daily/weekly/archived time period and difficulty category. No On-Time, timestamp or first-to-score advantage, including when archived. A stable deterministic sort of equally ranked rows may aid pagination but is **not a ranking tie-break**. Exact stable sort, pagination and archived-finalization conflict semantics remain T-05B open.
 
 ## 7. Acceptance state
 
