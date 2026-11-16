@@ -37,5 +37,9 @@ Owner approved all-or-nothing six-game daily ranking eligibility (2026-11-16). P
 
 Owner selected option A (2026-11-16): the verified start/claim timestamp, not the completion timestamp, controls On-Time eligibility. Award badge only after complete verified series; timezone is UTC. This is owner-approved product input, while the ADR as a whole remains Proposed.
 
+## T-04 provider expansion request (not blanket approval)
+
+Owner requested Apple, Google, Instagram, Facebook and TikTok login options (2026-11-16). Architecture proposal: provider-agnostic OAuth/OIDC identity adapters map verified provider-specific subject identifiers to one internal server player ID; linked providers **do not** create extra tournament entry rights. Existing Apple/Google and Facebook user login paths can be assessed for implementation; TikTok Login Kit supports iOS/Android OAuth according to https://developers.tiktok.com/docs/en/login-kit-overview. **Instagram personal-account login is not established by the documented professional Instagram API** (https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/v21.0/). Treat Instagram consumer login as feasibility/app-review gate, not guaranteed. Backend code exchange, state/nonce/PKCE, token validation, least privilege, account linking conflicts, revocation, deletion and auth UI compliance require detailed ADR/security approval. Guest ranked eligibility remains open.
+
 ## Explicit acceptance gates
 Resolve T-04–T-10 (especially T-06) in linked Tournament V1 proposal before marking the **ADR** Accepted. No implementation/deploy permission follows from this Proposed ADR.
