@@ -1,0 +1,16 @@
+# Disposable PostgreSQL 18 for PZD-38 Phase A ingress proofs only.
+# Not a production deploy unit. Do not use for host ADR-001 claims.
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: pzd
+      POSTGRES_PASSWORD: pzd
+      POSTGRES_DB: pzd_ingress
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pzd -d pzd_ingress"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
