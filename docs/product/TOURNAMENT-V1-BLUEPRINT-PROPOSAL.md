@@ -17,7 +17,7 @@ Source-of-truth precedence: owner statements > Accepted ADRs; existing cross-rep
 - Online and authenticated/server-identified, ranked-only; no offline start or offline submission.
 - Each tournament UTC date has the same **six versioned fixed challenges for all players**, executed in order: E1,E2,E3,M1,M2,H1. Identical challenge inputs and generator/rules versions, not identical downstream boards after different player moves.
 - One official completion of each daily series per player; no replay to improve rank. Resume *the same* claimed series where allowed, not a new attempt. Official claim occurs at server-authorized series start; each subgame is also individually immutable once started. Atomic uniqueness and idempotent retries mandatory.
-- Daily score groups: Easy=E1+E2+E3; Medium=M1+M2; Hard=H1; All=Easy+Medium+Hard. A completed daily series contributes those four totals; no points from practice. A partially completed series is NOT yet a completed daily leaderboard score (**recommendation requiring owner approval**, see Open Decisions).
+- Daily score groups: Easy=E1+E2+E3; Medium=M1+M2; Hard=H1; All=Easy+Medium+Hard. A completed daily series contributes those four totals; no points from practice. **T-02 OWNER-APPROVED:** scores from an incomplete daily six-game series must **never appear in the daily or weekly competitive leaderboards**. The player may see verified partial/subgame scores only in their own progress screen. A daily score for Easy, Medium, Hard and All is published atomically only after E1,E2,E3,M1,M2,H1 are all finished and independently verified. Timeout forfeit contributes no daily category score.
 - Players may start previously unplayed daily series from any date of the **currently open UTC week** until that week's cutoff. Series still unfinished may be resumed per authorized lifecycle. A series completed after its date carries the score to its original date.
 - Playing a series during its own calendar date can earn an 'On-Time' badge; badge must **never add ranking points or affect tie-breaking by default**. Exact issue criterion remains a decision gate (start vs complete on date).
 - A server receives authoritative validated move events; client scores are never trusted. Each move is checked by deterministic server replay under the challenge's pinned rules/generator versions.
@@ -107,7 +107,7 @@ All work feature branches + PRs, CI, no merge or deploy without new authorizatio
 ## 6. Decision gate — NOT YET APPROVED
 
 **T-01 — OWNER-APPROVED OPTION B (LATEST, 2026-11-16; SUPERSEDES A):** after 300 seconds without valid server activity, **forfeit the entire incomplete daily series**, permanently consume that day's official entry, deny any resume/retry, and award no completed-day leaderboard score. Prior option A (preserve-and-resume) is explicitly superseded. **T-01B — NOT APPLICABLE:** no post-week-cutoff resume grace exists after forfeiture; a series that stays actively played without a 300-second inactivity gap may still finish after rollover. Valid-activity definition and atomic race outcomes remain T-06.
-**T-02** Partial score visibility during six-game series: leaderboard only complete series (recommended) vs per-finished-subgame partial rows.
+**T-02 — OWNER-APPROVED (2026-11-16):** leaderboard displays **only fully completed and verified six-game daily series**; subgame/partial scores are visible only to their player inside tournament progress and are excluded from **all four** daily and weekly ranking category filters. Publish all four category totals atomically on completed-series finalization; failed/forfeited series cannot enter leaderboards.
 **T-03** On-Time badge defined by series **start** within own UTC date vs completion within own date; user approved badge concept, not exact timestamp gate.
 **T-04** Exact user identity requirement for official tournament (Apple/Google login vs secure anonymous server account + later linking).
 **T-05** Ranks ties (equal rank vs deterministic server tie-break), page size, archived-week immutable snapshot and late data reconciliation.
@@ -121,6 +121,10 @@ Do not turn any recommended choice into Accepted without explicit owner approval
 ## T-01 decision history — latest owner selection is B (2026-11-16)
 
 Owner initially chose A (timeout closes session, same-series resume), then **explicitly changed to B**: after five minutes of inactivity, the incomplete **daily series right is forfeited**; no completed-day leaderboard score is added. Option A is superseded and must not govern implementation. This does **not** change the existing weekly rollover exception for a pre-cutoff daily series actively playing all six subgames after cutoff without timing out. The old T-01B question about a post-timeout old-week resume limit is no longer applicable. T-06 remains open for what server-received event counts as valid activity and how to adjudicate cutoff/timeout/finish races.
+
+## T-02 owner decision (recorded 2026-11-16)
+
+Owner explicitly approved the recommendation: a six-game daily tournament series is **all-or-nothing for ranking eligibility**. No partial Easy/Medium/Hard or All entries appear on leaderboards before all six games have been independently validated and completed. During play, verified subgame scores can be shown privately to the player as progress; on completion, the four aggregates are inserted/updated atomically. Idempotent finalization and no leaderboard leakage from forfeited series are required tests.
 
 ## 7. Acceptance state
 
