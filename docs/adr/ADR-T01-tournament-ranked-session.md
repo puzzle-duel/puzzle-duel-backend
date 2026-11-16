@@ -10,7 +10,7 @@ Current DRAFT Blueprint excludes tournaments and provides a daily-only leaderboa
 ## Proposed decision
 1. UTC half-open week [Mon 00:00, following Mon 00:00). One immutable published six-challenge manifest per UTC date, all players identical and deterministic under pinned `gen-001.v1` + `core-001.v2` or later explicitly accepted versions.
 2. A single server-issued authenticated official `daily_series` claim per player/day, unique and idempotent. Claim timestamp from server DB is authoritative. A claim before weekly cutoff can advance through all six games after the cutoff while session remains valid. New claims for old dates denied at cutoff.
-3. **T-01A owner-approved 2026-11-16:** inactivity measured from last valid server-received activity; after 300 seconds, terminate the active **session**, but preserve the same official daily-series claim, all verified completed subgames and the replay cursor, so the player may resume the same series without a second attempt. Valid activity definition remains T-06. **T-01B (OPEN):** exact post-week-close resumption deadline and settlement rules. Neither forfeiture nor unlimited post-cutoff continuation has been authorized.
+3. **T-01 option B — latest owner-approved choice (2026-11-16), superseding prior A:** if no valid server activity is received for 300 seconds, atomically **forfeit the entire incomplete daily series**. The official claim stays spent; the player cannot resume or restart that date; no completed-day leaderboard score is awarded. Any server-verified move logs can remain for audit only. An actively played pre-cutoff series can still finish all six games after UTC rollover if it never hits the inactivity threshold. The precise valid-activity definition and race handling remain T-06. Prior A preservation/resume policy is revoked; the formerly open T-01B grace-period question is not applicable.
 4. Server replay verifies every move; clients cannot write scores. Daily All=3 Easy+2 Medium+1 Hard; weekly categories are sums across up to seven completed day series. Practice is separate.
 5. At cutoff mark prior week settling; final snapshot only once eligible in-flight series are terminal. Maintain current and five previous weekly filters plus today's daily board; no month aggregate.
 6. On-time badge is non-scoring; exact eligibility is pending.
@@ -25,9 +25,9 @@ Current DRAFT Blueprint excludes tournaments and provides a daily-only leaderboa
 ## Consequences
 Backend needs locked series ledger and verified replay with cross-runtime parity; cutover requires reliable clock/expiration and anti-fraud controls; legacy MVP scope requires amended blueprint/acceptance; score revisions during settling require provisional status.
 
-## Owner-approved partial decision and still-open boundary
+## Owner decision history and unresolved technical boundary
 
-T-01A accepted as a **product rule** in the owner conversation: timeout closes the session, not the official attempt; verified series progress survives. This does not approve T-01B or the broader architecture. The related model requires independent durable series state and expiring transport/session leases. The old-week FINAL transition requires a bounded resolution of any suspended previous-week series; do not silently finalize while outstanding results can still legitimately arrive.
+Owner first selected T-01 option A (session closes, progress resumable) and then **explicitly replaced it with option B** (after five minutes inactivity, the unfinished daily series is forfeited, with no leaderboard completed-day score and no replay entitlement). The latest B decision is the binding **product input** for this draft. Former T-01B grace-period extension is no longer applicable. T-06 still requires a definition of valid server activity and atomic racing completion versus timeout. The ADR as a whole remains Proposed.
 
 ## Explicit acceptance gates
-Resolve T-01B and T-02–T-10 in linked Tournament V1 proposal before marking the **ADR** Accepted. No implementation/deploy permission follows from this Proposed ADR.
+Resolve T-02–T-10 (especially T-06) in linked Tournament V1 proposal before marking the **ADR** Accepted. No implementation/deploy permission follows from this Proposed ADR.
