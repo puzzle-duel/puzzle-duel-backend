@@ -26,7 +26,7 @@ Source-of-truth precedence: owner statements > Accepted ADRs; existing cross-rep
 - One global UTC calendar; day changes at 00:00:00 UTC (Türkiye 03:00). Week is Monday 00:00 UTC inclusive through next Monday 00:00 UTC exclusive.
 - At week rollover: **no new daily series belonging to the old week can be started.** Already started daily series of the old week is allowed to finish **all six subgames** after rollover while server session remains valid; not merely the currently active subgame.
 - Example (calendar corrected): days 1 Mon…7 Sun of a week; player starts day-1 Monday series on **day 8 Mon 02:58 Türkiye** (=day 7 Sun 23:58 UTC), finishes **day 8 Mon 03:03 Türkiye** (=day 8 Mon 00:03 UTC). Only day-1 series gets a completed score on old week's board; days 2–7 never become newly playable in the closed week. The date assigned to score is **day 1**, not completion date.
-- **Five-minute inactivity rule:** if no valid activity reaches the server for 300 seconds, active session is terminated; the timer is rolling from last accepted server activity, not a fixed five-minute grace period after midnight. A client heartbeat that is not credible player activity must not keep a series alive indefinitely (technical security gate). Server receives activity at server receipt time; client clock is untrusted.
+- **Five-minute inactivity rule (T-01A, owner-approved 2026-11-16):** if no valid activity reaches the server for 300 seconds, the **active session** terminates, but the server-verified move cursor, completed subgames and the same official daily-series entitlement remain preserved. The player may resume that **same claimed series** later, subject to a separately approved post-week-cutoff resume limit. Do not create an additional attempt, reset earned progress, silently forfeit the daily series, or award unverified/partial leaderboard points. The timer is rolling from last accepted server activity, not a fixed five-minute grace period after midnight. A client heartbeat that is not credible player activity must not keep a series alive indefinitely (T-06). Server receipt time is authoritative; client clock is untrusted.
 - Old-week ranking remains provisional while valid old-week sessions are in flight; finalize when they end and validated results are applied. Archive immutable finalized weekly results thereafter.
 
 ### Leaderboards
@@ -67,7 +67,7 @@ Cross-repo TypeScript/Dart generation and resolution parity on `gen-001.v1` / `c
 ## 3. Week closing state machine / concurrency
 
 - At UTC Monday 00:00, mark old week **settling**, disallow new claims of any of its dates, allow only established valid series to continue.
-- Every active old-week series has a server-maintained last_valid_activity_at. If 300 seconds elapse without valid activity, terminate its session according to timeout semantics. **What happens to incomplete daily series after timeout is not approved**; never silently award partial completed-day leaderboard score.
+- Every active old-week series has a server-maintained last_valid_activity_at. If 300 seconds elapse without valid activity, terminate **only the active session**; preserve the already-claimed official daily series and verified progress (owner-approved T-01A). Resuming is allowed on the same series, but **post-week-cutoff resume eligibility/deadline is UNRESOLVED**, so a closing week cannot be considered fully settled until a bounded policy is approved. Never silently award partial completed-day leaderboard points.
 - A completion request racing cutoff is adjudicated from a securely recorded server-side **series claim start time**, plus current authenticated session validity and replay history, under a transactional lock. Device timestamp cannot backdate start.
 - Claim at exactly 00:00 UTC falls in new week; earlier than cutoff belongs to previous UTC week. Use half-open UTC intervals. Concurrent claim calls resolve into at most one official series; retries return same series.
 - Old week becomes **final** only after all eligible started series are completed or expired and all transactionally accepted score updates are reflected. Archive last five finalized weeks for browsing; retention beyond UI is an independent policy.
@@ -85,7 +85,7 @@ Mandatory regression cases:
 4. Start Sunday 23:59:59.999 UTC → continue all six subgames after Monday 00:00, score old week's requested daily slot.
 5. Start exactly Monday 00:00 UTC for a prior-week date → denied.
 6. After rollover, cannot open any other old-week date, even if old-week series remains in progress.
-7. 299 seconds since last *valid* server event → active; 300 seconds without → timed out under approved boundary.
+7. 299 seconds since last *valid* server event → active; 300 seconds without → **session** timed out while same daily-series entitlement and replay-verified progress remain durable; no new attempt. Post-cutoff resumption requires T-01B.
 8. Owner example: Sunday 23:58 UTC begins prior Monday series; Monday 00:03 UTC completes; only that Monday scored; Tuesday–Sunday missed.
 9. Backfill on Sunday updates original day's daily category ranks and same-week aggregate only.
 10. Move replay malformed/fraudulent/client scoreboard mismatch, account-link spoof, stale/duplicate/parallel commands → fail closed.
@@ -106,7 +106,7 @@ All work feature branches + PRs, CI, no merge or deploy without new authorizatio
 
 ## 6. Decision gate — NOT YET APPROVED
 
-**T-01** Incomplete daily series after inactivity/session expiry: resume same series later vs permanent forfeit; and whether completion after weekly cutoff is allowed following timeout.
+**T-01A — OWNER-APPROVED (2026-11-16):** 300 seconds of inactivity terminates the current session **without forfeiting** the same claimed daily series or verified progress; the player may resume that same series, not claim a fresh attempt. **T-01B — OPEN:** explicit maximum time/conditions for resuming the old-week series after weekly cutoff, and the resulting finite settling/archive rule.
 **T-02** Partial score visibility during six-game series: leaderboard only complete series (recommended) vs per-finished-subgame partial rows.
 **T-03** On-Time badge defined by series **start** within own UTC date vs completion within own date; user approved badge concept, not exact timestamp gate.
 **T-04** Exact user identity requirement for official tournament (Apple/Google login vs secure anonymous server account + later linking).
@@ -117,6 +117,10 @@ All work feature branches + PRs, CI, no merge or deploy without new authorizatio
 **T-09** Existing DRAFT daily-only MVP/PD-03 changes to Tournament V1 scope, exact delivery milestone and coexistence with legacy daily challenge.
 **T-10** Terminal edge cases not accepted under core-001.v2 early-board-full empty piece stream; block competitive publication until replay-safe policy approved.
 Do not turn any recommended choice into Accepted without explicit owner approval.
+
+## T-01A owner decision (recorded 2026-11-16)
+
+Owner explicitly selected option A: after 5 minutes of inactivity, close the active connection/session but preserve the daily-series entitlement and all server-verified progress for continuation of the **same** daily series. Do not translate timeout into an automatic forfeit; do not reset the six-game sequence or permit a second official claim. The limit for resuming after UTC week closure remains **T-01B PROPOSED/OPEN**. No automatic infinite settlement or permission for completed-but-unverified scores.
 
 ## 7. Acceptance state
 
