@@ -3,7 +3,7 @@
 > **Implementation-ready architecture review (2026-11-16):** [TOURNAMENT-V1-IMPLEMENTATION-READY-ARCHITECTURE.md](../architecture/TOURNAMENT-V1-IMPLEMENTATION-READY-ARCHITECTURE.md) includes proposed DB/API/security/state machine/contracts and 22 acceptance tests. **R-01 OWNER-APPROVED 2026-11-16:** 15-minute grace applies only to **already-running previous-day series crossing midnight**; previously unplayed days may still be started retrospectively in the same open UTC week. Their daily leaderboards remain **PROVISIONAL** until weekly settlement, and the enclosing week's daily and weekly scores become FINAL together after Monday 01:00 UTC and accepted writes settle. T-03 On-Time eligibility stays based on the player's own-date server-verified E1 start, never the time of score submission. Do not mark this ADR or overall Blueprint Accepted solely because this document exists. 
 
 
-Status: **PROPOSED — NOT ACCEPTED** (R-01 product rule now owner-approved; remaining architecture/security/engine gates unresolved)
+Status: **Proposed — NOT ACCEPTED** (R-01 product rule now owner-approved; remaining architecture/security/engine gates unresolved)
 Date: 2026-11-16
 Related: Tournament V1 Blueprint Change Proposal; original DRAFT BLUEPRINT.md; PZD-10 PD-01..PD-13; GEN-01..07 Accepted; ADR-001 Accepted.
 
