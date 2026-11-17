@@ -88,5 +88,14 @@ jobs:
                   sys.exit(f'{field}={count} is unacceptable')
           print('Stage E PASS, FAIL=0, SKIP=0')
           PY
-      - name: Core-001.v3 replay regression
+      - name: Fetch public pinned client generator fixtures (historical contract)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: puzzle-duel/puzzle-duel-client
+          ref: 946f015a5124d1a9dfd6f3440cc916b9eb1789f8
+          path: puzzle-duel-client
+          persist-credentials: false
+      - name: Core-001.v3 replay regression (including generator vectors)
+        env:
+          PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
