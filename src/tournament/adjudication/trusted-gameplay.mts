@@ -88,6 +88,7 @@ export type TrustedGameplayDecision =
         | 'IDLE_EXPIRED'
         | 'HARD_CUTOFF_EXPIRED'
         | 'SERIES_TERMINAL'
+        | 'SERIES_STATE_CORRUPT'
         | 'STATE_CONFLICT'
         | 'NOT_ACTIVE_WRITER'
         | 'STALE_WRITER'

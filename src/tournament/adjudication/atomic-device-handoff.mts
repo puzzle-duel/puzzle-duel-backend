@@ -1,5 +1,5 @@
 /**
- * P0-F11 / P0-F12 / P1-F15 — atomic device handoff unit-of-work.
+ * P0-F11 / P0-F12 / P1-F15 / P1-R01 / P1-R02 — atomic device handoff unit-of-work.
  *
  * Fail-closed authorization: only the session that currently owns the writer
  * binding may hand off. Caller must present expectedWriterGeneration (observed).
@@ -8,7 +8,8 @@
  *
  * One TX under series advisory lock:
  * admission FOR UPDATE → writer FOR UPDATE + CAS → fence FOR UPDATE →
- * snapshot writer_generation → writer row update → immutable outcome.
+ * snapshot writer_generation (exactly one row) → writer row update →
+ * immutable outcome (exactly one pending→final row).
  */
 import type pg from 'pg';
 import { seriesAdvisoryKeys } from '../ingress/series-fence.mts';
@@ -53,6 +54,15 @@ function mapFence(row: Record<string, unknown>): SeriesFenceState {
   };
 }
 
+function requireOneRow(
+  res: pg.QueryResult,
+  code: 'SNAPSHOT_INTEGRITY' | 'ADMISSION_OUTCOME_INTEGRITY' | 'WRITER_INTEGRITY' | 'FENCE_INTEGRITY',
+): void {
+  if (res.rowCount !== 1) {
+    throw new Error(code);
+  }
+}
+
 export class AtomicDeviceHandoffUnitOfWork {
   readonly #pool: pg.Pool;
   constructor(pool: pg.Pool) {
@@ -85,7 +95,8 @@ export class AtomicDeviceHandoffUnitOfWork {
         await client.query('ROLLBACK');
         return { decision: 'reject', reason: 'SERIES_TERMINAL' };
       }
-      if (String(adm.rows[0].outcome) === 'applied' && adm.rows[0].result_json) {
+      const outcome = String(adm.rows[0].outcome);
+      if (outcome === 'applied' && adm.rows[0].result_json) {
         const result = freezeAdmissionResult(
           typeof adm.rows[0].result_json === 'string'
             ? JSON.parse(adm.rows[0].result_json)
@@ -103,7 +114,7 @@ export class AtomicDeviceHandoffUnitOfWork {
           duplicateReplay: true,
         };
       }
-      if (String(adm.rows[0].outcome) === 'rejected' && adm.rows[0].result_json) {
+      if (outcome === 'rejected' && adm.rows[0].result_json) {
         const result = freezeAdmissionResult(
           typeof adm.rows[0].result_json === 'string'
             ? JSON.parse(adm.rows[0].result_json)
@@ -115,6 +126,11 @@ export class AtomicDeviceHandoffUnitOfWork {
           reason: result.rejectReason ?? 'SERIES_TERMINAL',
           result,
         };
+      }
+      // P1-R02: only pending admissions may mutate; missing/non-pending fail closed.
+      if (outcome !== 'pending') {
+        await client.query('ROLLBACK');
+        return { decision: 'reject', reason: 'SERIES_TERMINAL' };
       }
 
       const writerRow = await client.query(
@@ -205,27 +221,31 @@ export class AtomicDeviceHandoffUnitOfWork {
       );
       const nowMs = Number(time.rows[0].ms);
 
-      await client.query(
+      const writerUpd = await client.query(
         `UPDATE tournament_series_writer
          SET writer_generation = $2, updated_at_ms = $3
          WHERE series_key = $1`,
         [args.seriesKey, nextGen, nowMs],
       );
+      requireOneRow(writerUpd, 'WRITER_INTEGRITY');
 
-      await client.query(
+      const fenceUpd = await client.query(
         `UPDATE series_fence_state SET
            writer_generation = $2,
            last_applied_admission_id = $3
          WHERE series_key = $1`,
         [args.seriesKey, nextGen, args.admissionId],
       );
+      requireOneRow(fenceUpd, 'FENCE_INTEGRITY');
 
-      await client.query(
+      // P1-R01: exactly one authoritative snapshot must advance with the writer.
+      const snapUpd = await client.query(
         `UPDATE authoritative_game_snapshot
          SET writer_generation = $4
          WHERE series_key = $1 AND player_id = $2 AND subgame_ordinal = $3`,
         [args.seriesKey, args.playerId, args.subgameOrdinal, nextGen],
       );
+      requireOneRow(snapUpd, 'SNAPSHOT_INTEGRITY');
 
       const result = freezeAdmissionResult({
         admissionId: args.admissionId,
@@ -288,17 +308,19 @@ export class AtomicDeviceHandoffUnitOfWork {
     await client.query('COMMIT');
   }
 
+  /** P1-R02: exactly one pending journal row must transition. */
   async #writeOutcome(
     client: pg.PoolClient,
     admissionId: string,
     outcome: 'applied' | 'rejected',
     result: ImmutableAdmissionResult,
   ): Promise<void> {
-    await client.query(
+    const res = await client.query(
       `UPDATE command_admission_journal
        SET outcome = $2, result_json = $3::jsonb
        WHERE admission_id = $1 AND outcome = 'pending'`,
       [admissionId, outcome, JSON.stringify(result)],
     );
+    requireOneRow(res, 'ADMISSION_OUTCOME_INTEGRITY');
   }
 }
