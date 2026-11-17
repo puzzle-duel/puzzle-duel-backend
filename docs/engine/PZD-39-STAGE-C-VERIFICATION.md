@@ -6,6 +6,7 @@ Jira: [PZD-39](https://puzzle-duel-app.atlassian.net/browse/PZD-39)
 Branch: `feature/PZD-39-core001v3-ts-replay`
 Base: `docs/core-001-v3-ruleset-design` @ `727e1b48738531f8675df3628037e5509e2df7bb`
 Prior reviewed HEAD: `8bfce2724c0d9ba17f85f2a4ecab501377a2cbb2`
+Remediation HEAD: `f3eab0b64bad7f3679a853e01a78d0b082063ecd`
 Accepted design: ADR-E01 D1–D10
 
 ## P1 security remediation (PR review comment 6941826065)
