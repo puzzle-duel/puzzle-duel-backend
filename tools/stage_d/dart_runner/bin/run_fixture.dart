@@ -9,7 +9,8 @@ void main(List<String> args) {
     stderr.writeln('usage: run_fixture.dart <fixture.json>');
     exit(2);
   }
-  final doc = jsonDecode(File(args.first).readAsStringSync()) as Map<String, Object?>;
+  final doc =
+      jsonDecode(File(args.first).readAsStringSync()) as Map<String, Object?>;
   final kind = doc['kind'] as String? ?? 'fullMove';
   try {
     final out = <String, Object?>{
@@ -33,12 +34,14 @@ void main(List<String> args) {
     }
     stdout.write(jsonEncode(out));
   } on ValidationFailure catch (e) {
-    stdout.write(jsonEncode({
-      'engine': 'dart',
-      'id': doc['id'],
-      'ok': false,
-      'codes': e.wires,
-    }));
+    stdout.write(
+      jsonEncode({
+        'engine': 'dart',
+        'id': doc['id'],
+        'ok': false,
+        'codes': e.wires,
+      }),
+    );
   }
 }
 
@@ -100,7 +103,9 @@ void _fullMove(Map<String, Object?> doc, Map<String, Object?> out) {
     return;
   }
   final moves = (doc['moves'] as List<Object?>?) ?? const [];
-  if (moves.isEmpty && doc['expected'] is Map && (doc['expected'] as Map)['ok'] == false) {
+  if (moves.isEmpty &&
+      doc['expected'] is Map &&
+      (doc['expected'] as Map)['ok'] == false) {
     // single-move negative may still list moves
   }
   final applied = <Map<String, Object?>>[];
@@ -157,23 +162,84 @@ void _replaySecurity(Map<String, Object?> doc, Map<String, Object?> out) {
         jsonEncode(replayed['finalState']) != jsonEncode(claimed.toJson());
     return;
   }
-  if (id == 'V3-42') {
-    final replayed = _replay(doc['trustedInitial'], const []);
-    final client = Map<String, Object?>.from(doc['clientReport'] as Map);
-    final finalState = parseGameState(replayed['finalState']);
-    final mismatches = <String>[];
-    if (client['score'] != finalState.score) mismatches.add('score_mismatch');
-    if (client['stateHash'] != stateHashV3(finalState)) {
-      mismatches.add('state_hash_mismatch');
+  if (id == 'V3-42' || id == 'V3-43') {
+    final moves = (doc['moves'] as List<Object?>?) ?? const <Object?>[];
+    final replayed = _replay(doc['trustedInitial'], moves);
+    if (replayed['ok'] != true) {
+      out['ok'] = false;
+      out['replayOk'] = false;
+      return;
     }
+    final finalState = parseGameState(replayed['finalState']);
+    final authentic = finalState.toJson();
+    final report = Map<String, Object?>.from(doc['clientReport'] as Map);
+    final client = id == 'V3-42'
+        ? <String, Object?>{
+            ...report,
+            'board': authentic['cells'],
+            'offers': authentic['offers'],
+            'turnsUsed': authentic['turnsUsed'],
+            'status': authentic['status'],
+            'terminalReason': authentic['terminalReason'],
+            'score': report['score'],
+            'stateHash': report['stateHash'],
+          }
+        : report;
+    final mismatches = _clientReportMismatches(finalState, client);
     out['ok'] = true;
     out['replayOk'] = true;
     out['fullCompareOk'] = mismatches.isEmpty;
     out['mismatches'] = mismatches;
+    out['authenticStateHash'] = stateHashV3(finalState);
     return;
   }
   out['ok'] = false;
   out['reason'] = 'unsupported_replay_security_id';
+}
+
+List<String> _clientReportMismatches(
+  GameState replayed,
+  Map<String, Object?> client,
+) {
+  final expected = replayed.toJson();
+  final mismatches = <String>[];
+  if (client['score'] != replayed.score) mismatches.add('score_mismatch');
+  if (client['turnsUsed'] != replayed.turnsUsed)
+    mismatches.add('turn_mismatch');
+  if (client['status'] != expected['status'])
+    mismatches.add('terminal_mismatch');
+  if (client['terminalReason'] != expected['terminalReason']) {
+    mismatches.add('terminal_mismatch');
+  }
+  if (!_deepEqual(client['board'], expected['cells'])) {
+    mismatches.add('board_mismatch');
+  }
+  if (!_deepEqual(client['offers'], expected['offers'])) {
+    mismatches.add('offer_mismatch');
+  }
+  if (client['stateHash'] != stateHashV3(replayed)) {
+    mismatches.add('state_hash_mismatch');
+  }
+  return mismatches.toSet().toList();
+}
+
+bool _deepEqual(Object? a, Object? b) {
+  if (identical(a, b)) return true;
+  if (a is Map && b is Map) {
+    if (a.length != b.length) return false;
+    for (final key in a.keys) {
+      if (!b.containsKey(key) || !_deepEqual(a[key], b[key])) return false;
+    }
+    return true;
+  }
+  if (a is List && b is List) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (!_deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  return a == b;
 }
 
 Map<String, Object?> _replay(Object? initial, List<Object?> moves) {

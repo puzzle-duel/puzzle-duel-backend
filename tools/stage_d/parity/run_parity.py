@@ -70,6 +70,200 @@ def first_diff(a, b, path="$"):
     return None
 
 
+def normative_security_fields(fid: str, expected: dict) -> list[str]:
+    if fid in ("V3-42", "V3-43"):
+        return ["ok", "replayOk", "fullCompareOk", "mismatches"]
+    if fid == "V3-45":
+        return ["ok", "replayFinalDiffersFromClaimed"]
+    if fid == "V3-46":
+        return ["ok", "hashesDiffer", "hashA", "hashB"]
+    return list(expected.keys())
+
+
+def evaluate_replay_security(doc: dict) -> dict:
+    """Independent Python oracle evaluation for replay-security fixtures."""
+    sys.path.insert(0, str(ROOT / "tools/stage_d/oracle"))
+    from core001v3_oracle import parse_game_state, replay, state_hash  # type: ignore
+
+    fid = doc["id"]
+    if fid in ("V3-42", "V3-43"):
+        moves = doc.get("moves") or []
+        result = replay(doc["trustedInitial"], moves, require_initial=True)
+        if not result.get("ok"):
+            return {"ok": False, "replayOk": False, "reason": result}
+        authentic = result["finalState"]
+        client = dict(doc["clientReport"])
+        if fid == "V3-42":
+            # Mirror runner: force forged score/hash onto authentic board/offers.
+            client = {
+                **client,
+                "board": authentic["cells"],
+                "offers": authentic["offers"],
+                "turnsUsed": authentic["turnsUsed"],
+                "status": authentic["status"],
+                "terminalReason": authentic["terminalReason"],
+                "score": doc["clientReport"]["score"],
+                "stateHash": doc["clientReport"]["stateHash"],
+            }
+        mismatches: list[str] = []
+        if client.get("score") != authentic["score"]:
+            mismatches.append("score_mismatch")
+        if client.get("turnsUsed") != authentic["turnsUsed"]:
+            mismatches.append("turn_mismatch")
+        if client.get("status") != authentic["status"] or client.get("terminalReason") != authentic[
+            "terminalReason"
+        ]:
+            mismatches.append("terminal_mismatch")
+        if client.get("board") != authentic["cells"]:
+            mismatches.append("board_mismatch")
+        if client.get("offers") != authentic["offers"]:
+            mismatches.append("offer_mismatch")
+        if client.get("stateHash") != result["stateHash"]:
+            mismatches.append("state_hash_mismatch")
+        return {
+            "ok": True,
+            "replayOk": True,
+            "fullCompareOk": len(mismatches) == 0,
+            "mismatches": mismatches,
+            "authenticStateHash": result["stateHash"],
+        }
+    if fid == "V3-45":
+        result = replay(doc["trustedInitial"], [], require_initial=True)
+        claimed = parse_game_state(doc["claimedSnapshot"], initial=False)
+        return {
+            "ok": True,
+            "replayFinalDiffersFromClaimed": result["finalState"] != claimed,
+        }
+    if fid == "V3-46":
+        a = replay(doc["trustedInitial"], doc["movesA"], require_initial=True)
+        b = replay(doc["trustedInitial"], doc["movesB"], require_initial=True)
+        return {
+            "ok": True,
+            "hashA": a.get("stateHash"),
+            "hashB": b.get("stateHash"),
+            "hashesDiffer": a.get("stateHash") != b.get("stateHash"),
+        }
+    return {"ok": False, "reason": "unsupported_replay_security_id"}
+
+
+def compare_replay_security_outputs(
+    *,
+    fid: str,
+    expected: dict,
+    oracle: dict,
+    dart: dict,
+    ts: dict,
+    report: dict | None = None,
+) -> dict:
+    """Three-way replay-security compare: oracle↔dart, oracle↔ts, dart↔ts.
+
+    Exposed for Stage D comparator mutation tests. Preserves first-divergence
+    reporting via ordered `diffs` entries.
+    """
+    if report is None:
+        report = {
+            "id": fid,
+            "kind": "replaySecurity",
+            "oracle_vs_dart": "PASS",
+            "oracle_vs_ts": "PASS",
+            "dart_vs_ts": "PASS",
+            "status": "PASS",
+            "diffs": [],
+        }
+
+    def fail(channel, path_s, exp, act):
+        report[channel] = "FAIL"
+        report["status"] = "FAIL"
+        report["diffs"].append({"channel": channel, "path": path_s, "expected": exp, "actual": act})
+
+    def check_security(channel: str, actual: dict) -> None:
+        for field in normative_security_fields(fid, expected):
+            if field not in actual:
+                fail(channel, f"$.{field}", expected.get(field, "<required>"), "<missing>")
+                return
+        if fid in ("V3-42", "V3-43"):
+            if actual.get("replayOk") is not True:
+                fail(channel, "$.replayOk", True, actual.get("replayOk"))
+            if actual.get("fullCompareOk") is not False:
+                fail(channel, "$.fullCompareOk", False, actual.get("fullCompareOk"))
+            actual_mismatches = actual.get("mismatches")
+            if not isinstance(actual_mismatches, list):
+                fail(channel, "$.mismatches", expected.get("mismatchesInclude"), actual_mismatches)
+                return
+            # Mismatch code order is non-normative; compare as sets.
+            required = set(expected.get("mismatchesInclude", []))
+            got = set(actual_mismatches)
+            if not required.issubset(got):
+                fail(channel, "$.mismatches", sorted(required), sorted(got))
+            if oracle.get("authenticStateHash") and actual.get("authenticStateHash"):
+                if actual.get("authenticStateHash") != oracle["authenticStateHash"]:
+                    fail(
+                        channel,
+                        "$.authenticStateHash",
+                        oracle["authenticStateHash"],
+                        actual.get("authenticStateHash"),
+                    )
+        elif fid == "V3-45":
+            if actual.get("replayFinalDiffersFromClaimed") is not True:
+                fail(channel, "$.replayFinalDiffersFromClaimed", True, actual.get("replayFinalDiffersFromClaimed"))
+        elif fid == "V3-46":
+            if actual.get("hashesDiffer") is not True:
+                fail(channel, "$.hashesDiffer", True, actual.get("hashesDiffer"))
+
+    if oracle.get("ok") is not True:
+        fail("oracle_vs_dart", "$.oracle.ok", True, oracle)
+        fail("oracle_vs_ts", "$.oracle.ok", True, oracle)
+    else:
+        for channel, actual in ("oracle_vs_dart", dart), ("oracle_vs_ts", ts):
+            check_security(channel, actual)
+            if fid in ("V3-42", "V3-43"):
+                for field in ("replayOk", "fullCompareOk"):
+                    if actual.get(field) != oracle.get(field):
+                        fail(channel, f"$.{field}", oracle.get(field), actual.get(field))
+                if not set(oracle.get("mismatches", [])).issubset(set(actual.get("mismatches") or [])):
+                    fail(
+                        channel,
+                        "$.mismatches",
+                        sorted(oracle.get("mismatches", [])),
+                        sorted(actual.get("mismatches") or []),
+                    )
+
+    if fid in ("V3-42", "V3-43"):
+        for field in ("ok", "replayOk", "fullCompareOk"):
+            if dart.get(field) != ts.get(field):
+                fail("dart_vs_ts", f"$.{field}", dart.get(field), ts.get(field))
+        d_set = set(dart.get("mismatches") or [])
+        t_set = set(ts.get("mismatches") or [])
+        required = set(expected.get("mismatchesInclude", []))
+        if not required.issubset(d_set) or not required.issubset(t_set):
+            fail("dart_vs_ts", "$.mismatches", sorted(d_set), sorted(t_set))
+        if dart.get("authenticStateHash") != ts.get("authenticStateHash"):
+            fail(
+                "dart_vs_ts",
+                "$.authenticStateHash",
+                dart.get("authenticStateHash"),
+                ts.get("authenticStateHash"),
+            )
+    elif fid == "V3-45":
+        if dart.get("replayFinalDiffersFromClaimed") != ts.get("replayFinalDiffersFromClaimed"):
+            fail(
+                "dart_vs_ts",
+                "$.replayFinalDiffersFromClaimed",
+                dart.get("replayFinalDiffersFromClaimed"),
+                ts.get("replayFinalDiffersFromClaimed"),
+            )
+    elif fid == "V3-46":
+        if dart.get("hashesDiffer") != ts.get("hashesDiffer"):
+            fail("dart_vs_ts", "$.hashesDiffer", dart.get("hashesDiffer"), ts.get("hashesDiffer"))
+        d = first_diff(
+            {"hashA": dart.get("hashA"), "hashB": dart.get("hashB")},
+            {"hashA": ts.get("hashA"), "hashB": ts.get("hashB")},
+        )
+        if d:
+            fail("dart_vs_ts", d[0], d[1], d[2])
+    return report
+
+
 def run_dart(fixture: Path) -> dict:
     cmd = [str(DART), "run", str(DART_RUNNER), str(fixture)]
     p = subprocess.run(cmd, cwd=str(DART_RUNNER.parent.parent), capture_output=True, text=True)
@@ -158,20 +352,15 @@ def compare_fixture(path: Path) -> dict:
         return report
 
     if kind == "replaySecurity":
-        for channel, actual in ("oracle_vs_dart", dart), ("oracle_vs_ts", ts):
-            if fid == "V3-42":
-                if actual.get("fullCompareOk") is not False:
-                    fail(channel, "$.fullCompareOk", False, actual.get("fullCompareOk"))
-                for m in expected.get("mismatchesInclude", []):
-                    if m not in (actual.get("mismatches") or []):
-                        fail(channel, "$.mismatches", expected["mismatchesInclude"], actual.get("mismatches"))
-            elif fid == "V3-45":
-                if actual.get("replayFinalDiffersFromClaimed") is not True:
-                    fail(channel, "$.replayFinalDiffersFromClaimed", True, actual.get("replayFinalDiffersFromClaimed"))
-            elif fid == "V3-46":
-                if actual.get("hashesDiffer") is not True:
-                    fail(channel, "$.hashesDiffer", True, actual.get("hashesDiffer"))
-        return report
+        oracle = evaluate_replay_security(doc)
+        return compare_replay_security_outputs(
+            fid=fid,
+            expected=expected,
+            oracle=oracle,
+            dart=dart,
+            ts=ts,
+            report=report,
+        )
 
     # fullMove
     for channel, actual in ("oracle_vs_dart", dart), ("oracle_vs_ts", ts):

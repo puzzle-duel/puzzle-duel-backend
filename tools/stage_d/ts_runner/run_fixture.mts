@@ -188,29 +188,34 @@ function replaySecurity(doc: Record<string, unknown>, out: Record<string, unknow
         JSON.stringify(stateToJson(claimed));
     return;
   }
-  if (doc.id === 'V3-42') {
+  if (doc.id === 'V3-42' || doc.id === 'V3-43') {
+    const moves = (doc.moves as unknown[]) ?? [];
     const replayed = replayCore001V3({
       initialState: doc.trustedInitial,
-      moves: [],
+      moves,
     });
     if (!replayed.ok) {
       out.ok = false;
       out.replayOk = false;
       return;
     }
-    const expected = stateToJson(replayed.finalState);
-    const client = {
-      ...(doc.clientReport as Record<string, unknown>),
-      board: expected.cells,
-      offers: expected.offers,
-      turnsUsed: replayed.finalState.turnsUsed,
-      status: replayed.finalState.status,
-      terminalReason: replayed.finalState.terminalReason,
-    };
-    // Force forged score+hash from fixture while completing required fields.
     const report = doc.clientReport as Record<string, unknown>;
-    client.score = report.score;
-    client.stateHash = report.stateHash;
+    // V3-42 historically completes board/offers from authentic replay while
+    // forcing forged score+hash. V3-43 uses the fixture's forged board/hash
+    // as supplied (self-consistent attacker state).
+    const client =
+      doc.id === 'V3-42'
+        ? {
+            ...report,
+            board: stateToJson(replayed.finalState).cells,
+            offers: stateToJson(replayed.finalState).offers,
+            turnsUsed: replayed.finalState.turnsUsed,
+            status: replayed.finalState.status,
+            terminalReason: replayed.finalState.terminalReason,
+            score: report.score,
+            stateHash: report.stateHash,
+          }
+        : report;
     const cmp = compareReplayToClientReport({
       replayed: replayed.finalState,
       client,
@@ -218,7 +223,8 @@ function replaySecurity(doc: Record<string, unknown>, out: Record<string, unknow
     out.ok = true;
     out.replayOk = true;
     out.fullCompareOk = cmp.ok === true;
-    out.mismatches = cmp.ok ? [] : cmp.mismatches;
+    out.mismatches = cmp.ok ? [] : [...cmp.mismatches];
+    out.authenticStateHash = stateHashV3(replayed.finalState);
     return;
   }
   out.ok = false;
