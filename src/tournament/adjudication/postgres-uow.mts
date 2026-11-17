@@ -7,7 +7,6 @@
  * back every write; admission stays pending (never rejected with fence advanced).
  */
 
-import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import {
   applyMove,
@@ -17,6 +16,7 @@ import {
   type Move,
   type MoveApplied,
 } from '../../engine/core001v3/index.mts';
+import { seriesAdvisoryKeys } from '../ingress/series-fence.mts';
 import { idleDeadlineFrom, isTimely, type SeriesFenceState } from '../ingress/types.mts';
 import type { ImmutableAdmissionResult } from './admission-result.mts';
 import { freezeAdmissionResult } from './admission-result.mts';
@@ -28,11 +28,6 @@ import {
   TRUSTED_GAMEPLAY_DDL,
 } from './postgres-stores.mts';
 import type { AuthoritativeGameSnapshot } from './move-ledger.mts';
-
-function seriesAdvisoryKeys(seriesKey: string): [number, number] {
-  const digest = createHash('sha256').update(seriesKey).digest();
-  return [digest.readInt32BE(0), digest.readInt32BE(4)];
-}
 
 export type UowFaultPoint =
   | 'after_lock'
@@ -357,7 +352,8 @@ export class PostgresTrustedUnitOfWork {
            hard_cutoff_at_ms = $6,
            score = $7,
            results_published = $8,
-           last_applied_admission_id = $9
+           last_applied_admission_id = $9,
+           thinking_extension_consumed = $10
          WHERE series_key = $1`,
         [
           input.seriesKey,
@@ -369,6 +365,7 @@ export class PostgresTrustedUnitOfWork {
           nextFence.score,
           nextFence.resultsPublished,
           nextFence.lastAppliedAdmissionId,
+          nextFence.thinkingExtensionConsumed,
         ],
       );
       await this.#fault('after_fence');
@@ -528,7 +525,8 @@ export class PostgresTrustedUnitOfWork {
            hard_cutoff_at_ms = $6,
            score = $7,
            results_published = $8,
-           last_applied_admission_id = $9
+           last_applied_admission_id = $9,
+           thinking_extension_consumed = $10
          WHERE series_key = $1`,
         [
           args.seriesKey,
@@ -540,6 +538,7 @@ export class PostgresTrustedUnitOfWork {
           next.score,
           next.resultsPublished,
           next.lastAppliedAdmissionId,
+          next.thinkingExtensionConsumed,
         ],
       );
 
@@ -679,5 +678,6 @@ function mapFence(row: Record<string, unknown>): SeriesFenceState {
       row.last_applied_admission_id == null
         ? null
         : String(row.last_applied_admission_id),
+    thinkingExtensionConsumed: Boolean(row.thinking_extension_consumed),
   };
 }

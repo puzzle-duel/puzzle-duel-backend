@@ -23,17 +23,17 @@ export interface AdmitCommandInput {
   payloadHash: string;
   /** Optional client-declared time — ignored for eligibility. */
   clientDeclaredAt?: Date;
-  /** Expected board revision for move CAS (TD-03). Mandatory for ranked moves. */
+  /** Expected board revision for move CAS (TD-03). */
   expectedBoardRevision?: number;
-  /** Claimed writer generation (TD-05). Consistency input only after auth. */
+  /** Claimed writer generation (TD-05). Consistency only; auth is Phase B. */
   writerGeneration?: number;
   /**
-   * @deprecated Stage E: never accept from clients. Ignored by SeriesCommandArbiter.
-   * Kept only so stale payloads fail closed rather than authorize score.
+   * @deprecated P1-04: never accept from clients. Presence is rejected.
+   * Test-only move effects use ServerMoveEffectResolver.
    */
   scoreDelta?: number;
   /**
-   * @deprecated Stage E: never accept from clients. Ignored by SeriesCommandArbiter.
+   * @deprecated P1-04: never accept from clients. Presence is rejected.
    */
   completesSeries?: boolean;
 }
@@ -82,12 +82,15 @@ export function idleDeadlineFrom(
   return new Date(trustedEventAt.getTime() + idleSeconds * 1000);
 }
 
+/**
+ * TD-07: one deliberate +60s extension. Eligible only when remaining idle
+ * is in (0, 60_000] ms. Cap at hardCutoffAt; never exceed cutoff.
+ */
 export function applyThinkingExtension(
   currentIdleDeadline: Date,
   remainingMs: number,
   hardCutoff: Date | null,
 ): Date | null {
-  // Eligible only when remaining idle is >0 and <=60s.
   if (remainingMs <= 0 || remainingMs > 60_000) return null;
   const extended = new Date(currentIdleDeadline.getTime() + 60_000);
   if (hardCutoff && extended.getTime() > hardCutoff.getTime()) {
@@ -110,8 +113,27 @@ export interface SeriesFenceState {
   idleDeadlineAt: Date;
   hardCutoffAt: Date | null;
   score: number;
-  /** Four-category atomic publish placeholder for H1 completion barrier proofs. */
+  /**
+   * Four-category atomic publish. Phase A must keep this false —
+   * publication is Phase C (NOT_RUN).
+   */
   resultsPublished: boolean;
   /** Last admission that successfully mutated fence (duplicate-safe). */
   lastAppliedAdmissionId: string | null;
+  /**
+   * P1-01 / TD-07: durable one-shot thinking extension consumption for the
+   * entire six-subgame series. Never reset between subgames.
+   */
+  thinkingExtensionConsumed: boolean;
 }
+
+/** Test-only / internal move effect. Never sourced from client JSON. */
+export interface ServerDerivedMoveEffect {
+  scoreDelta: number;
+  /** Completes the six-game series (H1). Does not publish leaderboard rows. */
+  completesSubgame: boolean;
+}
+
+export type ServerMoveEffectResolver = (
+  command: AdmitCommandInput,
+) => ServerDerivedMoveEffect | null;

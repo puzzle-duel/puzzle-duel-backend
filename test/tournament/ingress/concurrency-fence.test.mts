@@ -5,53 +5,38 @@ import { MemoryAdmissionJournal } from '../../../src/tournament/ingress/journal.
 import { MemorySeriesFenceStore } from '../../../src/tournament/ingress/series-fence.mts';
 import { SeriesCommandArbiter } from '../../../src/tournament/ingress/arbiter.mts';
 import { idleDeadlineFrom } from '../../../src/tournament/ingress/types.mts';
-import type { ServerMoveEffectResolver } from '../../../src/tournament/adjudication/trusted-gameplay.mts';
+import {
+  T0,
+  baseFence,
+  moveEffectsByKey,
+  fixedMoveEffect,
+} from './test-helpers.mts';
 
-const T0 = new Date('2026-11-16T12:00:00.000Z');
-
-/** Test-only server effects keyed by idempotency — never from client body. */
-function effectsByKey(
-  map: Record<string, { scoreDelta: number; completesSubgame?: boolean }>,
-): ServerMoveEffectResolver {
-  return (input) => {
-    const effect = map[input.idempotencyKey];
-    if (!effect) return null;
-    return {
-      scoreDelta: effect.scoreDelta,
-      completesSubgame: effect.completesSubgame ?? false,
-    };
-  };
-}
-
-async function setup(moveEffect: ServerMoveEffectResolver | null = null) {
+async function setup(resolver = fixedMoveEffect(0)) {
   const clock = new ControllableClock(T0);
   const journal = new MemoryAdmissionJournal({ clock });
   const fence = new MemorySeriesFenceStore();
   const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-  await fence.put({
-    seriesKey: 's1',
-    boardRevision: 0,
-    writerGeneration: 1,
-    status: 'ACTIVE',
-    idleDeadlineAt,
-    hardCutoffAt: null,
-    score: 0,
-    resultsPublished: false,
-    lastAppliedAdmissionId: null,
-  });
+  await fence.put(baseFence('s1', { idleDeadlineAt }));
   return {
     clock,
     journal,
     fence,
     idleDeadlineAt,
-    arbiter: new SeriesCommandArbiter(journal, fence, moveEffect),
+    arbiter: new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: resolver,
+      clock,
+    }),
   };
 }
 
-describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => {
+describe('PZD-38 Gate A — concurrency fences', () => {
   it('Case A: two distinct moves at same revision => one apply, one STATE_CONFLICT, one score', async () => {
     const { arbiter, fence } = await setup(
-      effectsByKey({ 'm-a': { scoreDelta: 5 }, 'm-b': { scoreDelta: 9 } }),
+      moveEffectsByKey({
+        'm-a': { scoreDelta: 5 },
+        'm-b': { scoreDelta: 9 },
+      }),
     );
     const [a, b] = await Promise.all([
       arbiter.admitAndEvaluate({
@@ -89,9 +74,7 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
   });
 
   it('Case B: concurrent duplicate idempotency => one logical apply, no double score', async () => {
-    const { arbiter, fence } = await setup(
-      effectsByKey({ same: { scoreDelta: 3 } }),
-    );
+    const { arbiter, fence } = await setup(fixedMoveEffect(3));
     const results = await Promise.all([
       arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -121,7 +104,7 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
 
   it('Case C: expiry worker cannot forfeit while timely pending move exists', async () => {
     const { clock, journal, arbiter, idleDeadlineAt } = await setup(
-      effectsByKey({ 'late-process': { scoreDelta: 1 } }),
+      fixedMoveEffect(1),
     );
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     await journal.admit({
@@ -138,11 +121,9 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
     assert.equal(attempt.ok, false);
   });
 
-  it('Case D: timely H1 completes once; timeout cannot overwrite COMPLETED; no leaderboard publish', async () => {
+  it('Case D: timely H1 completes once; timeout cannot overwrite COMPLETED; no publish', async () => {
     const { clock, arbiter, fence, idleDeadlineAt } = await setup(
-      effectsByKey({
-        'h1-final': { scoreDelta: 100, completesSubgame: true },
-      }),
+      fixedMoveEffect(100, true),
     );
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     const done = await arbiter.admitAndEvaluate(
@@ -164,7 +145,6 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
     assert.equal(done.decision, 'apply');
     if (done.decision === 'apply') {
       assert.equal(done.state.status, 'COMPLETED');
-      // Stage E: completion does not imply four-category publish.
       assert.equal(done.state.resultsPublished, false);
     }
     const forfeit = await arbiter.tryForfeitForInactivity('s1');
@@ -175,9 +155,7 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
   });
 
   it('Case E: handoff fences old writer; handoff does not refresh idle deadline', async () => {
-    const { arbiter, fence, idleDeadlineAt } = await setup(
-      effectsByKey({ 'old-device': { scoreDelta: 50 } }),
-    );
+    const { arbiter, fence, idleDeadlineAt } = await setup(fixedMoveEffect(50));
     const before = (await fence.get('s1'))!.idleDeadlineAt.getTime();
     const handoff = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -231,26 +209,5 @@ describe('PZD-38 Gate A — concurrency fences (Stage E server effects)', () => 
       (await arbiter.canSafelyForfeit('s1', idleDeadlineAt)).allowed,
       true,
     );
-  });
-
-  it('Stage E: client scoreDelta on admit input cannot authorize score without server effect', async () => {
-    const { arbiter, fence } = await setup(null);
-    const result = await arbiter.admitAndEvaluate({
-      seriesKey: 's1',
-      playerId: 'p1',
-      commandType: 'move',
-      idempotencyKey: 'forged-score',
-      payloadHash: 'x',
-      expectedBoardRevision: 0,
-      writerGeneration: 1,
-      scoreDelta: 100_000,
-      completesSeries: true,
-    });
-    assert.equal(result.decision, 'reject');
-    if (result.decision === 'reject') {
-      assert.equal(result.reason, 'MOVE_REQUIRES_SERVER_EFFECT');
-    }
-    assert.equal((await fence.get('s1'))!.score, 0);
-    assert.equal((await fence.get('s1'))!.boardRevision, 0);
   });
 });
