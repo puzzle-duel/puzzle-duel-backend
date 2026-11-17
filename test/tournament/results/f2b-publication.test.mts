@@ -446,6 +446,64 @@ function advanceHarness(row: {
   };
 }
 
+function h1Move(open: {
+  seriesId: string;
+  playerId: string;
+  h1AdmissionId: string;
+  h1ReceivedAtMs: number;
+}) {
+  return {
+    seriesKey: open.seriesId,
+    playerId: open.playerId,
+    subgameOrdinal: 6,
+    admissionId: open.h1AdmissionId,
+    admissionSeq: 6,
+    trustedReceivedAt: new Date(open.h1ReceivedAtMs),
+    move: {
+      offerIndex: 0 as const,
+      tap: [0, 0] as [number, number],
+      expectedBoardRevision: 5,
+      writerGeneration: 1,
+    },
+  };
+}
+
+async function assertH1StayedPending(seriesId: string, admissionId: string) {
+  assert.deepEqual(await counts(seriesId), {
+    completion: 0,
+    scores: 0,
+    categories: 0,
+    badge: 0,
+    provenance: 0,
+  });
+  const journal = await pool.query(
+    `SELECT outcome FROM command_admission_journal WHERE admission_id=$1`,
+    [admissionId],
+  );
+  assert.equal(journal.rows[0].outcome, 'pending');
+  const snap = await pool.query(
+    `SELECT status, board_revision FROM authoritative_game_snapshot
+     WHERE series_key=$1 AND subgame_ordinal=6`,
+    [seriesId],
+  );
+  assert.equal(snap.rows[0].status, 'in_progress');
+  assert.equal(Number(snap.rows[0].board_revision), 0);
+  const ledger = await pool.query(
+    `SELECT count(*)::int AS n FROM accepted_move_ledger
+     WHERE series_key=$1 AND subgame_ordinal=6`,
+    [seriesId],
+  );
+  assert.equal(ledger.rows[0].n, 0);
+  const fence = await pool.query(
+    `SELECT status, results_published, board_revision
+     FROM series_fence_state WHERE series_key=$1`,
+    [seriesId],
+  );
+  assert.equal(fence.rows[0].status, 'ACTIVE');
+  assert.equal(fence.rows[0].results_published, false);
+  assert.equal(Number(fence.rows[0].board_revision), 5);
+}
+
 function publishedScores(result: F2BPublishResult) {
   assert.equal(result.outcome === 'rejected', false, JSON.stringify(result));
   if (result.outcome === 'rejected') throw new Error('unreachable');
@@ -1483,5 +1541,92 @@ describe('PZD-41 F2-B atomic six-game publication', () => {
     );
     assert.equal(fence.rows[0].status, 'COMPLETED');
     assert.equal(fence.rows[0].results_published, true);
+  });
+
+  it('rolls back a rejected H1 publication and retries the same pending command', async () => {
+    const uow = new PostgresTrustedUnitOfWork(pool);
+    const injected = await seed({ mode: 'h1_open' });
+    uow.setSixGamePublisher({
+      async publishOnOpenTransaction() {
+        return { outcome: 'rejected', reason: 'REPLAY_MISMATCH' };
+      },
+    });
+    await assert.rejects(() => uow.adjudicateAcceptedMove(h1Move(injected)), /F2B_PUBLICATION_REJECTED:REPLAY_MISMATCH/);
+    await assertH1StayedPending(injected.seriesId, injected.h1AdmissionId);
+    uow.setSixGamePublisher(service());
+    const recovered = await uow.adjudicateAcceptedMove(h1Move(injected));
+    assert.equal(recovered.decision, 'apply');
+    if (recovered.decision === 'apply') {
+      assert.equal(recovered.fence.status, 'COMPLETED');
+      assert.equal(recovered.fence.resultsPublished, true);
+    }
+    assert.equal((await counts(injected.seriesId)).categories, 4);
+    const applied = await pool.query(
+      `SELECT outcome FROM command_admission_journal WHERE admission_id=$1`,
+      [injected.h1AdmissionId],
+    );
+    assert.equal(applied.rows[0].outcome, 'applied');
+
+    const unpinned = await seed({ mode: 'h1_open' });
+    const wrongRegistry = new PinnedManifestRegistry([zeroManifest], zeroManifest.digest);
+    uow.setSixGamePublisher(
+      new F2BPublicationService(pool, { provenanceKey: KEY, manifests: wrongRegistry }),
+    );
+    await assert.rejects(
+      () => uow.adjudicateAcceptedMove(h1Move(unpinned)),
+      /F2B_PUBLICATION_REJECTED:MANIFEST_UNPINNED/,
+    );
+    await assertH1StayedPending(unpinned.seriesId, unpinned.h1AdmissionId);
+
+    const mismatched = await seed({ mode: 'h1_open' });
+    const original = await pool.query(
+      `SELECT state_hash FROM authoritative_game_snapshot
+       WHERE series_key=$1 AND subgame_ordinal=1`,
+      [mismatched.seriesId],
+    );
+    await pool.query(
+      `UPDATE authoritative_game_snapshot SET state_hash=$2
+       WHERE series_key=$1 AND subgame_ordinal=1`,
+      [mismatched.seriesId, 'ab'.repeat(32)],
+    );
+    uow.setSixGamePublisher(service());
+    await assert.rejects(
+      () => uow.adjudicateAcceptedMove(h1Move(mismatched)),
+      /F2B_PUBLICATION_REJECTED:REPLAY_MISMATCH/,
+    );
+    await assertH1StayedPending(mismatched.seriesId, mismatched.h1AdmissionId);
+    await pool.query(
+      `UPDATE authoritative_game_snapshot SET state_hash=$2
+       WHERE series_key=$1 AND subgame_ordinal=1`,
+      [mismatched.seriesId, original.rows[0].state_hash],
+    );
+    const fixed = await uow.adjudicateAcceptedMove(h1Move(mismatched));
+    assert.equal(fixed.decision, 'apply');
+    assert.equal((await counts(mismatched.seriesId)).provenance, 1);
+    const sealed = await evaluateLeaderboardReadEligibility(pool, mismatched.seriesId, {
+      provenanceKey: KEY,
+    });
+    assert.equal(sealed.authorized, true);
+  });
+
+  it('does not rank-complete a terminal H1 when publication is not attached', async () => {
+    const uow = new PostgresTrustedUnitOfWork(pool);
+    uow.setSixGamePublisher(null);
+    const open = await seed({ mode: 'h1_open' });
+    const applied = await uow.adjudicateAcceptedMove(h1Move(open));
+    assert.equal(applied.decision, 'apply');
+    if (applied.decision === 'apply') {
+      assert.equal(applied.fence.status, 'AWAIT_ADVANCE');
+      assert.equal(applied.fence.resultsPublished, false);
+      assert.equal(applied.result.awaitAdvance, true);
+    }
+    assert.equal((await counts(open.seriesId)).completion, 0);
+    const fence = await pool.query(
+      `SELECT status, results_published FROM series_fence_state WHERE series_key=$1`,
+      [open.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'AWAIT_ADVANCE');
+    assert.equal(fence.rows[0].results_published, false);
+    assert.notEqual(fence.rows[0].status, 'COMPLETED');
   });
 });

@@ -34,7 +34,9 @@ Phase A `SeriesCommandArbiter` is not the HTTP handler. A trusted `completesSubg
 
 ## Transaction and lock
 
-`PostgresTrustedUnitOfWork.adjudicateAcceptedMove` calls `publishOnOpenTransaction` on the same client when a terminal ordinal-6 move is accepted and a publisher is attached. The publisher does not `BEGIN` or `COMMIT` on that path. A pre-write rejection returns to the move; a post-write failure throws so the move, ledger, snapshot, and publication roll back together. The publisher is optional and defaults to unset, so Stage E stays unchanged.
+`PostgresTrustedUnitOfWork.adjudicateAcceptedMove` calls `publishOnOpenTransaction` on the same client when a terminal ordinal-6 move is accepted and a publisher is attached. The publisher does not `BEGIN` or `COMMIT` on that path. `published` and a verified `duplicate` set the fence to `COMPLETED` with `results_published=true` in that same transaction. Any `rejected` publication throws `F2B_PUBLICATION_REJECTED`, so the ledger, terminal snapshot, fence, admission outcome, and publication writes roll back together. The admission stays `pending` and the same command can be retried after the proof is corrected.
+
+No attached publisher is the production-disabled setting. A terminal H1 then stays `AWAIT_ADVANCE` with `resultsPublished=false`. That commit is not a ranked completed series. Stage E keeps this default.
 
 `publish()` is the standalone unit of work. It `BEGIN`s, locks, writes, and `COMMIT`s once.
 
@@ -76,7 +78,7 @@ Node 26.13.1. PostgreSQL 18 at `127.0.0.1:55432`, database `pzd_ingress`. No ski
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | PASS |
-| `npm run test:stage-f2` | 56 pass, 0 fail, 0 skip |
+| `npm run test:stage-f2` | 58 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1` | 10 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-auth` | 49 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-http` | 2 pass, 0 fail, 0 skip |

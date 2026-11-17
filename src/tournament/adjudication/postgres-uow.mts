@@ -105,7 +105,11 @@ export class PostgresTrustedUnitOfWork {
 
   /**
    * Attach F2-B publication to the H1 terminal move commit.
-   * Null leaves Stage E move adjudication unchanged.
+   * Null is the production-disabled setting: a terminal H1 stays
+   * AWAIT_ADVANCE with resultsPublished false and is not a ranked series.
+   * When a publisher is attached, published and verified duplicate complete
+   * the series. Any rejected publication aborts the move and leaves the
+   * admission pending.
    */
   setSixGamePublisher(publisher: SixGamePublisher | null): void {
     this.#sixGamePublisher = publisher;
@@ -404,19 +408,20 @@ export class PostgresTrustedUnitOfWork {
             event: 'h1_terminal_move',
           },
         );
-        if (published.outcome === 'published' || published.outcome === 'duplicate') {
-          nextFence = {
-            ...nextFence,
-            status: 'COMPLETED',
-            resultsPublished: true,
-          };
-          await client.query(
-            `UPDATE series_fence_state
-             SET status = 'COMPLETED', results_published = TRUE
-             WHERE series_key = $1`,
-            [input.seriesKey],
-          );
+        if (published.outcome === 'rejected') {
+          throw new Error(`F2B_PUBLICATION_REJECTED:${published.reason}`);
         }
+        nextFence = {
+          ...nextFence,
+          status: 'COMPLETED',
+          resultsPublished: true,
+        };
+        await client.query(
+          `UPDATE series_fence_state
+           SET status = 'COMPLETED', results_published = TRUE
+           WHERE series_key = $1`,
+          [input.seriesKey],
+        );
       }
 
       const result = freezeAdmissionResult({

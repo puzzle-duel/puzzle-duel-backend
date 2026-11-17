@@ -943,7 +943,8 @@ export class F2BPublicationService {
 
   /**
    * Publication writes for a caller that already opened the series transaction.
-   * Does not commit. Used by PostgresTrustedUnitOfWork on the terminal H1 move.
+   * Does not commit. A rejected result must abort that transaction. The unit
+   * of work rolls the move back and leaves the admission pending.
    */
   async publishOnOpenTransaction(
     client: pg.PoolClient,
