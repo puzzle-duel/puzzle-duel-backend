@@ -22,6 +22,8 @@ const TOP_LEVEL_KEYS = new Set([
   'idempotencyKey',
   'move',
   'clientReportedStateHash',
+  /** Required for device_handoff — caller-observed generation (P0-F11). */
+  'expectedWriterGeneration',
 ]);
 
 const MOVE_KEYS = new Set([
@@ -80,6 +82,8 @@ export interface UntrustedClientCommand {
   idempotencyKey: string;
   move?: UntrustedMovePayload;
   clientReportedStateHash?: string;
+  /** Caller-observed writer generation; mandatory for device_handoff. */
+  expectedWriterGeneration?: number;
 }
 
 export type ClientCommandValidation =
@@ -209,6 +213,15 @@ export function validateUntrustedClientCommand(
     return { ok: false, reason: 'UNKNOWN_PROPERTY' };
   }
 
+  let expectedWriterGeneration: number | undefined;
+  if (commandType === 'device_handoff') {
+    const gen = asSafeNonNegInt(raw.expectedWriterGeneration);
+    if (!gen.ok || gen.value < 1) return { ok: false, reason: 'MALFORMED_COMMAND' };
+    expectedWriterGeneration = gen.value;
+  } else if (raw.expectedWriterGeneration !== undefined) {
+    return { ok: false, reason: 'UNKNOWN_PROPERTY' };
+  }
+
   return {
     ok: true,
     command: {
@@ -217,6 +230,9 @@ export function validateUntrustedClientCommand(
       ...(move ? { move } : {}),
       ...(topHash.value !== undefined
         ? { clientReportedStateHash: topHash.value }
+        : {}),
+      ...(expectedWriterGeneration !== undefined
+        ? { expectedWriterGeneration }
         : {}),
     },
   };
@@ -248,16 +264,21 @@ export function computeAuthoritativePayloadDigest(args: {
 }): string {
   // Omit mutable series.activeSubgameOrdinal so post-advance retries of the
   // same command still match the original idempotency digest (P1-E04).
+  // Omit auth.session.writerGeneration for device_handoff — generation advances
+  // on success; caller-observed expectedWriterGeneration is the stable binding
+  // (P1-F15). Move commands still bind via move.writerGeneration.
   const body: Record<string, unknown> = {
     authProofId: args.auth.authProofId,
     playerId: args.auth.principal.playerId,
     seriesKey: args.auth.series.seriesKey,
     sessionId: args.auth.session.sessionId,
     deviceId: args.auth.session.deviceId,
-    writerGeneration: args.auth.session.writerGeneration,
     commandType: args.command.commandType,
     idempotencyKey: args.command.idempotencyKey,
   };
+  if (args.command.commandType !== 'device_handoff') {
+    body.writerGeneration = args.auth.session.writerGeneration;
+  }
   if (args.command.move) {
     body.move = {
       offerIndex: args.command.move.offerIndex,
@@ -265,6 +286,9 @@ export function computeAuthoritativePayloadDigest(args: {
       expectedBoardRevision: args.command.move.expectedBoardRevision,
       writerGeneration: args.command.move.writerGeneration,
     };
+  }
+  if (args.command.expectedWriterGeneration !== undefined) {
+    body.expectedWriterGeneration = args.command.expectedWriterGeneration;
   }
   return createHash('sha256').update(canonicalJson(body), 'utf8').digest('hex');
 }

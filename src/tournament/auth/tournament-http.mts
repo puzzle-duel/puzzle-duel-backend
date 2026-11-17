@@ -14,11 +14,13 @@ import {
 } from './pinned-jwt-verifier.mts';
 import type { PostgresVerifiedIdentitySessionStore } from './postgres-verified-sessions.mts';
 import type { AtomicDailyClaimBootstrap } from '../claims/atomic-claim-bootstrap.mts';
+import { resolveActiveSubgameOrdinal } from '../claims/active-ordinal.mts';
 import type { PostgresSeriesWriterStore } from './series-writer-binding.mts';
 import { SessionAuthorizationGateway } from './session-authorization-gateway.mts';
 import type { TrustedGameplayService } from '../adjudication/trusted-gameplay.mts';
 import { validateUntrustedClientCommand } from '../adjudication/client-commands.mts';
 import type { SeriesFenceStore } from '../ingress/series-fence.mts';
+import type pg from 'pg';
 
 const MAX_BODY = 16_384;
 
@@ -58,6 +60,8 @@ export interface TournamentHttpDeps {
   claims: AtomicDailyClaimBootstrap;
   writers: PostgresSeriesWriterStore;
   fence: SeriesFenceStore;
+  /** Pool used for canonical ordinal resolution (P1-F14). */
+  pool: pg.Pool;
   /**
    * Factory: build a TrustedGameplayService bound to this verified session.
    * Must use SessionAuthorizationGateway — never MemoryVerifiedAuthorizationGateway.
@@ -228,42 +232,27 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
           return;
         }
 
-        // Explicit handoff updates writer binding before gameplay.
-        if (validated.command.commandType === 'device_handoff') {
-          const writer = await deps.writers.get(seriesId);
-          if (!writer || writer.playerId !== session.playerId) {
-            send(res, 403, { error: 'SERIES_NOT_OWNED' });
-            return;
-          }
-          const handoff = await deps.writers.handoff({
-            seriesKey: seriesId,
-            playerId: session.playerId,
-            expectedGeneration: writer.writerGeneration,
-            nextSessionId: session.sessionId,
-            nextDeviceId: session.deviceId,
-          });
-          if (!handoff.ok) {
-            send(res, 409, { error: handoff.reason });
-            return;
-          }
-        }
-
+        // P0-F11/F12/P1-F15: no writer mutation before authoritative admission.
+        // device_handoff goes through TrustedGameplayService → AtomicDeviceHandoffUnitOfWork.
         const gateway = new SessionAuthorizationGateway({
           session,
           writers: deps.writers,
           loadOwnedClaim: (playerId, key) =>
             deps.claims.getClaimForPlayer(playerId, key),
-          resolveActiveOrdinal: async () => 1,
+          resolveActiveOrdinal: (key, playerId) =>
+            resolveActiveSubgameOrdinal(deps.pool, key, playerId),
         });
         const gameplay = deps.gameplayForSession(gateway);
-        const moveWriter =
+        const writerHint =
           validated.command.commandType === 'move' && validated.command.move
             ? validated.command.move.writerGeneration
-            : undefined;
+            : validated.command.commandType === 'device_handoff'
+              ? validated.command.expectedWriterGeneration
+              : undefined;
         const decision = await gameplay.handleClientCommand(validated.command, {
           seriesKeyHint: seriesId,
           playerIdHint: session.playerId,
-          writerGenerationHint: moveWriter,
+          writerGenerationHint: writerHint,
         });
         if (decision.decision === 'unavailable') {
           send(res, 503, { error: decision.reason });

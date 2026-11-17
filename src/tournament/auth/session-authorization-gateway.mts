@@ -63,14 +63,14 @@ export class SessionAuthorizationGateway implements AuthorizationGateway {
     if (!writer || writer.playerId !== this.#deps.session.playerId) {
       return { ok: false, reason: 'SERIES_NOT_OWNED' };
     }
+    // P0-F11 fail-closed: only the active writer session/device may mutate,
+    // including device_handoff. Cross-device seize by another same-player
+    // session is rejected; broader recovery policy remains BLOCKED.
     if (
       writer.sessionId !== this.#deps.session.sessionId ||
       writer.deviceId !== this.#deps.session.deviceId
     ) {
-      // Session is authenticated owner but not active writer.
-      if (args.commandType !== 'device_handoff') {
-        return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
-      }
+      return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
     }
     if (
       args.clientClaimedWriterGeneration !== undefined &&

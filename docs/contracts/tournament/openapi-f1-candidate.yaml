@@ -119,6 +119,9 @@ paths:
                 idempotencyKey:
                   type: string
                   maxLength: 128
+                expectedWriterGeneration:
+                  type: integer
+                  description: Required for device_handoff — caller-observed generation (P0-F11)
                 move:
                   type: object
                   additionalProperties: false
