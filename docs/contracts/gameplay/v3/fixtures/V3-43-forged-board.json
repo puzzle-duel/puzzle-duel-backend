@@ -1,0 +1,107 @@
+{
+  "id": "V3-43",
+  "kind": "replaySecurity",
+  "rulesVersion": "core-001.v3",
+  "summary": "Forged board with self-consistent hash fails strict full client-report comparison",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "trustedInitial": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "right"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "moves": [
+    {
+      "offerIndex": 0,
+      "tap": [
+        0,
+        0
+      ]
+    }
+  ],
+  "clientReport": {
+    "score": 0,
+    "board": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 1,
+    "status": "in_progress",
+    "terminalReason": null,
+    "stateHash": "c625c1903fcaa2b8639dea911184f491f134ed0d5fec023120ac43f380117c1a"
+  },
+  "expected": {
+    "replayOk": true,
+    "fullCompareOk": false,
+    "mismatchesInclude": [
+      "board_mismatch",
+      "state_hash_mismatch"
+    ],
+    "authenticStateHash": "b0ecee3d68d889fe2c540f58019fb7a748d4c7af3c53b96bd03aa4e591e2c4dd",
+    "forgedStateHash": "c625c1903fcaa2b8639dea911184f491f134ed0d5fec023120ac43f380117c1a"
+  }
+}
