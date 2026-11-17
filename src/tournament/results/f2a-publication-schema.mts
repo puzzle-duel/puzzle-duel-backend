@@ -1,28 +1,40 @@
 /**
  * PZD-41 Stage F2-A — additive PostgreSQL publication schema (hardened).
  *
- * FOUNDATION ONLY: DDL + constraint surface + fail-closed readiness predicate.
+ * FOUNDATION ONLY: DDL + structural completeness + migration safety.
  * Does NOT implement F2-B atomic publish UoW, leaderboard HTTP, or weekly FINAL.
  *
- * Trust boundary:
- *   - Structural readiness (this module) proves rows are complete and
- *     referentially consistent with the F1 claim.
- *   - Trusted gameplay authorization (Stage E replay + F2-B) is a separate
- *     gate; a synthetic fixture is NOT evidence of replay verification.
+ * ============================================================================ BOUNDARY (binding):
+ *   - `tournament_f2a_structural_readiness` / `evaluateStructuralReadiness`
+ *     prove only that publication *rows* are complete and claim-referential.
+ *   - Structural completeness is NEVER Stage E replay verification and NEVER
+ *     leaderboard publication authorization.
+ *   - F2-B must mint a trusted-provenance attestation after verifying six
+ *     terminal snapshots + ledgers under server replay.
+ *   - F2-C leaderboard reads MUST call `evaluateLeaderboardReadEligibility`
+ *     with an F2-B attestation; structural readiness alone is prohibited.
+ *   - Synthetic fixtures can be structurally complete and still unauthorized.
  *
  * Claim integrity (P0):
- *   Completion (series_id, player_id, original_utc_date, claim_started_at_ms,
- *   manifest_digest) is a composite FK to an additive UNIQUE on
+ *   Completion identity columns composite-FK to an additive UNIQUE on
  *   tournament_daily_claim. Mismatched identity is rejected at the PG boundary.
  */
 
-/** Additive UNIQUE on F1 claim so completion can composite-FK identity fields. */
+/** Idempotent additive UNIQUE + identity-immutability trigger on F1 claim. */
 export const F2A_CLAIM_IDENTITY_DDL = `
-ALTER TABLE tournament_daily_claim
-  DROP CONSTRAINT IF EXISTS tournament_daily_claim_f2a_identity_uq;
-ALTER TABLE tournament_daily_claim
-  ADD CONSTRAINT tournament_daily_claim_f2a_identity_uq
-  UNIQUE (series_id, player_id, original_utc_date, started_at_ms, manifest_digest);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'tournament_daily_claim_f2a_identity_uq'
+      AND conrelid = 'tournament_daily_claim'::regclass
+  ) THEN
+    ALTER TABLE tournament_daily_claim
+      ADD CONSTRAINT tournament_daily_claim_f2a_identity_uq
+      UNIQUE (series_id, player_id, original_utc_date, started_at_ms, manifest_digest);
+  END IF;
+END $$;
 
 CREATE OR REPLACE FUNCTION tournament_daily_claim_reject_identity_mutation()
 RETURNS trigger
@@ -41,12 +53,21 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS trg_tournament_daily_claim_identity_immutable
-  ON tournament_daily_claim;
-CREATE TRIGGER trg_tournament_daily_claim_identity_immutable
-  BEFORE UPDATE ON tournament_daily_claim
-  FOR EACH ROW
-  EXECUTE FUNCTION tournament_daily_claim_reject_identity_mutation();
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'trg_tournament_daily_claim_identity_immutable'
+      AND tgrelid = 'tournament_daily_claim'::regclass
+      AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER trg_tournament_daily_claim_identity_immutable
+      BEFORE UPDATE ON tournament_daily_claim
+      FOR EACH ROW
+      EXECUTE FUNCTION tournament_daily_claim_reject_identity_mutation();
+  END IF;
+END $$;
 `;
 
 /** Fresh F2-A publication tables with composite claim FK. */
@@ -113,12 +134,17 @@ CREATE TABLE IF NOT EXISTS tournament_on_time_badge (
 `;
 
 /**
- * Upgrade path when an older F2-A completion table exists with series_id-only FK.
- * Fail-closed: refuses to proceed if rows already contradict the claim identity.
+ * Idempotent upgrade from series_id-only FK schema.
+ * Does not DROP/ADD constraints that already match the hardened shape.
+ * Fail-closed if existing rows contradict claim identity.
  */
 export const F2A_PUBLICATION_UPGRADE_DDL = `
 DO $$
 BEGIN
+  IF to_regclass('public.tournament_daily_series_completion') IS NULL THEN
+    RETURN;
+  END IF;
+
   IF EXISTS (
     SELECT 1
     FROM tournament_daily_series_completion c
@@ -130,42 +156,70 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'F2A_UPGRADE_BLOCKED_CLAIM_IDENTITY_MISMATCH';
   END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tournament_daily_series_completion_series_id_fkey'
+      AND conrelid = 'tournament_daily_series_completion'::regclass
+  ) THEN
+    ALTER TABLE tournament_daily_series_completion
+      DROP CONSTRAINT tournament_daily_series_completion_series_id_fkey;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tournament_daily_series_completion_claim_identity_fkey'
+      AND conrelid = 'tournament_daily_series_completion'::regclass
+  ) THEN
+    ALTER TABLE tournament_daily_series_completion
+      ADD CONSTRAINT tournament_daily_series_completion_claim_identity_fkey
+      FOREIGN KEY (series_id, player_id, original_utc_date, claim_started_at_ms, manifest_digest)
+      REFERENCES tournament_daily_claim (series_id, player_id, original_utc_date, started_at_ms, manifest_digest);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'tournament_daily_series_completion_series_id_claim_started_at_ms_original_utc_date_key'
+      AND conrelid = 'tournament_daily_series_completion'::regclass
+  ) THEN
+    ALTER TABLE tournament_daily_series_completion
+      ADD CONSTRAINT tournament_daily_series_completion_series_id_claim_started_at_ms_original_utc_date_key
+      UNIQUE (series_id, claim_started_at_ms, original_utc_date);
+  END IF;
+
+  IF to_regclass('public.tournament_on_time_badge') IS NOT NULL THEN
+    IF EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'tournament_on_time_badge_series_id_fkey'
+        AND conrelid = 'tournament_on_time_badge'::regclass
+    ) THEN
+      ALTER TABLE tournament_on_time_badge
+        DROP CONSTRAINT tournament_on_time_badge_series_id_fkey;
+    END IF;
+
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'tournament_on_time_badge_completion_identity_fkey'
+        AND conrelid = 'tournament_on_time_badge'::regclass
+    ) THEN
+      ALTER TABLE tournament_on_time_badge
+        ADD CONSTRAINT tournament_on_time_badge_completion_identity_fkey
+        FOREIGN KEY (series_id, claim_started_at_ms, original_utc_date)
+        REFERENCES tournament_daily_series_completion (series_id, claim_started_at_ms, original_utc_date)
+        ON DELETE CASCADE;
+    END IF;
+  END IF;
 END $$;
-
-ALTER TABLE tournament_daily_series_completion
-  DROP CONSTRAINT IF EXISTS tournament_daily_series_completion_series_id_fkey;
-ALTER TABLE tournament_daily_series_completion
-  DROP CONSTRAINT IF EXISTS tournament_daily_series_completion_claim_identity_fkey;
-
-ALTER TABLE tournament_daily_series_completion
-  ADD CONSTRAINT tournament_daily_series_completion_claim_identity_fkey
-  FOREIGN KEY (series_id, player_id, original_utc_date, claim_started_at_ms, manifest_digest)
-  REFERENCES tournament_daily_claim (series_id, player_id, original_utc_date, started_at_ms, manifest_digest);
-
-ALTER TABLE tournament_daily_series_completion
-  DROP CONSTRAINT IF EXISTS tournament_daily_series_completion_series_id_claim_started_at_ms_original_utc_date_key;
-ALTER TABLE tournament_daily_series_completion
-  ADD CONSTRAINT tournament_daily_series_completion_series_id_claim_started_at_ms_original_utc_date_key
-  UNIQUE (series_id, claim_started_at_ms, original_utc_date);
-
-ALTER TABLE tournament_on_time_badge
-  DROP CONSTRAINT IF EXISTS tournament_on_time_badge_series_id_fkey;
-ALTER TABLE tournament_on_time_badge
-  DROP CONSTRAINT IF EXISTS tournament_on_time_badge_completion_identity_fkey;
-ALTER TABLE tournament_on_time_badge
-  ADD CONSTRAINT tournament_on_time_badge_completion_identity_fkey
-  FOREIGN KEY (series_id, claim_started_at_ms, original_utc_date)
-  REFERENCES tournament_daily_series_completion (series_id, claim_started_at_ms, original_utc_date)
-  ON DELETE CASCADE;
 `;
 
 /**
- * Fail-closed publication readiness view.
- * Absence from this view == NOT_VISIBLE (never a partial leaderboard row).
- * This is a structural contract for F2-C reads — not a production HTTP endpoint.
+ * STRUCTURAL readiness only — NOT publication authorization.
+ * Absence == structurally incomplete. Presence does NOT authorize leaderboard reads.
+ * Former name tournament_f2a_publication_ready is dropped; do not recreate it.
  */
-export const F2A_PUBLICATION_READY_VIEW_DDL = `
-CREATE OR REPLACE VIEW tournament_f2a_publication_ready AS
+export const F2A_STRUCTURAL_READINESS_VIEW_DDL = `
+DROP VIEW IF EXISTS tournament_f2a_publication_ready;
+CREATE OR REPLACE VIEW tournament_f2a_structural_readiness AS
 SELECT
   c.series_id,
   c.player_id,
@@ -179,7 +233,9 @@ SELECT
   medium.score AS medium_score,
   hard.score AS hard_score,
   allcat.score AS all_score,
-  badge.awarded AS on_time_awarded
+  badge.awarded AS on_time_awarded,
+  FALSE AS replay_verified,
+  FALSE AS publication_authorized
 FROM tournament_daily_series_completion c
 JOIN tournament_daily_claim cl
   ON cl.series_id = c.series_id
@@ -230,22 +286,156 @@ WHERE c.revision >= 1
   );
 `;
 
+/** @deprecated Use F2A_STRUCTURAL_READINESS_VIEW_DDL */
+export const F2A_PUBLICATION_READY_VIEW_DDL = F2A_STRUCTURAL_READINESS_VIEW_DDL;
+
+/**
+ * Rollback for disposable/review DBs.
+ * Drops F2-A objects only; restores F1 claim table to pre-F2-A constraints
+ * without deleting claim rows (constraint/trigger removal only).
+ */
 export const F2A_PUBLICATION_DROP_DDL = `
+DROP VIEW IF EXISTS tournament_f2a_structural_readiness;
 DROP VIEW IF EXISTS tournament_f2a_publication_ready;
 DROP TABLE IF EXISTS tournament_on_time_badge;
 DROP TABLE IF EXISTS tournament_daily_result_category;
 DROP TABLE IF EXISTS tournament_verified_subgame_score;
 DROP TABLE IF EXISTS tournament_daily_series_completion;
-DROP TRIGGER IF EXISTS trg_tournament_daily_claim_identity_immutable ON tournament_daily_claim;
+DO $$
+BEGIN
+  IF to_regclass('public.tournament_daily_claim') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_tournament_daily_claim_identity_immutable
+      ON tournament_daily_claim;
+    ALTER TABLE tournament_daily_claim
+      DROP CONSTRAINT IF EXISTS tournament_daily_claim_f2a_identity_uq;
+  END IF;
+END $$;
 DROP FUNCTION IF EXISTS tournament_daily_claim_reject_identity_mutation();
-ALTER TABLE tournament_daily_claim
-  DROP CONSTRAINT IF EXISTS tournament_daily_claim_f2a_identity_uq;
 `;
 
 export const F2A_CATEGORIES = ['EASY', 'MEDIUM', 'HARD', 'ALL'] as const;
 export type F2ACategory = (typeof F2A_CATEGORIES)[number];
 
-export type PublicationReadiness =
+/** Structural completeness only — NOT leaderboard authorization. */
+export type StructuralReadiness =
+  | {
+      structurallyComplete: true;
+      /** Always false at F2-A — Stage E/F2-B replay verification is separate. */
+      replayVerified: false;
+      /** Always false at F2-A — publication requires F2-B attestation. */
+      publicationAuthorized: false;
+      seriesId: string;
+      playerId: string;
+      originalUtcDate: string;
+      revision: number;
+      easy: number;
+      medium: number;
+      hard: number;
+      all: number;
+      onTimeAwarded: boolean;
+    }
+  | { structurallyComplete: false; reason: 'STRUCTURAL_NOT_READY' };
+
+/**
+ * Opaque F2-B trusted-provenance attestation.
+ * F2-A exports NO minting API. Only a future F2-B module may construct this.
+ * F2-C must require it; structural readiness alone is prohibited.
+ */
+/**
+ * Runtime brand key. F2-A intentionally does NOT export a mint helper.
+ * Plain objects without this exact key cannot satisfy leaderboard authorization.
+ */
+export const F2B_TRUSTED_PROVENANCE_BRAND =
+  '__pzd_f2b_trusted_provenance_attestation__' as const;
+export type F2BTrustedProvenanceAttestation = {
+  readonly [F2B_TRUSTED_PROVENANCE_BRAND]: true;
+  readonly seriesId: string;
+  readonly sixTerminalProvenanceVerified: true;
+  readonly verifiedAtMs: number;
+  readonly revision: number;
+};
+
+export type LeaderboardReadEligibility =
+  | {
+      authorized: true;
+      seriesId: string;
+      playerId: string;
+      originalUtcDate: string;
+      revision: number;
+      easy: number;
+      medium: number;
+      hard: number;
+      all: number;
+      onTimeAwarded: boolean;
+    }
+  | {
+      authorized: false;
+      reason:
+        | 'STRUCTURAL_NOT_READY'
+        | 'TRUSTED_PROVENANCE_REQUIRED'
+        | 'PROVENANCE_SERIES_MISMATCH'
+        | 'F2B_GATE_NOT_IMPLEMENTED';
+    };
+
+type Queryable = {
+  query: (
+    text: string,
+    params?: readonly unknown[],
+  ) => Promise<{ rows: Record<string, unknown>[] }>;
+};
+
+/** Apply claim identity + publication DDL + structural readiness view (idempotent). */
+export async function migrateF2APublicationSchema(db: Queryable): Promise<void> {
+  await db.query(F2A_CLAIM_IDENTITY_DDL);
+  await db.query(F2A_PUBLICATION_DDL);
+  await db.query(F2A_PUBLICATION_UPGRADE_DDL);
+  await db.query(F2A_STRUCTURAL_READINESS_VIEW_DDL);
+}
+
+/**
+ * Structural completeness predicate for F2-A proofs / F2-B preconditions.
+ * MUST NOT be used alone for F2-C leaderboard reads.
+ */
+export async function evaluateStructuralReadiness(
+  db: Queryable,
+  seriesId: string,
+): Promise<StructuralReadiness> {
+  const result = await db.query(
+    `SELECT series_id, player_id, original_utc_date, revision,
+            easy_score, medium_score, hard_score, all_score, on_time_awarded,
+            replay_verified, publication_authorized
+     FROM tournament_f2a_structural_readiness
+     WHERE series_id = $1`,
+    [seriesId],
+  );
+  if (result.rows.length !== 1) {
+    return { structurallyComplete: false, reason: 'STRUCTURAL_NOT_READY' };
+  }
+  const row = result.rows[0]!;
+  return {
+    structurallyComplete: true,
+    replayVerified: false,
+    publicationAuthorized: false,
+    seriesId: String(row.series_id),
+    playerId: String(row.player_id),
+    originalUtcDate: String(row.original_utc_date),
+    revision: Number(row.revision),
+    easy: Number(row.easy_score),
+    medium: Number(row.medium_score),
+    hard: Number(row.hard_score),
+    all: Number(row.all_score),
+    onTimeAwarded: Boolean(row.on_time_awarded),
+  };
+}
+
+/**
+ * @deprecated Name retained for older call sites; returns structural readiness only.
+ * Does NOT authorize publication. Prefer evaluateStructuralReadiness.
+ */
+export async function evaluatePublicationReadiness(
+  db: Queryable,
+  seriesId: string,
+): Promise<
   | {
       visible: true;
       seriesId: string;
@@ -258,53 +448,66 @@ export type PublicationReadiness =
       all: number;
       onTimeAwarded: boolean;
     }
-  | { visible: false; reason: 'NOT_VISIBLE' };
+  | { visible: false; reason: 'NOT_VISIBLE' }
+> {
+  const structural = await evaluateStructuralReadiness(db, seriesId);
+  if (!structural.structurallyComplete) {
+    return { visible: false, reason: 'NOT_VISIBLE' };
+  }
+  return {
+    visible: true,
+    seriesId: structural.seriesId,
+    playerId: structural.playerId,
+    originalUtcDate: structural.originalUtcDate,
+    revision: structural.revision,
+    easy: structural.easy,
+    medium: structural.medium,
+    hard: structural.hard,
+    all: structural.all,
+    onTimeAwarded: structural.onTimeAwarded,
+  };
+}
 
-type Queryable = {
-  query: (
-    text: string,
-    params?: readonly unknown[],
-  ) => Promise<{ rows: Record<string, unknown>[] }>;
-};
-
-/** Apply claim identity + publication DDL + readiness view (disposable / review DBs). */
-export async function migrateF2APublicationSchema(db: Queryable): Promise<void> {
-  await db.query(F2A_CLAIM_IDENTITY_DDL);
-  await db.query(F2A_PUBLICATION_DDL);
-  await db.query(F2A_PUBLICATION_READY_VIEW_DDL);
+function isF2BTrustedProvenanceAttestation(
+  value: unknown,
+): value is F2BTrustedProvenanceAttestation {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    (value as { sixTerminalProvenanceVerified?: unknown })
+      .sixTerminalProvenanceVerified === true &&
+    typeof (value as { seriesId?: unknown }).seriesId === 'string' &&
+    F2B_TRUSTED_PROVENANCE_BRAND in (value as object) &&
+    (value as Record<string, unknown>)[F2B_TRUSTED_PROVENANCE_BRAND] === true
+  );
 }
 
 /**
- * Canonical publication-readiness predicate for F2-C.
- * Incomplete/malformed/inconsistent publications return NOT_VISIBLE — never partial rows.
+ * Mandatory F2-C leaderboard read gate.
+ * Structural readiness alone is insufficient and returns TRUSTED_PROVENANCE_REQUIRED.
+ * Until F2-B ships a minting API, authorized:true is unreachable (F2B_GATE_NOT_IMPLEMENTED
+ * when a branded attestation is somehow present; otherwise TRUSTED_PROVENANCE_REQUIRED).
  */
-export async function evaluatePublicationReadiness(
+export async function evaluateLeaderboardReadEligibility(
   db: Queryable,
   seriesId: string,
-): Promise<PublicationReadiness> {
-  const result = await db.query(
-    `SELECT series_id, player_id, original_utc_date, revision,
-            easy_score, medium_score, hard_score, all_score, on_time_awarded
-     FROM tournament_f2a_publication_ready
-     WHERE series_id = $1`,
-    [seriesId],
-  );
-  if (result.rows.length !== 1) {
-    return { visible: false, reason: 'NOT_VISIBLE' };
+  provenance: F2BTrustedProvenanceAttestation | null | undefined,
+): Promise<LeaderboardReadEligibility> {
+  const structural = await evaluateStructuralReadiness(db, seriesId);
+  if (!structural.structurallyComplete) {
+    return { authorized: false, reason: 'STRUCTURAL_NOT_READY' };
   }
-  const row = result.rows[0]!;
-  return {
-    visible: true,
-    seriesId: String(row.series_id),
-    playerId: String(row.player_id),
-    originalUtcDate: String(row.original_utc_date),
-    revision: Number(row.revision),
-    easy: Number(row.easy_score),
-    medium: Number(row.medium_score),
-    hard: Number(row.hard_score),
-    all: Number(row.all_score),
-    onTimeAwarded: Boolean(row.on_time_awarded),
-  };
+  if (provenance == null) {
+    return { authorized: false, reason: 'TRUSTED_PROVENANCE_REQUIRED' };
+  }
+  if (!isF2BTrustedProvenanceAttestation(provenance)) {
+    return { authorized: false, reason: 'TRUSTED_PROVENANCE_REQUIRED' };
+  }
+  if (provenance.seriesId !== seriesId) {
+    return { authorized: false, reason: 'PROVENANCE_SERIES_MISMATCH' };
+  }
+  // F2-B minting / publish UoW is intentionally not implemented in F2-A.
+  return { authorized: false, reason: 'F2B_GATE_NOT_IMPLEMENTED' };
 }
 
 export function publicationIdempotencyKey(seriesId: string): string {

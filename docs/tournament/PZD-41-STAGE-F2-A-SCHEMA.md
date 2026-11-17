@@ -16,15 +16,17 @@ Depends on: PZD-39 Stage E + PZD-40 F1 merged to `main` (production-disabled ran
 - DELETE of claim while completion exists is RESTRICTED by FK.
 - On-Time badge composite FK to completion `(series_id, claim_started_at_ms, original_utc_date)`.
 
-### Fail-closed publication readiness
-- Canonical view: `tournament_f2a_publication_ready`.
-- TS predicate: `evaluatePublicationReadiness(db, seriesId)` → visible row **or** `{ visible:false, reason:'NOT_VISIBLE' }`.
-- Never returns a partial leaderboard row. Absence == NOT_VISIBLE.
-- Trust boundary: structural readiness only; Stage E replay / F2-B authorization is separate.
+### Fail-closed structural readiness (NOT publication authorization)
+- Canonical view: `tournament_f2a_structural_readiness` (always exposes `replay_verified=false`, `publication_authorized=false`).
+- TS: `evaluateStructuralReadiness` — row completeness only.
+- F2-C MUST use `evaluateLeaderboardReadEligibility` with an F2-B `F2BTrustedProvenanceAttestation`; structural readiness alone returns `TRUSTED_PROVENANCE_REQUIRED`.
+- F2-A mints no provenance attestation. Synthetic structurally-complete fixtures remain unauthorized.
+- Former view name `tournament_f2a_publication_ready` is dropped and must not be used.
 
 ### Upgrade / rollback
-- `F2A_PUBLICATION_UPGRADE_DDL` fails closed if existing completion rows contradict claim identity.
-- Rollback: `F2A_PUBLICATION_DROP_DDL` (drops view, F2-A tables, claim identity trigger/unique).
+- `F2A_CLAIM_IDENTITY_DDL` is idempotent: adds UNIQUE/trigger only when missing (no DROP/ADD churn).
+- `F2A_PUBLICATION_UPGRADE_DDL` fails closed on identity mismatch; adds composite FKs only when missing; drops legacy series_id-only FK only if present.
+- Rollback: `F2A_PUBLICATION_DROP_DDL` removes F2-A objects/trigger/unique without deleting F1 claim rows or weakening `UNIQUE(player_id, original_utc_date)`.
 
 ## Binding inputs (already on main)
 

@@ -12,10 +12,14 @@ import {
   F2A_CATEGORIES,
   F2A_PUBLICATION_DROP_DDL,
   F2A_PUBLICATION_UPGRADE_DDL,
+  F2B_TRUSTED_PROVENANCE_BRAND,
+  evaluateLeaderboardReadEligibility,
   evaluatePublicationReadiness,
+  evaluateStructuralReadiness,
   migrateF2APublicationSchema,
   onTimeBadgeFromClaim,
   publicationIdempotencyKey,
+  type F2BTrustedProvenanceAttestation,
 } from '../../../src/tournament/results/f2a-publication-schema.mts';
 
 const url = process.env.PZD_INGRESS_DATABASE_URL;
@@ -429,6 +433,12 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
       await insertBadge(pool, { seriesId, date, started });
       {
         const r = await evaluatePublicationReadiness(pool, seriesId);
+        const structural = await evaluateStructuralReadiness(pool, seriesId);
+        const leaderboard = await evaluateLeaderboardReadEligibility(
+          pool,
+          seriesId,
+          null,
+        );
         record(
           'correct complete fixture visible',
           r.visible === true &&
@@ -436,8 +446,13 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
             r.medium === 90 &&
             r.hard === 60 &&
             r.all === 210 &&
-            r.onTimeAwarded === true,
-          JSON.stringify(r),
+            r.onTimeAwarded === true &&
+            structural.structurallyComplete === true &&
+            structural.replayVerified === false &&
+            structural.publicationAuthorized === false &&
+            leaderboard.authorized === false &&
+            leaderboard.reason === 'TRUSTED_PROVENANCE_REQUIRED',
+          JSON.stringify({ r, structural, leaderboard }),
         );
       }
 
@@ -536,6 +551,201 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         matrix.every((m) => m.result === 'PASS'),
         true,
         'adversarial matrix contains FAIL',
+      );
+    } finally {
+      await pool.query(F2A_PUBLICATION_DROP_DDL);
+      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
+      await pool.end();
+    }
+  });
+});
+
+
+describe('PZD-41 F2-A — structural readiness is not publication authorization', () => {
+  it('synthetic structurally-complete rows remain leaderboard-unauthorized', async () => {
+    assert.ok(url, 'PostgreSQL required');
+    const pool = new pg.Pool({ connectionString: url, max: 4 });
+    try {
+      await resetSchema(pool);
+      const seriesId = randomUUID();
+      const date = '2026-11-17';
+      const started = Date.parse('2026-11-17T08:00:00.000Z');
+      await insertClaim(pool, {
+        seriesId,
+        playerId: 'synthetic-player',
+        date,
+        started,
+      });
+      // Synthetic fixture — structurally complete, NOT Stage E replay-verified.
+      await publishComplete(pool, {
+        seriesId,
+        playerId: 'synthetic-player',
+        date,
+        started,
+      });
+
+      const structural = await evaluateStructuralReadiness(pool, seriesId);
+      assert.equal(structural.structurallyComplete, true);
+      if (!structural.structurallyComplete) return;
+      assert.equal(structural.replayVerified, false);
+      assert.equal(structural.publicationAuthorized, false);
+
+      const viewFlags = await pool.query(
+        `SELECT replay_verified, publication_authorized
+         FROM tournament_f2a_structural_readiness WHERE series_id = $1`,
+        [seriesId],
+      );
+      assert.equal(viewFlags.rows.length, 1);
+      assert.equal(viewFlags.rows[0].replay_verified, false);
+      assert.equal(viewFlags.rows[0].publication_authorized, false);
+
+      const withoutAttestation = await evaluateLeaderboardReadEligibility(
+        pool,
+        seriesId,
+        null,
+      );
+      assert.deepEqual(withoutAttestation, {
+        authorized: false,
+        reason: 'TRUSTED_PROVENANCE_REQUIRED',
+      });
+
+      // Forged plain-object "attestation" without brand must not authorize.
+      const forged = {
+        seriesId,
+        sixTerminalProvenanceVerified: true as const,
+        verifiedAtMs: Date.now(),
+        revision: 1,
+      };
+      const forgedResult = await evaluateLeaderboardReadEligibility(
+        pool,
+        seriesId,
+        forged as unknown as F2BTrustedProvenanceAttestation,
+      );
+      assert.equal(forgedResult.authorized, false);
+      assert.equal(forgedResult.reason, 'TRUSTED_PROVENANCE_REQUIRED');
+
+      // Even a branded object cannot authorize until F2-B minting exists.
+      const branded = {
+        [F2B_TRUSTED_PROVENANCE_BRAND]: true as const,
+        seriesId,
+        sixTerminalProvenanceVerified: true as const,
+        verifiedAtMs: Date.now(),
+        revision: 1,
+      } as F2BTrustedProvenanceAttestation;
+      const brandedResult = await evaluateLeaderboardReadEligibility(
+        pool,
+        seriesId,
+        branded,
+      );
+      assert.equal(brandedResult.authorized, false);
+      assert.equal(brandedResult.reason, 'F2B_GATE_NOT_IMPLEMENTED');
+
+      // Old publication_ready view name must not exist.
+      const oldView = await pool.query(
+        `SELECT to_regclass('public.tournament_f2a_publication_ready') AS reg`,
+      );
+      assert.equal(oldView.rows[0].reg, null);
+    } finally {
+      await pool.query(F2A_PUBLICATION_DROP_DDL);
+      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
+      await pool.end();
+    }
+  });
+});
+
+describe('PZD-41 F2-A — idempotent claim-identity migration safety', () => {
+  it('reapplies without DROP/ADD churn; upgrade and rollback preserve F1 uniqueness', async () => {
+    assert.ok(url, 'PostgreSQL required');
+    const pool = new pg.Pool({ connectionString: url, max: 4 });
+    try {
+      await pool.query(F2A_PUBLICATION_DROP_DDL);
+      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
+      await pool.query(DAILY_CLAIM_DDL);
+
+      await migrateF2APublicationSchema(pool);
+      const before = await pool.query(
+        `SELECT oid FROM pg_constraint
+         WHERE conname = 'tournament_daily_claim_f2a_identity_uq'
+           AND conrelid = 'tournament_daily_claim'::regclass`,
+      );
+      assert.equal(before.rows.length, 1);
+      const oidBefore = before.rows[0].oid;
+
+      // Second apply must be a no-op for the unique constraint (same OID).
+      await migrateF2APublicationSchema(pool);
+      const after = await pool.query(
+        `SELECT oid FROM pg_constraint
+         WHERE conname = 'tournament_daily_claim_f2a_identity_uq'
+           AND conrelid = 'tournament_daily_claim'::regclass`,
+      );
+      assert.equal(after.rows.length, 1);
+      assert.equal(after.rows[0].oid, oidBefore);
+
+      const trigger = await pool.query(
+        `SELECT tgname FROM pg_trigger
+         WHERE tgname = 'trg_tournament_daily_claim_identity_immutable'
+           AND tgrelid = 'tournament_daily_claim'::regclass
+           AND NOT tgisinternal`,
+      );
+      assert.equal(trigger.rows.length, 1);
+
+      // Upgrade path re-run is also idempotent.
+      await pool.query(F2A_PUBLICATION_UPGRADE_DDL);
+      await pool.query(F2A_PUBLICATION_UPGRADE_DDL);
+
+      const seriesId = randomUUID();
+      const date = '2026-11-17';
+      const started = Date.parse('2026-11-17T10:00:00.000Z');
+      await insertClaim(pool, {
+        seriesId,
+        playerId: 'idem-player',
+        date,
+        started,
+      });
+      await publishComplete(pool, {
+        seriesId,
+        playerId: 'idem-player',
+        date,
+        started,
+      });
+      assert.equal(
+        (await evaluateStructuralReadiness(pool, seriesId)).structurallyComplete,
+        true,
+      );
+
+      // Rollback F2-A objects; F1 claim table and UNIQUE(player_id, date) remain.
+      await pool.query(F2A_PUBLICATION_DROP_DDL);
+      const f1Unique = await pool.query(
+        `SELECT conname FROM pg_constraint
+         WHERE conrelid = 'tournament_daily_claim'::regclass
+           AND contype = 'u'`,
+      );
+      assert.ok(
+        f1Unique.rows.some(
+          (r) => r.conname === 'tournament_daily_claim_player_id_original_utc_date_key',
+        ),
+      );
+      const f2aGone = await pool.query(
+        `SELECT 1 FROM pg_constraint
+         WHERE conname = 'tournament_daily_claim_f2a_identity_uq'`,
+      );
+      assert.equal(f2aGone.rows.length, 0);
+
+      // Claim row still present; F1 uniqueness still enforces.
+      const claim = await pool.query(
+        `SELECT player_id FROM tournament_daily_claim WHERE series_id = $1`,
+        [seriesId],
+      );
+      assert.equal(claim.rows[0].player_id, 'idem-player');
+      await assert.rejects(
+        () =>
+          pool.query(
+            `INSERT INTO tournament_daily_claim
+               (series_id, player_id, original_utc_date, started_at_ms, manifest_digest, status)
+             VALUES ($1,'idem-player',$2::date,$3,$4,'ACTIVE')`,
+            [randomUUID(), date, started, DIGEST_A],
+          ),
+        /duplicate|unique/i,
       );
     } finally {
       await pool.query(F2A_PUBLICATION_DROP_DDL);

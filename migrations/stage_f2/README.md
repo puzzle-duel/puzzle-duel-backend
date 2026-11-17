@@ -47,4 +47,5 @@ Production versioned migration IDs, expand/contract rollout, and backup/restore 
 
 - Apply `F2A_CLAIM_IDENTITY_DDL` before publication tables (adds claim UNIQUE + immutability trigger).
 - Completion uses composite FK to claim identity; upgrade path is `F2A_PUBLICATION_UPGRADE_DDL`.
-- Readiness view `tournament_f2a_publication_ready` is the sole F2-A visibility contract for F2-C.
+- Structural view `tournament_f2a_structural_readiness` is completeness-only; F2-C must require F2-B provenance via `evaluateLeaderboardReadEligibility`.
+- Claim-identity DDL/upgrade are idempotent (no unnecessary DROP/ADD).
