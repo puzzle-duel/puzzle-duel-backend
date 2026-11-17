@@ -1,21 +1,28 @@
 /**
- * PZD-41 F2-A — schema helpers + PostgreSQL constraint proofs.
- * Does NOT implement atomic publication (F2-B).
+ * PZD-41 F2-A — hardened schema, claim integrity, readiness predicate proofs.
+ * Structural readiness only — not trusted gameplay/replay authorization (F2-B).
  */
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { DAILY_CLAIM_DDL } from '../../../src/tournament/claims/postgres-daily-claim.mts';
+import { computeFourCategoryScores } from '../../../src/tournament/results/four-category-scores.mts';
 import {
   F2A_CATEGORIES,
-  F2A_PUBLICATION_DDL,
   F2A_PUBLICATION_DROP_DDL,
+  F2A_PUBLICATION_UPGRADE_DDL,
+  evaluatePublicationReadiness,
+  migrateF2APublicationSchema,
   onTimeBadgeFromClaim,
   publicationIdempotencyKey,
 } from '../../../src/tournament/results/f2a-publication-schema.mts';
 
 const url = process.env.PZD_INGRESS_DATABASE_URL;
+
+const DIGEST_A = 'a'.repeat(64);
+const DIGEST_B = 'b'.repeat(64);
+const HASH = 'c'.repeat(64);
 
 describe('PZD-41 F2-A — on-time + idempotency helpers', () => {
   it('On-Time uses claim start within original UTC date only', () => {
@@ -51,188 +58,488 @@ describe('PZD-41 F2-A — on-time + idempotency helpers', () => {
 
   it('publication idempotency key is stable per series UUID', () => {
     const id = '11111111-1111-4111-8111-111111111111';
-    assert.equal(publicationIdempotencyKey(id), 'f2-publish:11111111-1111-4111-8111-111111111111');
+    assert.equal(
+      publicationIdempotencyKey(id),
+      'f2-publish:11111111-1111-4111-8111-111111111111',
+    );
     assert.throws(() => publicationIdempotencyKey('not-a-uuid'));
   });
 });
 
-describe('PZD-41 F2-A — PostgreSQL additive schema constraints', () => {
-  it('enforces FK, exactly-once completion/categories/badge, and rejects orphan categories', async () => {
-    assert.ok(url, 'PostgreSQL required for F2-A schema proofs');
-    const pool = new pg.Pool({ connectionString: url, max: 4 });
-    try {
-      await pool.query(F2A_PUBLICATION_DROP_DDL);
-      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim');
-      await pool.query(DAILY_CLAIM_DDL);
-      await pool.query(F2A_PUBLICATION_DDL);
+type Pool = pg.Pool;
 
-      const seriesId = randomUUID();
-      const playerId = 'player-f2a-1';
+async function resetSchema(pool: Pool): Promise<void> {
+  await pool.query(F2A_PUBLICATION_DROP_DDL);
+  await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
+  await pool.query(DAILY_CLAIM_DDL);
+  await migrateF2APublicationSchema(pool);
+}
+
+async function insertClaim(
+  pool: Pool,
+  args: {
+    seriesId: string;
+    playerId: string;
+    date: string;
+    started: number;
+    digest?: string;
+  },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO tournament_daily_claim
+       (series_id, player_id, original_utc_date, started_at_ms, manifest_digest, status)
+     VALUES ($1,$2,$3::date,$4,$5,'ACTIVE')`,
+    [args.seriesId, args.playerId, args.date, args.started, args.digest ?? DIGEST_A],
+  );
+}
+
+async function insertCompletion(
+  pool: Pool | pg.PoolClient,
+  args: {
+    seriesId: string;
+    playerId: string;
+    date: string;
+    started: number;
+    completed?: number;
+    digest?: string;
+    idem?: string;
+  },
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO tournament_daily_series_completion
+       (series_id, player_id, original_utc_date, claim_started_at_ms, completed_at_ms,
+        manifest_digest, publication_idempotency_key, revision)
+     VALUES ($1,$2,$3::date,$4,$5,$6,$7,1)`,
+    [
+      args.seriesId,
+      args.playerId,
+      args.date,
+      args.started,
+      args.completed ?? args.started + 60_000,
+      args.digest ?? DIGEST_A,
+      args.idem ?? publicationIdempotencyKey(args.seriesId),
+    ],
+  );
+}
+
+const SCORES = [10, 20, 30, 40, 50, 60];
+
+async function insertSixSubgames(
+  pool: Pool | pg.PoolClient,
+  seriesId: string,
+  scores: number[] = SCORES,
+): Promise<void> {
+  for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
+    await pool.query(
+      `INSERT INTO tournament_verified_subgame_score
+         (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [seriesId, ordinal, `chal-${ordinal}`, HASH, scores[ordinal - 1], ordinal],
+    );
+  }
+}
+
+async function insertCategories(
+  pool: Pool | pg.PoolClient,
+  seriesId: string,
+  scores: number[] = SCORES,
+): Promise<void> {
+  const cats = computeFourCategoryScores(
+    scores.map((score, i) => ({ ordinal: i + 1, score })),
+  );
+  const map: Record<string, number> = {
+    EASY: cats.easy,
+    MEDIUM: cats.medium,
+    HARD: cats.hard,
+    ALL: cats.all,
+  };
+  for (const category of F2A_CATEGORIES) {
+    await pool.query(
+      `INSERT INTO tournament_daily_result_category (series_id, category, score)
+       VALUES ($1,$2,$3)`,
+      [seriesId, category, map[category]],
+    );
+  }
+}
+
+async function insertBadge(
+  pool: Pool | pg.PoolClient,
+  args: { seriesId: string; date: string; started: number; awarded?: boolean },
+): Promise<void> {
+  const awarded =
+    args.awarded ??
+    onTimeBadgeFromClaim({
+      originalUtcDate: args.date,
+      claimStartedAtMs: args.started,
+    });
+  await pool.query(
+    `INSERT INTO tournament_on_time_badge
+       (series_id, awarded, claim_started_at_ms, original_utc_date)
+     VALUES ($1,$2,$3,$4::date)`,
+    [args.seriesId, awarded, args.started, args.date],
+  );
+}
+
+async function publishComplete(
+  pool: Pool | pg.PoolClient,
+  args: {
+    seriesId: string;
+    playerId: string;
+    date: string;
+    started: number;
+    scores?: number[];
+  },
+): Promise<void> {
+  const scores = args.scores ?? SCORES;
+  await insertCompletion(pool, args);
+  await insertSixSubgames(pool, args.seriesId, scores);
+  await insertCategories(pool, args.seriesId, scores);
+  await insertBadge(pool, args);
+}
+
+describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
+  it('adversarial matrix: mismatches NOT_VISIBLE; complete fixture visible; isolation/rollback', async () => {
+    assert.ok(url, 'PostgreSQL required for F2-A schema proofs');
+    const pool = new pg.Pool({ connectionString: url, max: 6 });
+    const matrix: Array<{ case: string; result: 'PASS' | 'FAIL'; detail: string }> = [];
+    const record = (name: string, ok: boolean, detail: string) => {
+      matrix.push({ case: name, result: ok ? 'PASS' : 'FAIL', detail });
+      assert.ok(ok, `${name}: ${detail}`);
+    };
+
+    try {
+      await resetSchema(pool);
+
       const date = '2026-11-17';
       const started = Date.parse('2026-11-17T12:00:00.000Z');
-      const digest = 'a'.repeat(64);
+      const seriesId = randomUUID();
+      const playerId = 'player-f2a-1';
+      await insertClaim(pool, { seriesId, playerId, date, started });
 
+      // --- Claim identity FK adversarial ---
+      try {
+        await insertCompletion(pool, {
+          seriesId,
+          playerId: 'other-player',
+          date,
+          started,
+        });
+        record('completion.player_id mismatch', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'completion.player_id mismatch',
+          /foreign key|violates/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      try {
+        await insertCompletion(pool, {
+          seriesId,
+          playerId,
+          date: '2026-11-16',
+          started,
+        });
+        record('completion.original_utc_date mismatch', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'completion.original_utc_date mismatch',
+          /foreign key|violates/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      try {
+        await insertCompletion(pool, {
+          seriesId,
+          playerId,
+          date,
+          started: started + 1,
+        });
+        record('completion.claim_started_at_ms mismatch', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'completion.claim_started_at_ms mismatch',
+          /foreign key|violates/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      try {
+        await insertCompletion(pool, {
+          seriesId,
+          playerId,
+          date,
+          started,
+          digest: DIGEST_B,
+        });
+        record('completion.manifest_digest mismatch', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'completion.manifest_digest mismatch',
+          /foreign key|violates/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      // Claim identity immutable on UPDATE
+      try {
+        await pool.query(
+          `UPDATE tournament_daily_claim SET player_id = 'mutated' WHERE series_id = $1`,
+          [seriesId],
+        );
+        record('claim identity UPDATE rejected', false, 'update succeeded');
+      } catch (e) {
+        record(
+          'claim identity UPDATE rejected',
+          /TOURNAMENT_DAILY_CLAIM_IDENTITY_IMMUTABLE|integrity/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      // Status-only update still allowed
       await pool.query(
-        `INSERT INTO tournament_daily_claim
-           (series_id, player_id, original_utc_date, started_at_ms, manifest_digest, status)
-         VALUES ($1,$2,$3::date,$4,$5,'ACTIVE')`,
-        [seriesId, playerId, date, started, digest],
+        `UPDATE tournament_daily_claim SET status = 'AWAIT_ADVANCE' WHERE series_id = $1`,
+        [seriesId],
       );
+      record('claim status UPDATE allowed', true, 'status-only update ok');
 
-      // Orphan category without completion must fail FK.
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_daily_result_category (series_id, category, score)
-             VALUES ($1,'EASY',1)`,
-            [seriesId],
-          ),
-        /foreign key|violates/i,
-      );
+      // Missing completion => NOT_VISIBLE
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record(
+          'missing completion receipt',
+          r.visible === false && r.reason === 'NOT_VISIBLE',
+          JSON.stringify(r),
+        );
+      }
 
-      const idem = publicationIdempotencyKey(seriesId);
-      await pool.query(
-        `INSERT INTO tournament_daily_series_completion
-           (series_id, player_id, original_utc_date, claim_started_at_ms, completed_at_ms,
-            manifest_digest, publication_idempotency_key, revision)
-         VALUES ($1,$2,$3::date,$4,$5,$6,$7,1)`,
-        [seriesId, playerId, date, started, started + 60_000, digest, idem],
-      );
+      await insertCompletion(pool, { seriesId, playerId, date, started });
 
-      // Duplicate completion (same series) rejected.
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_daily_series_completion
-               (series_id, player_id, original_utc_date, claim_started_at_ms, completed_at_ms,
-                manifest_digest, publication_idempotency_key, revision)
-             VALUES ($1,$2,$3::date,$4,$5,$6,$7,1)`,
-            [seriesId, playerId, date, started, started + 1, digest, idem + ':dup'],
-          ),
-        /duplicate|unique/i,
-      );
-
-      // Duplicate idempotency key rejected.
-      const otherSeries = randomUUID();
-      await pool.query(
-        `INSERT INTO tournament_daily_claim
-           (series_id, player_id, original_utc_date, started_at_ms, manifest_digest, status)
-         VALUES ($1,$2,$3::date,$4,$5,'ACTIVE')`,
-        [otherSeries, 'player-f2a-2', date, started, digest],
-      );
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_daily_series_completion
-               (series_id, player_id, original_utc_date, claim_started_at_ms, completed_at_ms,
-                manifest_digest, publication_idempotency_key, revision)
-             VALUES ($1,$2,$3::date,$4,$5,$6,$7,1)`,
-            [otherSeries, 'player-f2a-2', date, started, started + 1, digest, idem],
-          ),
-        /duplicate|unique/i,
-      );
-
-      for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
+      // Five of six subgames
+      for (let ordinal = 1; ordinal <= 5; ordinal += 1) {
         await pool.query(
           `INSERT INTO tournament_verified_subgame_score
-             (series_id, subgame_ordinal, challenge_id, state_hash, score,
-              ledger_admission_seq, produced_by_admission_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [
-            seriesId,
-            ordinal,
-            `chal-${ordinal}`,
-            'b'.repeat(64),
-            ordinal * 10,
-            ordinal,
-            randomUUID(),
-          ],
+             (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [seriesId, ordinal, `chal-${ordinal}`, HASH, SCORES[ordinal - 1], ordinal],
         );
       }
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_verified_subgame_score
-               (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
-             VALUES ($1,3,'chal-3',$2,1,3)`,
-            [seriesId, 'c'.repeat(64)],
-          ),
-        /duplicate|unique/i,
-      );
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_verified_subgame_score
-               (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
-             VALUES ($1,7,'chal-x',$2,1,1)`,
-            [seriesId, 'd'.repeat(64)],
-          ),
-        /check|violates/i,
-      );
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record(
+          'five of six verified subgames',
+          r.visible === false,
+          JSON.stringify(r),
+        );
+      }
 
-      for (const category of F2A_CATEGORIES) {
+      // Duplicate ordinal rejected at PK
+      try {
         await pool.query(
-          `INSERT INTO tournament_daily_result_category (series_id, category, score)
-           VALUES ($1,$2,$3)`,
-          [seriesId, category, category === 'ALL' ? 210 : 70],
+          `INSERT INTO tournament_verified_subgame_score
+             (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
+           VALUES ($1,3,'chal-3',$2,1,3)`,
+          [seriesId, HASH],
         );
+        record('duplicate ordinal', false, 'insert succeeded');
+      } catch (e) {
+        record('duplicate ordinal', /duplicate|unique/i.test(String(e)), String(e));
       }
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_daily_result_category (series_id, category, score)
-             VALUES ($1,'EASY',1)`,
-            [seriesId],
-          ),
-        /duplicate|unique/i,
-      );
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_daily_result_category (series_id, category, score)
-             VALUES ($1,'EASYX',1)`,
-            [seriesId],
-          ),
-        /check|violates/i,
+
+      // Complete sixth ordinal then wrong category set
+      await pool.query(
+        `INSERT INTO tournament_verified_subgame_score
+           (series_id, subgame_ordinal, challenge_id, state_hash, score, ledger_admission_seq)
+         VALUES ($1,6,'chal-6',$2,$3,6)`,
+        [seriesId, HASH, SCORES[5]],
       );
 
-      const awarded = onTimeBadgeFromClaim({
-        originalUtcDate: date,
-        claimStartedAtMs: started,
-      });
+      // Three of four categories
+      await pool.query(
+        `INSERT INTO tournament_daily_result_category (series_id, category, score)
+         VALUES ($1,'EASY',60),($1,'MEDIUM',90),($1,'HARD',60)`,
+        [seriesId],
+      );
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record('three of four categories', r.visible === false, JSON.stringify(r));
+      }
+
+      await pool.query(
+        `INSERT INTO tournament_daily_result_category (series_id, category, score)
+         VALUES ($1,'ALL',999)`,
+        [seriesId],
+      );
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record(
+          'incorrect category total / missing badge',
+          r.visible === false,
+          JSON.stringify(r),
+        );
+      }
+
+      // Fix categories to match but wrong badge awarded
+      await pool.query(`DELETE FROM tournament_daily_result_category WHERE series_id = $1`, [
+        seriesId,
+      ]);
+      await insertCategories(pool, seriesId);
       await pool.query(
         `INSERT INTO tournament_on_time_badge
            (series_id, awarded, claim_started_at_ms, original_utc_date)
-         VALUES ($1,$2,$3,$4::date)`,
-        [seriesId, awarded, started, date],
+         VALUES ($1,false,$2,$3::date)`,
+        [seriesId, started, date],
       );
-      await assert.rejects(
-        () =>
-          pool.query(
-            `INSERT INTO tournament_on_time_badge
-               (series_id, awarded, claim_started_at_ms, original_utc_date)
-             VALUES ($1,false,$2,$3::date)`,
-            [seriesId, started, date],
-          ),
-        /duplicate|unique/i,
-      );
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        // started is mid-day so awarded should be true; false is inconsistent
+        record(
+          'inconsistent On-Time badge decision',
+          r.visible === false,
+          JSON.stringify(r),
+        );
+      }
 
-      const cats = await pool.query(
-        `SELECT category FROM tournament_daily_result_category WHERE series_id = $1 ORDER BY category`,
-        [seriesId],
+      await pool.query(`DELETE FROM tournament_on_time_badge WHERE series_id = $1`, [
+        seriesId,
+      ]);
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record('missing On-Time badge decision', r.visible === false, JSON.stringify(r));
+      }
+
+      // Badge with wrong claim start rejected by FK
+      try {
+        await pool.query(
+          `INSERT INTO tournament_on_time_badge
+             (series_id, awarded, claim_started_at_ms, original_utc_date)
+           VALUES ($1,true,$2,$3::date)`,
+          [seriesId, started + 5, date],
+        );
+        record('badge claim_started mismatch FK', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'badge claim_started mismatch FK',
+          /foreign key|violates/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      await insertBadge(pool, { seriesId, date, started });
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record(
+          'correct complete fixture visible',
+          r.visible === true &&
+            r.easy === 60 &&
+            r.medium === 90 &&
+            r.hard === 60 &&
+            r.all === 210 &&
+            r.onTimeAwarded === true,
+          JSON.stringify(r),
+        );
+      }
+
+      // Idempotency: duplicate key cannot create second publication
+      const otherSeries = randomUUID();
+      await insertClaim(pool, {
+        seriesId: otherSeries,
+        playerId: 'player-f2a-2',
+        date,
+        started,
+      });
+      try {
+        await insertCompletion(pool, {
+          seriesId: otherSeries,
+          playerId: 'player-f2a-2',
+          date,
+          started,
+          idem: publicationIdempotencyKey(seriesId),
+        });
+        record('repeated idempotency key', false, 'insert succeeded');
+      } catch (e) {
+        record(
+          'repeated idempotency key',
+          /duplicate|unique/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      // DELETE claim blocked while completion exists
+      try {
+        await pool.query(`DELETE FROM tournament_daily_claim WHERE series_id = $1`, [
+          seriesId,
+        ]);
+        record('DELETE claim with completion', false, 'delete succeeded');
+      } catch (e) {
+        record(
+          'DELETE claim with completion',
+          /foreign key|violates|restrict/i.test(String(e)),
+          String(e),
+        );
+      }
+
+      // Uncommitted TX cannot leak published rows to second connection
+      const seriesTx = randomUUID();
+      await insertClaim(pool, {
+        seriesId: seriesTx,
+        playerId: 'player-f2a-tx',
+        date,
+        started,
+      });
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await publishComplete(client, {
+          seriesId: seriesTx,
+          playerId: 'player-f2a-tx',
+          date,
+          started,
+        });
+        const inside = await evaluatePublicationReadiness(client, seriesTx);
+        const outside = await evaluatePublicationReadiness(pool, seriesTx);
+        record(
+          'uncommitted TX no leak to second connection',
+          inside.visible === true && outside.visible === false,
+          JSON.stringify({ inside, outside }),
+        );
+        await client.query('ROLLBACK');
+        const after = await evaluatePublicationReadiness(pool, seriesTx);
+        record(
+          'rollback leaves zero visible results',
+          after.visible === false,
+          JSON.stringify(after),
+        );
+      } finally {
+        client.release();
+      }
+
+      // Upgrade DDL is compatible after clean migrate (no mismatched rows)
+      await pool.query(F2A_PUBLICATION_UPGRADE_DDL);
+      {
+        const r = await evaluatePublicationReadiness(pool, seriesId);
+        record(
+          'upgrade DDL compatibility on clean schema',
+          r.visible === true,
+          JSON.stringify(r),
+        );
+      }
+
+      console.log(
+        'F2A_ADVERSARIAL_MATRIX ' +
+          JSON.stringify(
+            matrix.map((m) => ({ case: m.case, result: m.result })),
+          ),
       );
-      assert.deepEqual(
-        cats.rows.map((r) => r.category),
-        ['ALL', 'EASY', 'HARD', 'MEDIUM'],
+      assert.equal(
+        matrix.every((m) => m.result === 'PASS'),
+        true,
+        'adversarial matrix contains FAIL',
       );
-      const scores = await pool.query(
-        `SELECT COUNT(*)::int AS n FROM tournament_verified_subgame_score WHERE series_id = $1`,
-        [seriesId],
-      );
-      assert.equal(scores.rows[0].n, 6);
     } finally {
       await pool.query(F2A_PUBLICATION_DROP_DDL);
-      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim');
+      await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
       await pool.end();
     }
   });

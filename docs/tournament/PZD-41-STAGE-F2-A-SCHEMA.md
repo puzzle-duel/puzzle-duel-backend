@@ -7,6 +7,25 @@ Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-41
 PR: https://github.com/puzzle-duel/puzzle-duel-backend/pull/18  
 Depends on: PZD-39 Stage E + PZD-40 F1 merged to `main` (production-disabled ranked HTTP preserved).
 
+## Hardening — claim identity FK + fail-closed readiness (2026-11-17)
+
+### Database-enforced claim integrity
+- Additive UNIQUE on F1 claim: `(series_id, player_id, original_utc_date, started_at_ms, manifest_digest)`.
+- Completion composite FK to that UNIQUE — mismatched player/date/start/manifest rejected at PostgreSQL boundary.
+- BEFORE UPDATE trigger rejects mutation of claim identity columns; status updates remain allowed.
+- DELETE of claim while completion exists is RESTRICTED by FK.
+- On-Time badge composite FK to completion `(series_id, claim_started_at_ms, original_utc_date)`.
+
+### Fail-closed publication readiness
+- Canonical view: `tournament_f2a_publication_ready`.
+- TS predicate: `evaluatePublicationReadiness(db, seriesId)` → visible row **or** `{ visible:false, reason:'NOT_VISIBLE' }`.
+- Never returns a partial leaderboard row. Absence == NOT_VISIBLE.
+- Trust boundary: structural readiness only; Stage E replay / F2-B authorization is separate.
+
+### Upgrade / rollback
+- `F2A_PUBLICATION_UPGRADE_DDL` fails closed if existing completion rows contradict claim identity.
+- Rollback: `F2A_PUBLICATION_DROP_DDL` (drops view, F2-A tables, claim identity trigger/unique).
+
 ## Binding inputs (already on main)
 
 | Artifact | Role |
