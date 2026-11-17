@@ -14,7 +14,8 @@
     "test:stage-e": "node --experimental-strip-types --test 'test/tournament/adjudication/**/*.test.mts'",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:stage-d-parity": "python3 tools/stage_d/parity/run_parity.py",
-    "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py"
+    "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py",
+    "test:stage-f2": "node --experimental-strip-types --test 'test/tournament/results/**/*.test.mts'"
   },
   "dependencies": {
     "pg": "^8.16.3"
