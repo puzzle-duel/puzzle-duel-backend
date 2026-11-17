@@ -8,6 +8,7 @@ import type {
   RankedCommandType,
   TrustedAuthorizationContext,
 } from '../adjudication/authorization.mts';
+import { OrdinalIntegrityError } from '../claims/active-ordinal.mts';
 import type { ImmutableDailyClaim } from '../claims/postgres-daily-claim.mts';
 import type { VerifiedSession } from './postgres-verified-sessions.mts';
 import type { PostgresSeriesWriterStore } from './series-writer-binding.mts';
@@ -79,10 +80,19 @@ export class SessionAuthorizationGateway implements AuthorizationGateway {
       return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
     }
 
-    const ordinal = await this.#deps.resolveActiveOrdinal(
-      args.clientClaimedSeriesKey,
-      this.#deps.session.playerId,
-    );
+    let ordinal: number;
+    try {
+      ordinal = await this.#deps.resolveActiveOrdinal(
+        args.clientClaimedSeriesKey,
+        this.#deps.session.playerId,
+      );
+    } catch (err) {
+      // P1-R03: missing fence / gaps / inconsistent snapshots fail closed.
+      if (err instanceof OrdinalIntegrityError) {
+        return { ok: false, reason: 'SERIES_STATE_CORRUPT' };
+      }
+      throw err;
+    }
 
     const context: TrustedAuthorizationContext = {
       principal: { playerId: this.#deps.session.playerId },
