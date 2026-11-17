@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type { ImmutableAdmissionResult } from '../adjudication/admission-result.mts';
 import type { IngressClock } from './clock.mts';
 import type {
   AdmitCommandInput,
@@ -46,6 +47,17 @@ export interface AdmissionJournal {
     admissionId: string,
     outcome: 'applied' | 'rejected' | 'pending',
   ): Promise<boolean>;
+  /**
+   * Persist immutable per-admission result with outcome (P1-E04).
+   * Only transitions from pending.
+   */
+  markOutcomeWithResult(
+    admissionId: string,
+    outcome: 'applied' | 'rejected',
+    result: ImmutableAdmissionResult,
+  ): Promise<boolean>;
+  /** Load frozen result for duplicate-safe retries. */
+  getResult(admissionId: string): Promise<ImmutableAdmissionResult | null>;
 }
 
 export interface MemoryJournalOptions {
@@ -54,7 +66,10 @@ export interface MemoryJournalOptions {
   failClosed?: boolean;
 }
 
-type Stored = AdmittedCommand & { outcome: CommandOutcomeStatus };
+type Stored = AdmittedCommand & {
+  outcome: CommandOutcomeStatus;
+  result?: ImmutableAdmissionResult;
+};
 
 /**
  * In-process journal for unit/fault proofs.
@@ -134,7 +149,6 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
       const admissionSeq = (this.#seqBySeries.get(input.seriesKey) ?? 0) + 1;
       this.#seqBySeries.set(input.seriesKey, admissionSeq);
 
-      // P1-04: never persist client scoreDelta / completesSeries.
       const command: Stored = {
         admissionId: randomUUID(),
         seriesKey: input.seriesKey,
@@ -148,6 +162,7 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
         outcome: 'pending',
         expectedBoardRevision: input.expectedBoardRevision,
         writerGeneration: input.writerGeneration,
+        // Stage E: never persist client scoreDelta / completesSeries as authority.
       };
       this.#byId.set(command.admissionId, command);
       this.#byIdempotency.set(idemKey, command.admissionId);
@@ -224,9 +239,29 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
     return true;
   }
 
+  async markOutcomeWithResult(
+    admissionId: string,
+    outcome: 'applied' | 'rejected',
+    result: ImmutableAdmissionResult,
+  ): Promise<boolean> {
+    const row = this.#byId.get(admissionId);
+    if (!row || row.outcome !== 'pending') return false;
+    row.outcome = outcome;
+    row.result = Object.freeze({ ...result });
+    return true;
+  }
+
+  async getResult(
+    admissionId: string,
+  ): Promise<ImmutableAdmissionResult | null> {
+    const row = this.#byId.get(admissionId);
+    return row?.result ? { ...row.result } : null;
+  }
+
   #public(row: Stored): AdmittedCommand {
     const {
       outcome: _outcome,
+      result: _result,
       ...command
     } = row;
     return { ...command };

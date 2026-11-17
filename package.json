@@ -13,7 +13,8 @@
     "test:core001v3": "node --experimental-strip-types --test 'test/engine/core001v3/**/*.test.mts'",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:stage-d-parity": "python3 tools/stage_d/parity/run_parity.py",
-    "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py"
+    "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py",
+    "test:stage-e": "node --experimental-strip-types --test 'test/tournament/adjudication/**/*.test.mts'"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
