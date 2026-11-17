@@ -70,7 +70,7 @@ Checksum ledger: `CHECKSUMS-STAGE-D.txt` — **33** entries ↔ **33** executabl
 | V3-45 | Unreachable spent history | `fixtures/V3-45-unreachable-spent.json` | PASS | PASS | PASS | FROZEN | Engine | — |
 | V3-46 | Reordered moves | `fixtures/V3-46-reorder-moves.json` | PASS | PASS | PASS | FROZEN | Engine | — |
 | V3-47 | Wrong rulesVersion pin | **Alias → V3-31** | Covered | Covered | Covered | via V3-31 | Engine | — |
-| V3-48 | Client overwrites trusted tournament checkpoint | **No Stage D engine fixture** | NOT_RUN | NOT_RUN | NOT_RUN | N/A | **Tournament (PZD-38)** | PZD-38 auth/checkpoint gate |
+| V3-48 | Client overwrites trusted tournament checkpoint | Stage E `test/tournament/adjudication/v3-48-checkpoint.test.mts` (not a pure-engine fixture) | Service PASS | N/A | N/A | N/A | **Tournament (PZD-38/Stage E)** | Auth HTTP E2E + publish still NOT_RUN |
 | V3-49 | Cascade arithmetic overflow | `fixtures/V3-49-score-overflow.json` | PASS | PASS | PASS | FROZEN | Engine | — |
 | V3-50 | Impossible initial | **Alias → V3-14** | Covered | Covered | Covered | via V3-14 | Engine | — |
 | V3-51 | CV-01…09 atom digests | `fixtures/V3-51-atoms.json` + vectors doc | PASS | PASS | PASS | FROZEN | Engine | — |

@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { IngressClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
-import { seriesAdvisoryKeys } from './series-fence.mts';
 import type {
   AdmitCommandInput,
   AdmitResult,
@@ -24,8 +23,6 @@ CREATE TABLE IF NOT EXISTS command_admission_journal (
   outcome TEXT NOT NULL DEFAULT 'pending',
   expected_board_revision BIGINT NULL,
   writer_generation BIGINT NULL,
-  -- Legacy columns retained for migration compatibility; Phase A never
-  -- authorizes client score/completion (always NULL/FALSE on insert).
   score_delta BIGINT NULL,
   completes_series BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -38,7 +35,10 @@ CREATE INDEX IF NOT EXISTS command_admission_journal_pending_idx
   WHERE outcome = 'pending';
 `;
 
-export { seriesAdvisoryKeys };
+function seriesAdvisoryKeys(seriesKey: string): [number, number] {
+  const digest = createHash('sha256').update(seriesKey).digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
 
 /**
  * PostgreSQL-backed durable ingress journal.
@@ -237,24 +237,6 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
       [admissionId, outcome],
     );
     return (res.rowCount ?? 0) > 0;
-  }
-
-  /**
-   * Count eligible pending rows using an existing connection (for atomic forfeit).
-   */
-  async countEligiblePendingOn(
-    db: pg.Pool | pg.PoolClient,
-    seriesKey: string,
-    cutoffExclusive: Date,
-  ): Promise<number> {
-    const res = await db.query(
-      `SELECT COUNT(*)::int AS c FROM command_admission_journal
-       WHERE series_key = $1
-         AND outcome = 'pending'
-         AND trusted_received_at_ms < $2`,
-      [seriesKey, cutoffExclusive.getTime()],
-    );
-    return Number(res.rows[0].c);
   }
 
   #map(row: Record<string, unknown>): AdmittedCommand {
