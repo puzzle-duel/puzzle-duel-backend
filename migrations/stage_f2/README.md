@@ -36,9 +36,17 @@ DROP TABLE IF EXISTS tournament_daily_series_completion;
 
 Production versioned migration IDs, expand/contract rollout, and backup/restore remain **NOT_RUN** until owner-approved migration acceptance (ADR-T02 still requires versioned SQL + rollback before production).
 
-## Explicitly deferred (Proposed / F2-B/C)
+## F2-B writer
 
-- Atomic publish unit-of-work that writes these rows
+`F2BPublicationService.migrate()` applies the F2-A DDL, then `F2B_PUBLICATION_HARDENING_DDL`:
+
+- `source_command_idempotency_key` and `h1_admission_id` on the completion row
+- `BEFORE UPDATE OR DELETE` immutability triggers on the publication tables
+
+The service is the only writer. A provenance row is authorized only when `evaluateLeaderboardReadEligibility` recomputes the HMAC from replayed evidence with the server key.
+
+## Explicitly deferred (F2-C / production)
+
 - Weekly aggregates / period revision / immutable FINAL snapshots
 - Leaderboard read APIs and pagination defaults (TD-15 remains Proposed)
 - HTTP/OpenAPI publication surfaces

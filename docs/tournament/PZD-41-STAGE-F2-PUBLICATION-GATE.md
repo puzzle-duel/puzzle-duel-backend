@@ -1,6 +1,6 @@
 # PZD-41 Stage F2 — Atomic tournament result publication
 
-Status: **F2 CALCULATOR + F2-A SCHEMA CANDIDATE / ATOMIC PUBLISH NOT IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, frozen production migrations, ADR-T01 or production release.
+Status: **F2 CALCULATOR + F2-A SCHEMA + F2-B ATOMIC PUBLICATION IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, frozen production migrations, ADR-T01, F2-C weekly FINAL, or production release. Ranked HTTP stays disabled.
 
 Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-41
 Dependencies: PZD-40 Stage F1 and PZD-39 Stage E are **merged to `main`**. Ranked HTTP remains production-disabled.
@@ -23,7 +23,7 @@ F2-A schema contract: [`PZD-41-STAGE-F2-A-SCHEMA.md`](./PZD-41-STAGE-F2-A-SCHEMA
 
 `test/tournament/results/four-category-scores.test.mts` validates category composition, order independence, incomplete/duplicate/invalid inputs, overflow and zero score. CI runs `npm run test:stage-f2` alongside existing Stage E PostgreSQL and v3 gates.
 
-## Next implementation sequence (not yet delivered)
+## Implementation sequence
 
 ### F2-A: verified claim + manifest + migration — candidate delivered for review
 
@@ -33,20 +33,26 @@ Reuses F1 `tournament_daily_claim` (no parallel claim table). Additive candidate
 - `tournament_daily_result_category` (unique series+category ∈ EASY/MEDIUM/HARD/ALL)
 - `tournament_on_time_badge` (one decision per series; claim-start eligibility helper)
 - Docs: `PZD-41-STAGE-F2-A-SCHEMA.md`, `migrations/stage_f2/README.md`
-- Unresolved production migration IDs / weekly shapes / H1-vs-Advance COMPLETED timing remain **Proposed** (see U-F2A-*).
+- Production migration IDs, weekly shapes, TD-15 pagination, and retention remain unresolved. H1-versus-Advance publication timing is resolved for F2-B in `PZD-41-STAGE-F2-B-IMPLEMENTATION.md`.
 
-Never store a false `COMPLETED` or create rank rows from incomplete series. F2-B publish UoW is **not** implemented here.
+Never store a false `COMPLETED` or create rank rows from an incomplete series. The F2-B writer is the section below.
 
-### F2-B: single transaction completion
+### F2-B: single transaction completion — implemented
 
-Inside existing `PostgresTrustedUnitOfWork` or equivalently fenced single database transaction:
-1. Hold same per-series advisory lock, active writer/board/version CAS, immutable original H1 admission and authenticated player + claim.
-2. Independently verify all six pinned subgame terminal snapshots and accepted ledgers (order, digest, scorer, challenge/version).
-3. Compute **individual** per-subgame scores from trusted ledger/snapshots (do not reuse series-aggregate `fence.score` six times).
-4. Compute four scores with the pure calculator.
-5. Atomically transition once to `COMPLETED`, record all four category results, authoritative claim-based On-Time badge (if eligible), any materialized scoreboard revisions, and immutable admitted H1/advance outcome.
-6. Commit once; only after durable commit advertise published results. On any error rollback all updates; admission stays recoverable and frozen same-key result prevents double publication.
-7. Reconcile accepted H1 final-move versus explicit between-game Advance semantics: no premature complete on H1; final terminal completion must match ADR-T02 and T-02 product event.
+`F2BPublicationService` (`src/tournament/results/f2b-publication.mts`) is the publication writer. It uses `lockSeriesForTransaction`, the same per-series advisory lock as ingress, the fence, and `PostgresTrustedUnitOfWork`. Lock order after that advisory lock is fence, writer, then claim.
+
+Inside one PostgreSQL transaction it:
+
+1. Holds that series lock and checks the authenticated player, writer generation, and claim.
+2. Replays all six pinned subgames from `trusted_challenge_binding` plus `accepted_move_ledger`. Snapshot state hash, ledger hash, and engine replay must match. Individual scores are the replayed per-ordinal totals, not six copies of `series_fence_state.score`.
+3. Rejects a nonterminal H1 and rejects `event: 'between_game_advance'`.
+4. Inserts one completion, six subgame scores, four categories from `computeFourCategoryScores`, one On-Time badge from the immutable claim start, and one HMAC provenance row.
+5. Sets the claim and fence to `COMPLETED` and `results_published=true` only on that H1-terminal publication.
+6. Commits once. A fault before commit rolls every publication row back. A retry after commit returns the original revision, scores, badge, and seal.
+
+Completion timing is recorded in [`PZD-41-STAGE-F2-B-IMPLEMENTATION.md`](./PZD-41-STAGE-F2-B-IMPLEMENTATION.md). Q13 and TD-12 publish on the verified terminal H1 move. Q07 Advance applies only when a next ordinal exists, so Advance is not the publication event.
+
+Weekly ranking and FINAL settlement are not part of this transaction.
 
 ### F2-C: weekly ranks and FINAL
 
@@ -62,6 +68,6 @@ Implement all four daily/weekly competition ranks, revision-pinned page cursors 
 
 ## Current non-claims
 
-**NOT_RUN:** F2-B atomic DB publication UoW, production versioned migration acceptance, weekly snapshots/FINAL, four-category ranked read API, multi-host failover, end-to-end verification and production deployment. F2-A delivers candidate DDL + constraint proofs only.
+**NOT_RUN:** production versioned migration acceptance, weekly snapshots/FINAL, four-category ranked read API, multi-host failover, ranked HTTP enablement, and production deployment. F2-B is implemented and covered by PostgreSQL 18 tests. It does not authorize merge, deploy, or PZD-41 Done.
 
 The module and tests alone must NOT be interpreted as Stage F complete, PZD-41 Done, ranked rollout authorized or ADR-T01 Accepted.

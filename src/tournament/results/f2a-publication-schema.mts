@@ -325,6 +325,7 @@ BEGIN
   END IF;
 END $$;
 DROP FUNCTION IF EXISTS tournament_daily_claim_reject_identity_mutation();
+DROP FUNCTION IF EXISTS tournament_f2b_reject_publication_mutation();
 `;
 
 export const F2A_CATEGORIES = ['EASY', 'MEDIUM', 'HARD', 'ALL'] as const;
@@ -353,8 +354,10 @@ export type StructuralReadiness =
 /**
  * F2-B DB-backed provenance contract (documentation + table shape only).
  * Authorization is NEVER derived from TypeScript object brands or request JSON.
- * F2-B must INSERT into tournament_f2b_trusted_provenance inside the publish TX.
- * F2-A provides no mint/insert helper and never returns authorized:true.
+ * Only F2BPublicationService may INSERT tournament_f2b_trusted_provenance,
+ * inside the series transaction, after replay verification.
+ * evaluateLeaderboardReadEligibility returns authorized:true only when that
+ * server seal matches the durable replay evidence. A row alone does not.
  */
 export type F2BTrustedProvenanceDbRow = {
   readonly seriesId: string;
@@ -440,12 +443,14 @@ export async function evaluateStructuralReadiness(
  *
  * - Ignores any in-memory/request object — no provenance parameter is accepted.
  * - Structural completeness alone → TRUSTED_PROVENANCE_REQUIRED.
- * - A DB provenance row without F2-B seal verification → F2B_PROVENANCE_SEAL_UNVERIFIED.
- * - authorized:true is unreachable in F2-A (F2-B not implemented).
+ * - A DB provenance row without a matching server seal → F2B_PROVENANCE_SEAL_UNVERIFIED.
+ * - authorized:true requires the server provenance key. Omitting it fails closed.
+ *   A row, a hex string, or an in-memory object is not authorization.
  */
 export async function evaluateLeaderboardReadEligibility(
   db: Queryable,
   seriesId: string,
+  serverAuthority?: { readonly provenanceKey: string },
 ): Promise<LeaderboardReadEligibility> {
   const structural = await evaluateStructuralReadiness(db, seriesId);
   if (!structural.structurallyComplete) {
@@ -460,9 +465,12 @@ export async function evaluateLeaderboardReadEligibility(
   if (provenance.rows.length !== 1) {
     return { authorized: false, reason: 'TRUSTED_PROVENANCE_REQUIRED' };
   }
-  // Row existence is not authority: F2-B seal verification is not implemented.
-  void provenance.rows[0];
-  return { authorized: false, reason: 'F2B_PROVENANCE_SEAL_UNVERIFIED' };
+  const key = serverAuthority?.provenanceKey;
+  if (typeof key !== 'string' || key.length < 32) {
+    return { authorized: false, reason: 'F2B_PROVENANCE_SEAL_UNVERIFIED' };
+  }
+  const { authorizePublishedSeries } = await import('./f2b-publication.mts');
+  return authorizePublishedSeries(db, seriesId, key);
 }
 
 /**

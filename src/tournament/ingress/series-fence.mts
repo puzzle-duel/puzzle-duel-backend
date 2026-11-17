@@ -23,6 +23,22 @@ export function seriesAdvisoryKeys(seriesKey: string): [number, number] {
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
+/**
+ * First lock of every series mutation, including F2-B publication.
+ * Callers that also row-lock must then take, in order:
+ * series_fence_state, tournament_series_writer, tournament_daily_claim.
+ * Never acquire the series advisory lock after one of those row locks.
+ * pg_advisory_xact_lock is re-entrant inside the same transaction.
+ */
+export async function lockSeriesForTransaction(
+  client: pg.PoolClient,
+  seriesKey: string,
+): Promise<readonly [number, number]> {
+  const keys = seriesAdvisoryKeys(seriesKey);
+  await client.query('SELECT pg_advisory_xact_lock($1, $2)', [keys[0], keys[1]]);
+  return keys;
+}
+
 export interface SeriesFenceStore {
   get(seriesKey: string): Promise<SeriesFenceState | null>;
   put(state: SeriesFenceState): Promise<void>;
@@ -198,8 +214,7 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
     try {
       await client.query('BEGIN');
       // Same advisory key ordering as PostgresAdmissionJournal.admit (P1-03).
-      const [k1, k2] = seriesAdvisoryKeys(seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, seriesKey);
       const res = await client.query(
         `SELECT * FROM series_fence_state WHERE series_key = $1 FOR UPDATE`,
         [seriesKey],
@@ -270,8 +285,7 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, seriesKey);
       const res = await client.query(
         `SELECT * FROM series_fence_state WHERE series_key = $1 FOR UPDATE`,
         [seriesKey],

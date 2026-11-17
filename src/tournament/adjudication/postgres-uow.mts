@@ -5,6 +5,10 @@
  * entire adjudication commit: series lock → validate → replay → ledger →
  * snapshot → fence → admission outcome + immutable result. Any failure rolls
  * back every write; admission stays pending (never rejected with fence advanced).
+ *
+ * F2-B publication is not a second authority. When a six-game publisher is
+ * attached, a verified terminal H1 move publishes inside this same transaction
+ * under the same series advisory lock. Between-game Advance is not that event.
  */
 
 import type pg from 'pg';
@@ -16,7 +20,11 @@ import {
   type Move,
   type MoveApplied,
 } from '../../engine/core001v3/index.mts';
-import { seriesAdvisoryKeys } from '../ingress/series-fence.mts';
+import { lockSeriesForTransaction } from '../ingress/series-fence.mts';
+import type {
+  F2BPublishInput,
+  F2BPublishResult,
+} from '../results/f2b-publication.mts';
 import { idleDeadlineFrom, isTimely, type SeriesFenceState } from '../ingress/types.mts';
 import type { ImmutableAdmissionResult } from './admission-result.mts';
 import { freezeAdmissionResult } from './admission-result.mts';
@@ -79,12 +87,28 @@ export type AdjudicateMoveResult =
       checkpointUnchanged?: boolean;
     };
 
+export type SixGamePublisher = {
+  publishOnOpenTransaction(
+    client: pg.PoolClient,
+    input: F2BPublishInput,
+  ): Promise<F2BPublishResult>;
+};
+
 export class PostgresTrustedUnitOfWork {
   readonly #pool: pg.Pool;
   #faults: UowFaultHooks = {};
+  #sixGamePublisher: SixGamePublisher | null = null;
 
   constructor(pool: pg.Pool) {
     this.#pool = pool;
+  }
+
+  /**
+   * Attach F2-B publication to the H1 terminal move commit.
+   * Null leaves Stage E move adjudication unchanged.
+   */
+  setSixGamePublisher(publisher: SixGamePublisher | null): void {
+    this.#sixGamePublisher = publisher;
   }
 
   setFaultHooks(hooks: UowFaultHooks): void {
@@ -112,8 +136,7 @@ export class PostgresTrustedUnitOfWork {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(input.seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, input.seriesKey);
       await this.#fault('after_lock');
 
       // Load original admission under lock; verify still pending or return frozen result.
@@ -290,7 +313,7 @@ export class PostgresTrustedUnitOfWork {
         return this.#rejectOnly(client, input, 'MOVE_UNSAFE', pre, true);
       }
 
-      const nextFence: SeriesFenceState = {
+      let nextFence: SeriesFenceState = {
         ...pre,
         boardRevision: pre.boardRevision + 1,
         score: nextScore,
@@ -370,6 +393,32 @@ export class PostgresTrustedUnitOfWork {
       );
       await this.#fault('after_fence');
 
+      if (this.#sixGamePublisher && terminal && input.subgameOrdinal === 6) {
+        const published = await this.#sixGamePublisher.publishOnOpenTransaction(
+          client,
+          {
+            seriesId: input.seriesKey,
+            playerId: input.playerId,
+            writerGeneration: nextFence.writerGeneration,
+            commandIdempotencyKey: `h1:${input.admissionId}`,
+            event: 'h1_terminal_move',
+          },
+        );
+        if (published.outcome === 'published' || published.outcome === 'duplicate') {
+          nextFence = {
+            ...nextFence,
+            status: 'COMPLETED',
+            resultsPublished: true,
+          };
+          await client.query(
+            `UPDATE series_fence_state
+             SET status = 'COMPLETED', results_published = TRUE
+             WHERE series_key = $1`,
+            [input.seriesKey],
+          );
+        }
+      }
+
       const result = freezeAdmissionResult({
         admissionId: input.admissionId,
         playerId: input.playerId,
@@ -382,7 +431,7 @@ export class PostgresTrustedUnitOfWork {
         terminalReason,
         stateHash: afterHash,
         writerGeneration: nextFence.writerGeneration,
-        awaitAdvance: terminal,
+        awaitAdvance: nextFence.status === 'AWAIT_ADVANCE',
         decision: 'apply',
       });
 
@@ -433,8 +482,7 @@ export class PostgresTrustedUnitOfWork {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(args.seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, args.seriesKey);
 
       const admRes = await client.query(
         `SELECT outcome, result_json FROM command_admission_journal

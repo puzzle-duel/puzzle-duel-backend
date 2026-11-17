@@ -68,7 +68,9 @@ Depends on: PZD-39 Stage E + PZD-40 F1 merged to `main` (production-disabled ran
 - Always written with `awarded` boolean in the publish transaction (no separate best-effort path)
 - Eligibility helper: `onTimeBadgeFromClaim({ originalUtcDate, claimStartedAtMs })` — **finish time ignored**
 
-## Transaction boundaries (F2-B contract — not implemented here)
+## Transaction boundaries (F2-B contract)
+
+Implemented by [`PZD-41-STAGE-F2-B-IMPLEMENTATION.md`](./PZD-41-STAGE-F2-B-IMPLEMENTATION.md). This schema document does not itself perform the writes.
 
 Single PostgreSQL transaction under the existing per-series advisory lock / UoW:
 
@@ -100,14 +102,14 @@ Production expand/contract migration IDs: **NOT_RUN / Proposed**.
 | --- | --- | --- |
 | U-F2A-01 | Production versioned migration filename/ID + expand/contract order vs embedded DDL proofs | **Proposed** |
 | U-F2A-02 | Whether fence `results_published` alone may gate reads, or reads must join completion+4 categories | **Proposed** (recommend join; fence flag insufficient) |
-| U-F2A-03 | Exact H1-terminal vs Advance timing for marking claim `COMPLETED` (ADR-T02 + product T-02 alignment) | **Proposed** — F2-B must not invent |
+| U-F2A-03 | Exact H1-terminal vs Advance timing for marking claim `COMPLETED` | **Resolved for F2-B** by owner Q13/Q07 and accepted TD-06/TD-12. Publication and `COMPLETED` occur on the verified terminal H1 move. Between-game Advance is only the transition to a next ordinal and is rejected as a publication event. Pre-F2 `applyAdvance` can still mark the fence `COMPLETED` without rows; F2-B does not publish from that command. |
 | U-F2A-04 | Weekly aggregate / period_snapshot table shapes | **Deferred to F2-C** |
 | U-F2A-05 | TD-15 pagination defaults 50/100 | Remains **Proposed** in ADR-T02 |
 | U-F2A-06 | Retention / PII redaction for publication rows | **Proposed** |
 
 ## Explicit non-claims
 
-- No F2-B publish service, fault injection, or concurrent H1 proof in this phase
+- F2-B publish, fault injection, and concurrent H1 proof live in `f2b-publication.mts` and its PostgreSQL tests, not in this schema note
 - No ranked HTTP enablement; F1 production-disabled gate remains binding
 - No client score/date/ordinal/completion authority
 - No merge/deploy/Jira Done
