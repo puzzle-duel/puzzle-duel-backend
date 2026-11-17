@@ -56,7 +56,7 @@ export class PinnedRs256JwtVerifier {
     }
     try {
       this.#key = createPublicKey(config.rsaPublicKeyPem);
-      if (this.#key.asymmetricKeyType !== 'rsa') throw new JwtVerificationError();
+      if (this.#key.asymmetricKeyType !== 'rsa' || (this.#key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) throw new JwtVerificationError();
     } catch { throw new JwtVerificationError(); }
     this.#issuer = config.issuer;
     this.#audience = config.audience;
@@ -89,7 +89,7 @@ export class PinnedRs256JwtVerifier {
         !positiveInt(claims.exp) || !positiveInt(claims.iat) ||
         claims.exp <= nowSeconds || claims.iat > nowSeconds ||
         nowSeconds - claims.iat > this.#maxAge ||
-        claims.exp <= claims.iat ||
+        claims.exp <= claims.iat || claims.exp - claims.iat > this.#maxAge ||
         (claims.nbf !== undefined && (!positiveInt(claims.nbf) || claims.nbf > nowSeconds)) ||
         typeof claims.sub !== 'string' || /^\s*$/.test(claims.sub)) {
       throw new JwtVerificationError();
