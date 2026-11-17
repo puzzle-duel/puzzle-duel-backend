@@ -24,6 +24,7 @@ import {
   DAILY_CLAIM_DDL,
   type ImmutableDailyClaim,
 } from './postgres-daily-claim.mts';
+import { computeSeriesHardCutoffMs } from './hard-cutoff.mts';
 import type { PinnedManifestRegistry } from './pinned-manifest-registry.mts';
 
 function claimAdvisoryKeys(playerId: string, utcDate: string): [number, number] {
@@ -172,67 +173,79 @@ export class AtomicDailyClaimBootstrap {
       }
 
       const claim = mapClaim(inserted.rows[0]);
-      const subgame = manifest.subgames.find((s) => s.ordinal === 1);
-      if (!subgame) {
+      if (manifest.subgames.length !== 6) {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'MANIFEST_UNAVAILABLE' };
       }
 
-      const assignedAt = new Date(now);
-      const binding = bindTrustedChallenge({
-        seriesKey: claim.seriesId,
-        playerId: args.session.playerId,
-        subgameOrdinal: 1,
-        challengeId: subgame.challengeId,
-        generatorVersion: subgame.generatorVersion,
-        contentVersion: subgame.contentVersion,
-        initialStateRaw: subgame.initialState,
-        assignedAt,
+      const hardCutoffMs = computeSeriesHardCutoffMs({
+        originalUtcDate: claim.originalUtcDate,
+        startedAtMs: claim.startedAtMs,
       });
+      if (hardCutoffMs === null) {
+        await client.query('ROLLBACK');
+        return { ok: false, reason: 'BOOTSTRAP_FAILED' };
+      }
 
+      const assignedAt = new Date(now);
       const idleDeadlineAt = idleDeadlineFrom(assignedAt, 300);
       await client.query(
         `INSERT INTO series_fence_state (
            series_key, board_revision, writer_generation, status,
            idle_deadline_at_ms, hard_cutoff_at_ms, score, results_published,
            last_applied_admission_id, thinking_extension_consumed
-         ) VALUES ($1,0,1,'ACTIVE',$2,NULL,0,FALSE,NULL,FALSE)`,
-        [claim.seriesId, idleDeadlineAt.getTime()],
+         ) VALUES ($1,0,1,'ACTIVE',$2,$3,0,FALSE,NULL,FALSE)`,
+        [claim.seriesId, idleDeadlineAt.getTime(), hardCutoffMs],
       );
 
-      await client.query(
-        `INSERT INTO trusted_challenge_binding (
-           series_key, player_id, subgame_ordinal, challenge_id,
-           rules_version, generator_version, content_version,
-           initial_state_digest, initial_state_json, assigned_at_ms
-         ) VALUES ($1,$2,1,$3,'core-001.v3',$4,$5,$6,$7::jsonb,$8)`,
-        [
-          claim.seriesId,
-          args.session.playerId,
-          binding.challengeId,
-          binding.generatorVersion,
-          binding.contentVersion,
-          binding.initialStateDigest,
-          JSON.stringify(stateToJson(binding.initialState as GameState)),
-          now,
-        ],
-      );
-
-      await client.query(
-        `INSERT INTO authoritative_game_snapshot (
-           series_key, player_id, subgame_ordinal, challenge_id,
-           board_revision, move_cursor, state_hash, score, status,
-           terminal_reason, state_json, ledger_admission_seq,
-           writer_generation, produced_by_admission_id
-         ) VALUES ($1,$2,1,$3,0,0,$4,0,'in_progress',NULL,$5::jsonb,0,1,NULL)`,
-        [
-          claim.seriesId,
-          args.session.playerId,
-          binding.challengeId,
-          digestInitialState(binding.initialState as GameState),
-          JSON.stringify(stateToJson(binding.initialState as GameState)),
-        ],
-      );
+      // Pin all six challenges at claim time; snapshot only ordinal 1 until Advance.
+      for (const subgame of manifest.subgames) {
+        const binding = bindTrustedChallenge({
+          seriesKey: claim.seriesId,
+          playerId: args.session.playerId,
+          subgameOrdinal: subgame.ordinal,
+          challengeId: subgame.challengeId,
+          generatorVersion: subgame.generatorVersion,
+          contentVersion: subgame.contentVersion,
+          initialStateRaw: subgame.initialState,
+          assignedAt,
+        });
+        await client.query(
+          `INSERT INTO trusted_challenge_binding (
+             series_key, player_id, subgame_ordinal, challenge_id,
+             rules_version, generator_version, content_version,
+             initial_state_digest, initial_state_json, assigned_at_ms
+           ) VALUES ($1,$2,$3,$4,'core-001.v3',$5,$6,$7,$8::jsonb,$9)`,
+          [
+            claim.seriesId,
+            args.session.playerId,
+            subgame.ordinal,
+            binding.challengeId,
+            binding.generatorVersion,
+            binding.contentVersion,
+            binding.initialStateDigest,
+            JSON.stringify(stateToJson(binding.initialState as GameState)),
+            now,
+          ],
+        );
+        if (subgame.ordinal === 1) {
+          await client.query(
+            `INSERT INTO authoritative_game_snapshot (
+               series_key, player_id, subgame_ordinal, challenge_id,
+               board_revision, move_cursor, state_hash, score, status,
+               terminal_reason, state_json, ledger_admission_seq,
+               writer_generation, produced_by_admission_id
+             ) VALUES ($1,$2,1,$3,0,0,$4,0,'in_progress',NULL,$5::jsonb,0,1,NULL)`,
+            [
+              claim.seriesId,
+              args.session.playerId,
+              binding.challengeId,
+              digestInitialState(binding.initialState as GameState),
+              JSON.stringify(stateToJson(binding.initialState as GameState)),
+            ],
+          );
+        }
+      }
 
       const writer = await this.#writers.bindInitial(client, {
         seriesKey: claim.seriesId,

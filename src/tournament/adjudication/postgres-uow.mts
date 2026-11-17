@@ -424,6 +424,11 @@ export class PostgresTrustedUnitOfWork {
     ) =>
       | { ok: true; next: SeriesFenceState; resultExtras?: Partial<ImmutableAdmissionResult> }
       | { ok: false; reason: string };
+    /** Optional same-TX side effect after fence write (e.g. next-subgame snapshot). */
+    afterFence?: (
+      client: pg.PoolClient,
+      next: SeriesFenceState,
+    ) => Promise<void>;
   }): Promise<AdjudicateMoveResult> {
     const client = await this.#pool.connect();
     try {
@@ -541,6 +546,10 @@ export class PostgresTrustedUnitOfWork {
           next.thinkingExtensionConsumed,
         ],
       );
+
+      if (args.afterFence) {
+        await args.afterFence(client, next);
+      }
 
       const snapStore = new PostgresAuthoritativeSnapshotStore(client);
       const snap = await snapStore.get(

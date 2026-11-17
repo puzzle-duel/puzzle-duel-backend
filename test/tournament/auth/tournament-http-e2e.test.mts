@@ -25,7 +25,9 @@ import {
   PostgresAuthoritativeSnapshotStore,
   PostgresTrustedUnitOfWork,
 } from '../../../src/tournament/adjudication/index.mts';
+import { AtomicDeviceHandoffUnitOfWork } from '../../../src/tournament/adjudication/atomic-device-handoff.mts';
 import type { SessionAuthorizationGateway } from '../../../src/tournament/auth/session-authorization-gateway.mts';
+import { resolveActiveSubgameOrdinal } from '../../../src/tournament/claims/active-ordinal.mts';
 
 const url = process.env.PZD_INGRESS_DATABASE_URL;
 assert.ok(url, 'PostgreSQL required for tournament HTTP E2E');
@@ -129,12 +131,14 @@ async function boot() {
   const uow = new PostgresTrustedUnitOfWork(pool);
   await uow.migrate();
 
+  const handoffUow = new AtomicDeviceHandoffUnitOfWork(pool);
   const handler = createTournamentHttpHandler({
     verifier,
     sessions,
     claims,
     writers,
     fence,
+    pool,
     gameplayForSession: (gateway: SessionAuthorizationGateway) =>
       new TrustedGameplayService({
         journal,
@@ -145,7 +149,9 @@ async function boot() {
         clock,
         authorization: gateway,
         postgresUow: uow,
-        resolveActiveOrdinal: async () => 1,
+        deviceHandoffUow: handoffUow,
+        resolveActiveOrdinal: (seriesKey, playerId) =>
+          resolveActiveSubgameOrdinal(pool, seriesKey, playerId),
       }),
   });
 
@@ -342,6 +348,41 @@ describe('PZD-40 authenticated tournament HTTP E2E (candidate OpenAPI)', () => {
         },
       );
       assert.ok([200, 409].includes(abandon.status));
+
+      // Non-writer same-player session cannot seize via handoff.
+      const otherOpen = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST',
+        headers: { authorization: auth },
+      });
+      const other = (await otherOpen.json()) as { sessionSecret: string };
+      // Re-claim to get a fresh series for handoff negative (prior may be forfeited).
+      const claimed2 = await fetch(`${env.base}/v1/tournament/claims/daily`, {
+        method: 'POST',
+        headers: {
+          authorization: auth,
+          'x-pzd-session-secret': session.sessionSecret,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ originalUtcDate: env.today }),
+      });
+      const c2 = (await claimed2.json()) as { seriesId: string };
+      const steal = await fetch(
+        `${env.base}/v1/tournament/series/${c2.seriesId}/commands`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: auth,
+            'x-pzd-session-secret': other.sessionSecret,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            commandType: 'device_handoff',
+            idempotencyKey: 'steal',
+            expectedWriterGeneration: 1,
+          }),
+        },
+      );
+      assert.equal(steal.status, 409);
     } finally {
       await env.close();
     }

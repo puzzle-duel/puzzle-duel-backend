@@ -139,7 +139,12 @@ describe('PZD-40 atomic claim + Stage E bootstrap (PostgreSQL)', () => {
         'SELECT count(*)::int AS n FROM trusted_challenge_binding WHERE series_key=$1',
         [first.claim.seriesId],
       );
-      assert.equal(chal.rows[0].n, 1);
+      assert.equal(chal.rows[0].n, 6);
+      const fenceHard = await env.pool.query(
+        'SELECT hard_cutoff_at_ms FROM series_fence_state WHERE series_key=$1',
+        [first.claim.seriesId],
+      );
+      assert.ok(fenceHard.rows[0].hard_cutoff_at_ms != null);
       const snap = await env.pool.query(
         'SELECT count(*)::int AS n FROM authoritative_game_snapshot WHERE series_key=$1',
         [first.claim.seriesId],

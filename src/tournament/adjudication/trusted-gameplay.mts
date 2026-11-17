@@ -48,6 +48,7 @@ import type {
   AuthoritativeGameSnapshot,
   AuthoritativeSnapshotStore,
 } from './move-ledger.mts';
+import type { AtomicDeviceHandoffUnitOfWork } from './atomic-device-handoff.mts';
 import type { PostgresTrustedUnitOfWork } from './postgres-uow.mts';
 import type { TrustedChallengeStore } from './trusted-challenge.mts';
 
@@ -89,6 +90,7 @@ export type TrustedGameplayDecision =
         | 'SERIES_TERMINAL'
         | 'STATE_CONFLICT'
         | 'NOT_ACTIVE_WRITER'
+        | 'STALE_WRITER'
         | 'MOVE_REJECTED'
         | 'MOVE_UNSAFE'
         | 'REPLAY_MISMATCH'
@@ -130,6 +132,10 @@ export interface TrustedGameplayServiceOptions {
    * When set, accepted move/fence mutations use a single PostgreSQL TX.
    */
   postgresUow?: PostgresTrustedUnitOfWork;
+  /**
+   * Atomic writer+fence+snapshot+outcome handoff (P0-F12 / P1-F15).
+   */
+  deviceHandoffUow?: AtomicDeviceHandoffUnitOfWork;
   /**
    * Active subgame ordinal fallback when auth context is unavailable
    * (should not happen on authorized paths).
@@ -182,6 +188,7 @@ export class TrustedGameplayService {
   readonly #clock: IngressClock;
   readonly #authorization: AuthorizationGateway;
   readonly #postgresUow: PostgresTrustedUnitOfWork | null;
+  readonly #deviceHandoffUow: AtomicDeviceHandoffUnitOfWork | null;
   readonly #resolveActiveOrdinal: (
     seriesKey: string,
     playerId: string,
@@ -199,6 +206,7 @@ export class TrustedGameplayService {
     this.#authorization =
       options.authorization ?? new FailClosedAuthorizationGateway();
     this.#postgresUow = options.postgresUow ?? null;
+    this.#deviceHandoffUow = options.deviceHandoffUow ?? null;
     this.#resolveActiveOrdinal =
       options.resolveActiveOrdinal ??
       (async (_s, _p) => {
@@ -750,19 +758,24 @@ export class TrustedGameplayService {
 
     const ordinal = auth.series.activeSubgameOrdinal;
 
-    if (this.#postgresUow) {
+    // P0-F12 / P1-F15: device_handoff uses dedicated atomic writer+fence UoW.
+    if (command.commandType === 'device_handoff' && this.#deviceHandoffUow) {
+      if (command.expectedWriterGeneration === undefined) {
+        return { decision: 'reject', reason: 'STALE_WRITER' };
+      }
       try {
-        const out = await this.#postgresUow.commitFenceMutation({
+        const out = await this.#deviceHandoffUow.commit({
           seriesKey: auth.series.seriesKey,
           playerId: auth.principal.playerId,
           subgameOrdinal: ordinal,
           admissionId: admit.command.admissionId,
-          mutate: (current) =>
-            this.#nonMoveMutate(command, admit.command.admissionId, admit.command.trustedReceivedAt, current),
+          trustedReceivedAt: admit.command.trustedReceivedAt,
+          callerSessionId: auth.session.sessionId,
+          callerDeviceId: auth.session.deviceId,
+          expectedWriterGeneration: command.expectedWriterGeneration,
         });
         if (out.decision === 'apply') {
-          // Keep auth gateway writer generation in sync after handoff.
-          if (command.commandType === 'device_handoff' && 'update' in this.#authorization) {
+          if ('update' in this.#authorization) {
             const gw = this.#authorization as {
               update?: (c: TrustedAuthorizationContext) => void;
               get?: (k: string) => TrustedAuthorizationContext | null;
@@ -778,6 +791,33 @@ export class TrustedGameplayService {
               });
             }
           }
+          return decisionFromResult(out.result, out.fence, out.duplicateReplay);
+        }
+        return {
+          decision: 'reject',
+          reason: out.reason as Extract<
+            TrustedGameplayDecision,
+            { decision: 'reject' }
+          >['reason'],
+          fence: out.fence,
+          admissionResult: out.result,
+        };
+      } catch {
+        return { decision: 'unavailable', reason: 'INGRESS_UNAVAILABLE' };
+      }
+    }
+
+    if (this.#postgresUow) {
+      try {
+        const out = await this.#postgresUow.commitFenceMutation({
+          seriesKey: auth.series.seriesKey,
+          playerId: auth.principal.playerId,
+          subgameOrdinal: ordinal,
+          admissionId: admit.command.admissionId,
+          mutate: (current) =>
+            this.#nonMoveMutate(command, admit.command.admissionId, admit.command.trustedReceivedAt, current),
+        });
+        if (out.decision === 'apply') {
           return decisionFromResult(out.result, out.fence, out.duplicateReplay);
         }
         return {
@@ -904,6 +944,13 @@ export class TrustedGameplayService {
       return { ok: false, reason: 'HARD_CUTOFF_EXPIRED' };
     }
     if (command.commandType === 'device_handoff') {
+      // Memory path: still require caller-observed generation match.
+      if (
+        command.expectedWriterGeneration === undefined ||
+        command.expectedWriterGeneration !== current.writerGeneration
+      ) {
+        return { ok: false, reason: 'STALE_WRITER' };
+      }
       return {
         ok: true,
         next: {
@@ -1038,6 +1085,44 @@ export class TrustedGameplayService {
                 awaitAdvance: false,
               },
             };
+          },
+          afterFence: async (client, next) => {
+            // P1-F14: materialize next ordinal snapshot after verified Advance.
+            if (next.status !== 'ACTIVE' || ordinal >= 6) return;
+            const nextOrdinal = ordinal + 1;
+            const existing = await client.query(
+              `SELECT 1 FROM authoritative_game_snapshot
+               WHERE series_key=$1 AND player_id=$2 AND subgame_ordinal=$3`,
+              [auth.series.seriesKey, auth.principal.playerId, nextOrdinal],
+            );
+            if (existing.rowCount) return;
+            const chal = await client.query(
+              `SELECT challenge_id, initial_state_digest, initial_state_json
+               FROM trusted_challenge_binding
+               WHERE series_key=$1 AND player_id=$2 AND subgame_ordinal=$3`,
+              [auth.series.seriesKey, auth.principal.playerId, nextOrdinal],
+            );
+            if (!chal.rowCount) throw new Error('NEXT_CHALLENGE_MISSING');
+            const row = chal.rows[0];
+            await client.query(
+              `INSERT INTO authoritative_game_snapshot (
+                 series_key, player_id, subgame_ordinal, challenge_id,
+                 board_revision, move_cursor, state_hash, score, status,
+                 terminal_reason, state_json, ledger_admission_seq,
+                 writer_generation, produced_by_admission_id
+               ) VALUES ($1,$2,$3,$4,0,0,$5,0,'in_progress',NULL,$6::jsonb,0,$7,NULL)`,
+              [
+                auth.series.seriesKey,
+                auth.principal.playerId,
+                nextOrdinal,
+                String(row.challenge_id),
+                String(row.initial_state_digest),
+                typeof row.initial_state_json === 'string'
+                  ? row.initial_state_json
+                  : JSON.stringify(row.initial_state_json),
+                next.writerGeneration,
+              ],
+            );
           },
         });
         if (out.decision === 'apply') {

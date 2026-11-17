@@ -55,7 +55,11 @@ describe('Stage E — P0-E02 authenticated ownership boundary', () => {
   it('unauthorized device_handoff from foreign series fails closed', async () => {
     const { service, hints, fence } = await bootMemory();
     const r = await service.handleClientCommand(
-      { commandType: 'device_handoff', idempotencyKey: 'ho1' },
+      {
+        commandType: 'device_handoff',
+        idempotencyKey: 'ho1',
+        expectedWriterGeneration: 1,
+      },
       { ...hints, seriesKeyHint: 'nope' },
     );
     assert.equal(r.decision, 'reject');
@@ -66,7 +70,11 @@ describe('Stage E — P0-E02 authenticated ownership boundary', () => {
   it('authorized device_handoff advances writer; stale device cannot move', async () => {
     const { service, hints, fence, authGw } = await bootMemory();
     const handoff = await service.handleClientCommand(
-      { commandType: 'device_handoff', idempotencyKey: 'ho-ok' },
+      {
+        commandType: 'device_handoff',
+        idempotencyKey: 'ho-ok',
+        expectedWriterGeneration: 1,
+      },
       hints,
     );
     assert.equal(handoff.decision, 'apply');
