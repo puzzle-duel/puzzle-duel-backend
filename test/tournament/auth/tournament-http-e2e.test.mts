@@ -142,6 +142,7 @@ async function boot() {
     pool,
     // Candidate ranked HTTP enabled only via explicit test gate — never production.
     rankedHttpGate: explicitTestRankedHttpGateConfig(),
+    actualRuntimeEnv: { NODE_ENV: 'test' } as NodeJS.ProcessEnv,
     gameplayForSession: (gateway: SessionAuthorizationGateway) =>
       new TrustedGameplayService({
         journal,

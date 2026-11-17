@@ -8,9 +8,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import {
   RANKED_HTTP_DISABLED_ERROR,
   explicitTestRankedHttpGateConfig,
+  isNodeEnvProductionHardDeny,
   rankedHttpGateConfigFromEnv,
   resolveRankedHttpFeatureGate,
 } from '../../../src/tournament/auth/ranked-feature-gate.mts';
+
+/** Non-production actual env so harness NODE_ENV cannot hard-deny enable proofs. */
+const NON_PROD_ACTUAL = { NODE_ENV: 'test' } as NodeJS.ProcessEnv;
 import { createTournamentHttpHandler } from '../../../src/tournament/auth/tournament-http.mts';
 import { createInternalSessionHttpHandler } from '../../../src/tournament/auth/internal-session-http.mts';
 
@@ -51,80 +55,121 @@ async function withServer(
 
 describe('PZD-40 P0 ranked HTTP feature gate — resolve', () => {
   it('defaults to DISABLED for missing/empty/unknown/production configs', () => {
-    assert.equal(resolveRankedHttpFeatureGate({}).enabled, false);
+    const opts = { actualEnv: NON_PROD_ACTUAL };
+    assert.equal(resolveRankedHttpFeatureGate({}, opts).enabled, false);
     assert.equal(
-      resolveRankedHttpFeatureGate({ enableFlag: 'true' }).enabled,
+      resolveRankedHttpFeatureGate({ enableFlag: 'true' }, opts).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'true',
-        runtimeProfile: 'production',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'true', runtimeProfile: 'production' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'true',
-        runtimeProfile: 'prod',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'true', runtimeProfile: 'prod' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'true',
-        runtimeProfile: 'staging',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'true', runtimeProfile: 'staging' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'TRUE',
-        runtimeProfile: 'test',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'TRUE', runtimeProfile: 'test' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: '1',
-        runtimeProfile: 'test',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: '1', runtimeProfile: 'test' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'yes',
-        runtimeProfile: 'development',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'yes', runtimeProfile: 'development' },
+        opts,
+      ).enabled,
       false,
     );
     assert.equal(
-      resolveRankedHttpFeatureGate({
-        enableFlag: '',
-        runtimeProfile: 'test',
-      }).enabled,
+      resolveRankedHttpFeatureGate(
+        { enableFlag: '', runtimeProfile: 'test' },
+        opts,
+      ).enabled,
       false,
     );
   });
 
   it('ENABLES only for exact test/development + enableFlag true', () => {
+    const opts = { actualEnv: NON_PROD_ACTUAL };
     assert.deepEqual(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'true',
-        runtimeProfile: 'test',
-      }),
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'true', runtimeProfile: 'test' },
+        opts,
+      ),
       { enabled: true },
     );
     assert.deepEqual(
-      resolveRankedHttpFeatureGate({
-        enableFlag: 'true',
-        runtimeProfile: 'development',
-      }),
+      resolveRankedHttpFeatureGate(
+        { enableFlag: 'true', runtimeProfile: 'development' },
+        opts,
+      ),
       { enabled: true },
     );
     assert.deepEqual(
-      resolveRankedHttpFeatureGate(explicitTestRankedHttpGateConfig()),
+      resolveRankedHttpFeatureGate(explicitTestRankedHttpGateConfig(), opts),
       { enabled: true },
+    );
+  });
+
+  it('P0-FG01: NODE_ENV=production hard-denies even when profile=development and enable=true', () => {
+    assert.equal(
+      isNodeEnvProductionHardDeny({
+        NODE_ENV: 'production',
+      } as NodeJS.ProcessEnv),
+      true,
+    );
+    const contradictory = rankedHttpGateConfigFromEnv({
+      NODE_ENV: 'production',
+      PZD_RUNTIME_PROFILE: 'development',
+      PZD_RANKED_HTTP_ENABLED: 'true',
+    } as NodeJS.ProcessEnv);
+    // fromEnv must not adopt development profile under NODE_ENV=production
+    assert.equal(contradictory.runtimeProfile, 'production');
+    const decision = resolveRankedHttpFeatureGate(contradictory, {
+      actualEnv: {
+        NODE_ENV: 'production',
+        PZD_RUNTIME_PROFILE: 'development',
+        PZD_RANKED_HTTP_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
+    });
+    assert.equal(decision.enabled, false);
+    assert.equal(
+      !decision.enabled && decision.denyReason,
+      'node_env_production_hard_deny',
+    );
+
+    // Injected test enable config still hard-denied by actual NODE_ENV=production
+    const injected = resolveRankedHttpFeatureGate(
+      explicitTestRankedHttpGateConfig(),
+      { actualEnv: { NODE_ENV: 'production' } as NodeJS.ProcessEnv },
+    );
+    assert.equal(injected.enabled, false);
+    assert.equal(
+      !injected.enabled && injected.denyReason,
+      'node_env_production_hard_deny',
     );
   });
 
@@ -134,10 +179,20 @@ describe('PZD-40 P0 ranked HTTP feature gate — resolve', () => {
       PZD_RANKED_HTTP_ENABLED: 'true',
       PZD_RUNTIME_PROFILE: 'production',
     } as NodeJS.ProcessEnv);
-    assert.equal(resolveRankedHttpFeatureGate(fromProd).enabled, false);
+    assert.equal(
+      resolveRankedHttpFeatureGate(fromProd, {
+        actualEnv: { NODE_ENV: 'production' } as NodeJS.ProcessEnv,
+      }).enabled,
+      false,
+    );
 
     const missing = rankedHttpGateConfigFromEnv({} as NodeJS.ProcessEnv);
-    assert.equal(resolveRankedHttpFeatureGate(missing).enabled, false);
+    assert.equal(
+      resolveRankedHttpFeatureGate(missing, {
+        actualEnv: {} as NodeJS.ProcessEnv,
+      }).enabled,
+      false,
+    );
   });
 });
 
@@ -312,6 +367,7 @@ describe('PZD-40 P0 ranked HTTP feature gate — tournament HTTP deny-before-dep
         throw new Error('unreachable');
       },
       rankedHttpGate: explicitTestRankedHttpGateConfig(),
+      actualRuntimeEnv: NON_PROD_ACTUAL,
     });
 
     await withServer(handler, async (base) => {
@@ -321,6 +377,106 @@ describe('PZD-40 P0 ranked HTTP feature gate — tournament HTTP deny-before-dep
       assert.equal(res.status, 401);
     });
     assert.equal(verified, 1);
+  });
+
+  it('P0-FG01: injected test enable config cannot bypass actual NODE_ENV=production', async () => {
+    const counts: Record<string, number> = {};
+    let gameplayFactoryCalls = 0;
+    const handler = createTournamentHttpHandler({
+      verifier: countingProxy(
+        {
+          verifyAuthorizationHeader() {
+            throw new Error('verifier must not run under production hard deny');
+          },
+        },
+        counts,
+      ) as unknown as import('../../../src/tournament/auth/pinned-jwt-verifier.mts').PinnedRs256JwtVerifier,
+      sessions: countingProxy(
+        {
+          openAfterVerifiedJwt() {
+            throw new Error('session open must not run');
+          },
+          authenticateVerifiedSession() {
+            throw new Error('session auth must not run');
+          },
+          revokeSession() {
+            throw new Error('revoke must not run');
+          },
+        },
+        counts,
+      ) as unknown as import('../../../src/tournament/auth/postgres-verified-sessions.mts').PostgresVerifiedIdentitySessionStore,
+      claims: countingProxy(
+        {
+          claimAndBootstrap() {
+            throw new Error('claim must not run');
+          },
+          getClaimForPlayer() {
+            throw new Error('getClaim must not run');
+          },
+        },
+        counts,
+      ) as unknown as import('../../../src/tournament/claims/atomic-claim-bootstrap.mts').AtomicDailyClaimBootstrap,
+      writers: countingProxy(
+        {
+          get() {
+            throw new Error('writers must not run');
+          },
+        },
+        counts,
+      ) as unknown as import('../../../src/tournament/auth/series-writer-binding.mts').PostgresSeriesWriterStore,
+      fence: countingProxy(
+        {
+          get() {
+            throw new Error('fence must not run');
+          },
+        },
+        counts,
+      ) as unknown as import('../../../src/tournament/ingress/series-fence.mts').SeriesFenceStore,
+      pool: {} as import('pg').Pool,
+      gameplayForSession: () => {
+        gameplayFactoryCalls += 1;
+        throw new Error('gameplay must not run');
+      },
+      // Injected enable that previously could soft-bypass — must still hard-deny.
+      rankedHttpGate: {
+        enableFlag: 'true',
+        runtimeProfile: 'development',
+      },
+      actualRuntimeEnv: {
+        NODE_ENV: 'production',
+        PZD_RUNTIME_PROFILE: 'development',
+        PZD_RANKED_HTTP_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
+    });
+
+    await withServer(handler, async (base) => {
+      const series = '22222222-2222-4222-8222-222222222222';
+      const attempts: Array<{ method: string; path: string }> = [
+        { method: 'POST', path: '/v1/tournament/session' },
+        { method: 'GET', path: '/v1/tournament/session' },
+        { method: 'DELETE', path: '/v1/tournament/session' },
+        { method: 'POST', path: '/v1/tournament/claims/daily' },
+        { method: 'GET', path: `/v1/tournament/series/${series}` },
+        { method: 'POST', path: `/v1/tournament/series/${series}/commands` },
+      ];
+      for (const a of attempts) {
+        const res = await fetch(`${base}${a.path}`, {
+          method: a.method,
+          headers: {
+            authorization: 'Bearer fake',
+            'x-pzd-session-secret': 'fake',
+            'x-pzd-ranked-http-enabled': 'true',
+          },
+        });
+        assert.equal(res.status, 503, `${a.method} ${a.path}`);
+        assert.equal(res.headers.get('cache-control'), 'no-store');
+        const body = (await res.json()) as { error: string; reason: string };
+        assert.equal(body.error, RANKED_HTTP_DISABLED_ERROR);
+        assert.equal(body.reason, 'node_env_production_hard_deny');
+      }
+    });
+    assert.deepEqual(counts, {});
+    assert.equal(gameplayFactoryCalls, 0);
   });
 });
 
@@ -351,7 +507,12 @@ describe('PZD-40 P0 ranked HTTP feature gate — internal session path', () => {
         },
         counts,
       ) as unknown as import('../../../src/tournament/auth/postgres-verified-sessions.mts').PostgresVerifiedIdentitySessionStore,
-      rankedHttpGate: { enableFlag: 'true', runtimeProfile: 'production' },
+      rankedHttpGate: explicitTestRankedHttpGateConfig(),
+      actualRuntimeEnv: {
+        NODE_ENV: 'production',
+        PZD_RUNTIME_PROFILE: 'development',
+        PZD_RANKED_HTTP_ENABLED: 'true',
+      } as NodeJS.ProcessEnv,
     });
 
     await withServer(handler, async (base) => {
@@ -368,6 +529,10 @@ describe('PZD-40 P0 ranked HTTP feature gate — internal session path', () => {
         assert.equal(res.headers.get('cache-control'), 'no-store');
         const body = (await res.json()) as { error: string };
         assert.equal(body.error, RANKED_HTTP_DISABLED_ERROR);
+        assert.equal(
+          (body as unknown as { reason: string }).reason,
+          'node_env_production_hard_deny',
+        );
       }
     });
     assert.deepEqual(counts, {});

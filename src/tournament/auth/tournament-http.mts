@@ -82,8 +82,14 @@ export interface TournamentHttpDeps {
   /**
    * Server-side ranked HTTP gate config. Defaults to process env.
    * Never derived from request headers/query/body.
+   * Cannot override NODE_ENV=production hard deny (P0-FG01).
    */
   rankedHttpGate?: RankedHttpGateConfig;
+  /**
+   * Actual runtime env for NODE_ENV hard deny. Defaults to `process.env`.
+   * Test harnesses may inject a synthetic env; production omits this.
+   */
+  actualRuntimeEnv?: NodeJS.ProcessEnv;
 }
 
 type RateBucket = { count: number; resetAt: number };
@@ -107,7 +113,11 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // P0 ranked gate: before any JWT verify, session, claim, or gameplay work.
     // Client enable/bypass headers/query/body are intentionally ignored.
-    const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate);
+    // P0-FG01: actual NODE_ENV=production hard-denies even if rankedHttpGate
+    // is an injected test/development enable config.
+    const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate, {
+      actualEnv: deps.actualRuntimeEnv ?? process.env,
+    });
     if (!gate.enabled) {
       send(res, 503, {
         error: RANKED_HTTP_DISABLED_ERROR,

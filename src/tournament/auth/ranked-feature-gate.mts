@@ -4,12 +4,15 @@
  * Fail-closed / default-deny. Server-side configuration only.
  * Request headers, query strings, and bodies MUST NEVER influence this gate.
  *
- * ENABLED only when BOTH:
+ * HARD DENY (P0-FG01): if the actual process `NODE_ENV` is `production` or `prod`,
+ * ranked HTTP is ALWAYS disabled — even when `PZD_RUNTIME_PROFILE=development`
+ * and/or an injected test `rankedHttpGate` claims enablement.
+ *
+ * Otherwise ENABLED only when BOTH:
  *   1) runtime profile is exactly `test` or `development`
  *   2) enable flag is exactly the string `true`
  *
- * Production, missing, empty, unknown, or malformed configuration → DISABLED.
- * A production profile can never enable ranked HTTP even if the flag is `true`.
+ * Missing, empty, unknown, or malformed configuration → DISABLED.
  */
 
 export const RANKED_HTTP_DISABLED_ERROR = 'RANKED_HTTP_DISABLED' as const;
@@ -25,7 +28,7 @@ export type RankedHttpGateConfig = {
   enableFlag?: string | null | undefined;
   /**
    * Runtime profile. Only `test` | `development` may enable.
-   * `production` / missing / unknown → deny.
+   * `production` / missing / unknown → deny (after NODE_ENV hard deny).
    */
   runtimeProfile?: string | null | undefined;
 };
@@ -34,12 +37,45 @@ export type RankedHttpGateDecision =
   | { enabled: true }
   | { enabled: false; denyReason: string };
 
+export type RankedHttpGateResolveOptions = {
+  /**
+   * Actual process environment used for the non-overridable NODE_ENV hard deny.
+   * Defaults to `process.env`. Injected gate config cannot override this check.
+   */
+  actualEnv?: NodeJS.ProcessEnv;
+};
+
+function normalizeNodeEnv(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 /**
- * Resolve ranked HTTP availability. Pure; no I/O; no request context.
+ * Non-overridable production hard deny based on actual NODE_ENV.
+ * PZD_RUNTIME_PROFILE and injected rankedHttpGate MUST NOT bypass this.
+ */
+export function isNodeEnvProductionHardDeny(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const nodeEnv = normalizeNodeEnv(env.NODE_ENV);
+  return nodeEnv === 'production' || nodeEnv === 'prod';
+}
+
+/**
+ * Resolve ranked HTTP availability.
+ * Always applies NODE_ENV production hard deny before profile/flag checks.
  */
 export function resolveRankedHttpFeatureGate(
   config: RankedHttpGateConfig = rankedHttpGateConfigFromEnv(),
+  options: RankedHttpGateResolveOptions = {},
 ): RankedHttpGateDecision {
+  const actualEnv = options.actualEnv ?? process.env;
+  if (isNodeEnvProductionHardDeny(actualEnv)) {
+    return {
+      enabled: false,
+      denyReason: 'node_env_production_hard_deny',
+    };
+  }
+
   const profile =
     typeof config.runtimeProfile === 'string'
       ? config.runtimeProfile.trim()
@@ -70,11 +106,20 @@ export function resolveRankedHttpFeatureGate(
 
 /**
  * Server bootstrap reader. Intentionally ignores any client-supplied values.
- * Prefer `PZD_RUNTIME_PROFILE`; fall back to `NODE_ENV` only as a profile hint.
+ *
+ * When actual `NODE_ENV` is production/prod, `runtimeProfile` is forced to
+ * `production` so `PZD_RUNTIME_PROFILE=development` cannot soft-enable via
+ * profile alone (hard deny still applies independently in resolve).
  */
 export function rankedHttpGateConfigFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): RankedHttpGateConfig {
+  if (isNodeEnvProductionHardDeny(env)) {
+    return {
+      enableFlag: env.PZD_RANKED_HTTP_ENABLED,
+      runtimeProfile: 'production',
+    };
+  }
   return {
     enableFlag: env.PZD_RANKED_HTTP_ENABLED,
     runtimeProfile: env.PZD_RUNTIME_PROFILE ?? env.NODE_ENV,

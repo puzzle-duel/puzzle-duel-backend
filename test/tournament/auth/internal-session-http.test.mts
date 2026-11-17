@@ -34,6 +34,7 @@ async function fixture() {
   sessions,
   verifier,
   rankedHttpGate: explicitTestRankedHttpGateConfig(),
+  actualRuntimeEnv: { NODE_ENV: 'test' } as NodeJS.ProcessEnv,
  });
  const server=createServer((req,res)=>{void handler(req,res);});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
