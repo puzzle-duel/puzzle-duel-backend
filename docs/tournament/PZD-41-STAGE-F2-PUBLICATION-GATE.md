@@ -1,10 +1,11 @@
 # PZD-41 Stage F2 — Atomic tournament result publication
 
-Status: **FOUNDATION IMPLEMENTED / ATOMIC PUBLISH NOT IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, database schema, ADR-T01 or production release.
+Status: **F2 CALCULATOR + F2-A SCHEMA CANDIDATE / ATOMIC PUBLISH NOT IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, frozen production migrations, ADR-T01 or production release.
 
 Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-41
-Dependencies: PZD-40 Stage F1 authenticated player/unique daily claim, PZD-38 Phase A merged and PZD-39 Stage E Draft PR #17.
-Branch: `feature/PZD-41-stage-f2-result-publication`, **stacked on** `feature/PZD-39-core001v3-tournament-integration` at `c5a01f7bf03e4c30fdd9375843e3906ae3273bba`.
+Dependencies: PZD-40 Stage F1 and PZD-39 Stage E are **merged to `main`**. Ranked HTTP remains production-disabled.
+Branch: `feature/PZD-41-stage-f2-result-publication` retargeted to **`main`** (clean rebase; obsolete Stage E stack removed from PR diff).
+F2-A schema contract: [`PZD-41-STAGE-F2-A-SCHEMA.md`](./PZD-41-STAGE-F2-A-SCHEMA.md).
 
 ## Immutable approved product invariants
 
@@ -24,16 +25,17 @@ Branch: `feature/PZD-41-stage-f2-result-publication`, **stacked on** `feature/PZ
 
 ## Next implementation sequence (not yet delivered)
 
-### F2-A: verified claim + manifest + migration
+### F2-A: verified claim + manifest + migration — candidate delivered for review
 
-After F1 immutable claim shape is frozen, define additive Postgres 18 tables:
-- `daily_series_claim` keyed by immutable `player_id` + original UTC date, authoritative E1 start time, six ordered manifest IDs/rules/version hashes and terminal state. Link all six stage-E snapshots and ledger admissions; prevent a second entitlement via unique key.
-- `daily_series_result`: one series completion receipt with verified source admissions/snapshot digests, completionAt, claimAt, manifest pins, rev.
-- `daily_result_category`: unique (series, category); four rows only in same transaction as terminal completion. Daily leaderboard projection must filter terminal receipt visibility, never partially committed rows.
-- `on_time_badge`: unique (series, badge) linked to immutable claim.
-- `weekly_result_aggregate`, `period_revision`, `period_snapshot`: signed-off weekly provisional/final watermark and immutable FINAL artifacts.
+Reuses F1 `tournament_daily_claim` (no parallel claim table). Additive candidate tables + constraint tests:
+- `tournament_daily_series_completion` (FK claim; unique player+date; unique publication idempotency key)
+- `tournament_verified_subgame_score` (six ordinals; snapshot/ledger provenance columns)
+- `tournament_daily_result_category` (unique series+category ∈ EASY/MEDIUM/HARD/ALL)
+- `tournament_on_time_badge` (one decision per series; claim-start eligibility helper)
+- Docs: `PZD-41-STAGE-F2-A-SCHEMA.md`, `migrations/stage_f2/README.md`
+- Unresolved production migration IDs / weekly shapes / H1-vs-Advance COMPLETED timing remain **Proposed** (see U-F2A-*).
 
-Names above are **implementation proposals**, not approved endpoint contracts or migration IDs. Review keys, foreign keys, retention and access policy prior to writing migration. Never store a false `COMPLETED` or create rank rows from `score=0` placeholder.
+Never store a false `COMPLETED` or create rank rows from incomplete series. F2-B publish UoW is **not** implemented here.
 
 ### F2-B: single transaction completion
 
@@ -60,6 +62,6 @@ Implement all four daily/weekly competition ranks, revision-pinned page cursors 
 
 ## Current non-claims
 
-**NOT_RUN:** actual DB publication, migration and rollback, trusted claim/on-time, HTTP auth/session, weekly snapshots, four-category ranked read API, multi-host failover, end-to-end verification and production deployment.
+**NOT_RUN:** F2-B atomic DB publication UoW, production versioned migration acceptance, weekly snapshots/FINAL, four-category ranked read API, multi-host failover, end-to-end verification and production deployment. F2-A delivers candidate DDL + constraint proofs only.
 
 The module and tests alone must NOT be interpreted as Stage F complete, PZD-41 Done, ranked rollout authorized or ADR-T01 Accepted.
