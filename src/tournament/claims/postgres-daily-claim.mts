@@ -55,7 +55,8 @@ function mapClaim(row: Record<string, unknown>): ImmutableDailyClaim {
   };
 }
 export class PostgresDailyClaimStore {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly pool: pg.Pool;
+  constructor(pool: pg.Pool) { this.pool = pool; }
   async migrate(): Promise<void> { await this.pool.query(DAILY_CLAIM_DDL); }
   async claimForVerifiedPrincipal(input: VerifiedClaimInput): Promise<ClaimDecision> {
     const requested = dateMs(input.originalUtcDate);
