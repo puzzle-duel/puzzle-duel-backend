@@ -10,7 +10,7 @@ Draft PR: [#17](https://github.com/puzzle-duel/puzzle-duel-backend/pull/17)
 
 | Pin | SHA |
 | --- | --- |
-| Stage E sync tip | `b1e10cfe33c74eab2390cd8c6689b8cae6ccfd33` |
+| Stage E sync tip | `46135b66f810fc2eaab28f307312bfb79da40c3f` |
 | Stage E starting HEAD (pre-sync) | `41e9e79c2b98b551b1dfcbbca415ee80e1fa2607` |
 | Stage E base (Stage D) | `7036f17f187742bf8551302801469673514650d9` |
 | Stage C engine | `25efb2473f3517027769ee978b31ab6e3dc41030` |
