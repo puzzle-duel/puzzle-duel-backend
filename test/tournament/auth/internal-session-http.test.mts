@@ -12,8 +12,9 @@ assert.ok(url,'PostgreSQL required for HTTP auth integration');
 const pair=generateKeyPairSync('rsa',{modulusLength:2048});
 const issuer='https://issuer.example.test',audience='puzzle-duel-api';
 const verifier=new PinnedRs256JwtVerifier({
- issuer,audience,rsaPublicKeyPem:pair.publicKey.export({type:'spki',format:'pem'}).toString(),
- keyId:'server-pinned',maxTokenAgeSeconds:900,
+ issuer,audience,
+ keys:[{keyId:'server-pinned',rsaPublicKeyPem:pair.publicKey.export({type:'spki',format:'pem'}).toString()}],
+ maxTokenAgeSeconds:900,
 });
 function token(sub:string,overrides:Record<string,unknown>={}) {
  const now=Math.floor(Date.now()/1000);

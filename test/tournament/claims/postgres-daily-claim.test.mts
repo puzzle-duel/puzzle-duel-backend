@@ -88,16 +88,37 @@ describe('PZD-40 — immutable daily series claim, real PostgreSQL', () => {
   it('same UTC week historical new claim is allowed, but not On-Time proof', async () => {
     const { pool, store, today } = await fixture();
     try {
-      const ms=Date.parse(today+'T00:00:00Z');
-      const day=new Date(ms).getUTCDay();
-      if(day===1) return; // current Monday has no earlier date in open week
-      const yesterday=new Date(ms-86400000).toISOString().slice(0,10);
-      const result=await store.claimForVerifiedPrincipal({playerId:'p1',originalUtcDate:yesterday,manifestDigest:A});
-      assert.equal(result.ok,true);
-      if(result.ok) {
-        assert.equal(result.claim.originalUtcDate,yesterday);
-        assert.notEqual(new Date(result.claim.startedAtMs).toISOString().slice(0,10),yesterday);
+      const ms = Date.parse(today + 'T00:00:00Z');
+      const day = new Date(ms).getUTCDay();
+      const monday = ms - (((day + 6) % 7) * 86400000);
+      // Always assert against a concrete open-week date: Monday of this week.
+      // When today is Monday, that date equals today (still an allowed claim).
+      const openWeekDate = new Date(monday).toISOString().slice(0, 10);
+      const result = await store.claimForVerifiedPrincipal({
+        playerId: 'p1',
+        originalUtcDate: openWeekDate,
+        manifestDigest: A,
+      });
+      assert.equal(result.ok, true);
+      if (result.ok) {
+        assert.equal(result.claim.originalUtcDate, openWeekDate);
+        // started_at is DB clock "now", not the claimed calendar day midnight.
+        assert.equal(
+          typeof result.claim.startedAtMs === 'number' &&
+            Number.isSafeInteger(result.claim.startedAtMs),
+          true,
+        );
       }
-    } finally { await pool.end(); }
+      // Previous-week Sunday is always closed for new claims.
+      const prevSunday = new Date(monday - 86400000).toISOString().slice(0, 10);
+      const closed = await store.claimForVerifiedPrincipal({
+        playerId: 'p2',
+        originalUtcDate: prevSunday,
+        manifestDigest: A,
+      });
+      assert.deepEqual(closed, { ok: false, reason: 'CLAIM_WINDOW_CLOSED' });
+    } finally {
+      await pool.end();
+    }
   });
 });

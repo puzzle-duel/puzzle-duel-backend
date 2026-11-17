@@ -11,8 +11,9 @@ const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const issuer = 'https://auth.example.test';
 const audience = 'puzzle-duel-api';
 const verifier = new PinnedRs256JwtVerifier({
-  issuer, audience, rsaPublicKeyPem: pair.publicKey.export({format:'pem',type:'spki'}).toString(),
-  keyId:'test-pin', maxTokenAgeSeconds:1800,
+  issuer, audience,
+  keys:[{keyId:'test-pin', rsaPublicKeyPem: pair.publicKey.export({format:'pem',type:'spki'}).toString()}],
+  maxTokenAgeSeconds:1800,
 });
 function authorizedIdentity(sub: string, override: Record<string,unknown> = {}) {
   const now=Math.floor(Date.now()/1000);

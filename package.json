@@ -16,7 +16,8 @@
     "test:stage-d-parity": "python3 tools/stage_d/parity/run_parity.py",
     "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py",
     "test:stage-f1": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/claims/**/*.test.mts'",
-    "test:stage-f1-auth": "node --experimental-strip-types --test 'test/tournament/auth/**/*.test.mts'"
+    "test:stage-f1-auth": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/auth/**/*.test.mts'",
+    "test:stage-f1-http": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/auth/tournament-http-e2e.test.mts"
   },
   "dependencies": {
     "pg": "^8.16.3"
