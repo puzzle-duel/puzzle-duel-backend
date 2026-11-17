@@ -28,7 +28,9 @@ The writer itself used to set `COMPLETED` with `results_published=false` when th
 - ordinal 6 or above returns `NO_NEXT_ORDINAL`
 - ordinals 1 through 5 still require `AWAIT_ADVANCE` and an ended snapshot, then move to `ACTIVE`
 
-A rejected advance stores the frozen rejection and does not change the fence. A later verified terminal H1 move can still publish once. Phase A ingress completion on `completesSubgame` is a separate, non-HTTP path and was not changed.
+A rejected advance stores the frozen rejection and does not change the fence. A later verified terminal H1 move can still publish once.
+
+Phase A `SeriesCommandArbiter` is not the HTTP handler. A trusted `completesSubgame` effect now sets `AWAIT_ADVANCE` and keeps `resultsPublished=false`. It does not insert completion, score, category, badge, or provenance rows. Series `COMPLETED` remains the F2-B terminal H1 publication.
 
 ## Transaction and lock
 
@@ -74,11 +76,11 @@ Node 26.13.1. PostgreSQL 18 at `127.0.0.1:55432`, database `pzd_ingress`. No ski
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | PASS |
-| `npm run test:stage-f2` | 55 pass, 0 fail, 0 skip |
+| `npm run test:stage-f2` | 56 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1` | 10 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-auth` | 49 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-http` | 2 pass, 0 fail, 0 skip |
-| `npm run test:ingress` | 51 pass, 0 fail, 0 skip |
+| `npm run test:ingress` | 54 pass, 0 fail, 0 skip |
 | `npm run test:stage-e` | 44 pass, 0 fail, 0 skip |
 | `npm run test:core001v3` | 75 pass, 0 fail, 0 skip |
 | `npm run test:generator` | 17 pass, 0 fail, 0 skip |

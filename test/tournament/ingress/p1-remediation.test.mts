@@ -509,11 +509,13 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
       }
       assert.equal(done.decision, 'apply');
       if (done.decision === 'apply') {
-        assert.equal(done.state.status, 'COMPLETED');
+        assert.equal(done.state.status, 'AWAIT_ADVANCE');
+        assert.notEqual(done.state.status, 'COMPLETED');
         assert.equal(done.state.resultsPublished, false);
       }
-      assert.equal((await fence.get('pg-comp'))!.status, 'COMPLETED');
+      assert.equal((await fence.get('pg-comp'))!.status, 'AWAIT_ADVANCE');
       assert.notEqual((await fence.get('pg-comp'))!.status, 'FORFEITED');
+      assert.notEqual((await fence.get('pg-comp'))!.status, 'COMPLETED');
     } finally {
       await pool.end();
     }
@@ -735,7 +737,7 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     assert.equal((await fence.get('s1'))!.resultsPublished, false);
   });
 
-  it('trusted resolver may COMPLETE without publishing results', async () => {
+  it('trusted resolver ends the subgame without completing or publishing the series', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
     const fence = new MemorySeriesFenceStore();
@@ -755,7 +757,8 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     });
     assert.equal(r.decision, 'apply');
     if (r.decision === 'apply') {
-      assert.equal(r.state.status, 'COMPLETED');
+      assert.equal(r.state.status, 'AWAIT_ADVANCE');
+      assert.notEqual(r.state.status, 'COMPLETED');
       assert.equal(r.state.resultsPublished, false);
       assert.equal(r.state.score, 8);
     }

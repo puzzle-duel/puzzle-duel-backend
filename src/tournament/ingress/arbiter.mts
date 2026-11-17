@@ -442,21 +442,8 @@ export class SeriesCommandArbiter {
         }
         const nextRevision = current.boardRevision + 1;
         const nextIdle = idleDeadlineFrom(t, 300);
-        if (effect.completesSubgame) {
-          // COMPLETED without publishing — Phase C owns four-category publish.
-          return {
-            ok: true,
-            next: {
-              ...current,
-              boardRevision: nextRevision,
-              score: nextScore,
-              idleDeadlineAt: nextIdle,
-              status: 'COMPLETED',
-              resultsPublished: false,
-              lastAppliedAdmissionId: command.admissionId,
-            },
-          };
-        }
+        // One ended subgame is not six-game completion. AWAIT_ADVANCE is the
+        // existing nonterminal status. Publication stays with the F2-B H1 path.
         return {
           ok: true,
           next: {
@@ -464,6 +451,8 @@ export class SeriesCommandArbiter {
             boardRevision: nextRevision,
             score: nextScore,
             idleDeadlineAt: nextIdle,
+            status: effect.completesSubgame ? 'AWAIT_ADVANCE' : current.status,
+            resultsPublished: false,
             lastAppliedAdmissionId: command.admissionId,
           },
         };

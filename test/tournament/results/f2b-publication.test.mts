@@ -1459,4 +1459,29 @@ describe('PZD-41 F2-B atomic six-game publication', () => {
     assert.equal(snap.rows[0].n, 0);
     assert.equal((await counts(broken.seriesId)).completion, 0);
   });
+
+  it('still publishes a verified terminal H1 through the F2-B transaction', async () => {
+    const row = await seed();
+    const result = publishedScores(
+      await service().publish({
+        seriesId: row.seriesId,
+        playerId: row.playerId,
+        writerGeneration: row.writerGeneration,
+        commandIdempotencyKey: 'phase-a-isolation-h1',
+        event: 'h1_terminal_move',
+      }),
+    );
+    assert.equal(result.outcome, 'published');
+    assert.equal(result.revision, 1);
+    assert.equal((await counts(row.seriesId)).completion, 1);
+    assert.equal((await counts(row.seriesId)).scores, 6);
+    assert.equal((await counts(row.seriesId)).categories, 4);
+    assert.equal((await counts(row.seriesId)).provenance, 1);
+    const fence = await pool.query(
+      `SELECT status, results_published FROM series_fence_state WHERE series_key=$1`,
+      [row.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'COMPLETED');
+    assert.equal(fence.rows[0].results_published, true);
+  });
 });
