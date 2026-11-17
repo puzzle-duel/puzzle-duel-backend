@@ -17,10 +17,11 @@ Depends on: PZD-39 Stage E + PZD-40 F1 merged to `main` (production-disabled ran
 - On-Time badge composite FK to completion `(series_id, claim_started_at_ms, original_utc_date)`.
 
 ### Fail-closed structural readiness (NOT publication authorization)
-- Canonical view: `tournament_f2a_structural_readiness` (always exposes `replay_verified=false`, `publication_authorized=false`).
-- TS: `evaluateStructuralReadiness` — row completeness only.
-- F2-C MUST use `evaluateLeaderboardReadEligibility` with an F2-B `F2BTrustedProvenanceAttestation`; structural readiness alone returns `TRUSTED_PROVENANCE_REQUIRED`.
-- F2-A mints no provenance attestation. Synthetic structurally-complete fixtures remain unauthorized.
+- Canonical view: `tournament_f2a_structural_readiness` (always `replay_verified=false`, `publication_authorized=false`).
+- TS: `evaluateStructuralReadiness` — row completeness only. **No** `evaluatePublicationReadiness` / `visible` helper.
+- F2-C MUST use `evaluateLeaderboardReadEligibility(db, seriesId)` which reads **only DB state**.
+- DB proof boundary table: `tournament_f2b_trusted_provenance` (F2-B writer not implemented). In-memory/TS brands are rejected via `rejectInMemoryProvenanceAttestation`.
+- Forged provenance rows still yield `F2B_PROVENANCE_SEAL_UNVERIFIED`. `authorized:true` is unreachable in F2-A.
 - Former view name `tournament_f2a_publication_ready` is dropped and must not be used.
 
 ### Upgrade / rollback

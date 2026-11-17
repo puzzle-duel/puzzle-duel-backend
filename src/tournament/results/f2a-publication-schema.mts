@@ -131,6 +131,21 @@ CREATE TABLE IF NOT EXISTS tournament_on_time_badge (
     REFERENCES tournament_daily_series_completion (series_id, claim_started_at_ms, original_utc_date)
     ON DELETE CASCADE
 );
+
+-- F2-B trusted-provenance proof boundary (table exists; writer NOT implemented).
+-- F2-B must INSERT in the same TX as completion after Stage E six-terminal replay.
+-- F2-A exports no insert helper; row presence alone does not authorize.
+CREATE TABLE IF NOT EXISTS tournament_f2b_trusted_provenance (
+  series_id UUID PRIMARY KEY
+    REFERENCES tournament_daily_series_completion (series_id) ON DELETE CASCADE,
+  revision BIGINT NOT NULL
+    CHECK (revision >= 1),
+  verified_at_ms BIGINT NOT NULL
+    CHECK (verified_at_ms >= 0),
+  provenance_seal TEXT NOT NULL
+    CHECK (provenance_seal ~ '^[0-9a-f]{64}$'),
+  UNIQUE (series_id, revision)
+);
 `;
 
 /**
@@ -286,8 +301,6 @@ WHERE c.revision >= 1
   );
 `;
 
-/** @deprecated Use F2A_STRUCTURAL_READINESS_VIEW_DDL */
-export const F2A_PUBLICATION_READY_VIEW_DDL = F2A_STRUCTURAL_READINESS_VIEW_DDL;
 
 /**
  * Rollback for disposable/review DBs.
@@ -297,6 +310,7 @@ export const F2A_PUBLICATION_READY_VIEW_DDL = F2A_STRUCTURAL_READINESS_VIEW_DDL;
 export const F2A_PUBLICATION_DROP_DDL = `
 DROP VIEW IF EXISTS tournament_f2a_structural_readiness;
 DROP VIEW IF EXISTS tournament_f2a_publication_ready;
+DROP TABLE IF EXISTS tournament_f2b_trusted_provenance;
 DROP TABLE IF EXISTS tournament_on_time_badge;
 DROP TABLE IF EXISTS tournament_daily_result_category;
 DROP TABLE IF EXISTS tournament_verified_subgame_score;
@@ -337,22 +351,16 @@ export type StructuralReadiness =
   | { structurallyComplete: false; reason: 'STRUCTURAL_NOT_READY' };
 
 /**
- * Opaque F2-B trusted-provenance attestation.
- * F2-A exports NO minting API. Only a future F2-B module may construct this.
- * F2-C must require it; structural readiness alone is prohibited.
+ * F2-B DB-backed provenance contract (documentation + table shape only).
+ * Authorization is NEVER derived from TypeScript object brands or request JSON.
+ * F2-B must INSERT into tournament_f2b_trusted_provenance inside the publish TX.
+ * F2-A provides no mint/insert helper and never returns authorized:true.
  */
-/**
- * Runtime brand key. F2-A intentionally does NOT export a mint helper.
- * Plain objects without this exact key cannot satisfy leaderboard authorization.
- */
-export const F2B_TRUSTED_PROVENANCE_BRAND =
-  '__pzd_f2b_trusted_provenance_attestation__' as const;
-export type F2BTrustedProvenanceAttestation = {
-  readonly [F2B_TRUSTED_PROVENANCE_BRAND]: true;
+export type F2BTrustedProvenanceDbRow = {
   readonly seriesId: string;
-  readonly sixTerminalProvenanceVerified: true;
-  readonly verifiedAtMs: number;
   readonly revision: number;
+  readonly verifiedAtMs: number;
+  readonly provenanceSeal: string;
 };
 
 export type LeaderboardReadEligibility =
@@ -373,8 +381,7 @@ export type LeaderboardReadEligibility =
       reason:
         | 'STRUCTURAL_NOT_READY'
         | 'TRUSTED_PROVENANCE_REQUIRED'
-        | 'PROVENANCE_SERIES_MISMATCH'
-        | 'F2B_GATE_NOT_IMPLEMENTED';
+        | 'F2B_PROVENANCE_SEAL_UNVERIFIED';
     };
 
 type Queryable = {
@@ -429,85 +436,41 @@ export async function evaluateStructuralReadiness(
 }
 
 /**
- * @deprecated Name retained for older call sites; returns structural readiness only.
- * Does NOT authorize publication. Prefer evaluateStructuralReadiness.
- */
-export async function evaluatePublicationReadiness(
-  db: Queryable,
-  seriesId: string,
-): Promise<
-  | {
-      visible: true;
-      seriesId: string;
-      playerId: string;
-      originalUtcDate: string;
-      revision: number;
-      easy: number;
-      medium: number;
-      hard: number;
-      all: number;
-      onTimeAwarded: boolean;
-    }
-  | { visible: false; reason: 'NOT_VISIBLE' }
-> {
-  const structural = await evaluateStructuralReadiness(db, seriesId);
-  if (!structural.structurallyComplete) {
-    return { visible: false, reason: 'NOT_VISIBLE' };
-  }
-  return {
-    visible: true,
-    seriesId: structural.seriesId,
-    playerId: structural.playerId,
-    originalUtcDate: structural.originalUtcDate,
-    revision: structural.revision,
-    easy: structural.easy,
-    medium: structural.medium,
-    hard: structural.hard,
-    all: structural.all,
-    onTimeAwarded: structural.onTimeAwarded,
-  };
-}
-
-function isF2BTrustedProvenanceAttestation(
-  value: unknown,
-): value is F2BTrustedProvenanceAttestation {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    (value as { sixTerminalProvenanceVerified?: unknown })
-      .sixTerminalProvenanceVerified === true &&
-    typeof (value as { seriesId?: unknown }).seriesId === 'string' &&
-    F2B_TRUSTED_PROVENANCE_BRAND in (value as object) &&
-    (value as Record<string, unknown>)[F2B_TRUSTED_PROVENANCE_BRAND] === true
-  );
-}
-
-/**
- * Mandatory F2-C leaderboard read gate.
- * Structural readiness alone is insufficient and returns TRUSTED_PROVENANCE_REQUIRED.
- * Until F2-B ships a minting API, authorized:true is unreachable (F2B_GATE_NOT_IMPLEMENTED
- * when a branded attestation is somehow present; otherwise TRUSTED_PROVENANCE_REQUIRED).
+ * Mandatory F2-C leaderboard read gate (DB-only).
+ *
+ * - Ignores any in-memory/request object — no provenance parameter is accepted.
+ * - Structural completeness alone → TRUSTED_PROVENANCE_REQUIRED.
+ * - A DB provenance row without F2-B seal verification → F2B_PROVENANCE_SEAL_UNVERIFIED.
+ * - authorized:true is unreachable in F2-A (F2-B not implemented).
  */
 export async function evaluateLeaderboardReadEligibility(
   db: Queryable,
   seriesId: string,
-  provenance: F2BTrustedProvenanceAttestation | null | undefined,
 ): Promise<LeaderboardReadEligibility> {
   const structural = await evaluateStructuralReadiness(db, seriesId);
   if (!structural.structurallyComplete) {
     return { authorized: false, reason: 'STRUCTURAL_NOT_READY' };
   }
-  if (provenance == null) {
+  const provenance = await db.query(
+    `SELECT series_id, revision, verified_at_ms, provenance_seal
+     FROM tournament_f2b_trusted_provenance
+     WHERE series_id = $1 AND revision = $2`,
+    [seriesId, structural.revision],
+  );
+  if (provenance.rows.length !== 1) {
     return { authorized: false, reason: 'TRUSTED_PROVENANCE_REQUIRED' };
   }
-  if (!isF2BTrustedProvenanceAttestation(provenance)) {
-    return { authorized: false, reason: 'TRUSTED_PROVENANCE_REQUIRED' };
-  }
-  if (provenance.seriesId !== seriesId) {
-    return { authorized: false, reason: 'PROVENANCE_SERIES_MISMATCH' };
-  }
-  // F2-B minting / publish UoW is intentionally not implemented in F2-A.
-  return { authorized: false, reason: 'F2B_GATE_NOT_IMPLEMENTED' };
+  // Row existence is not authority: F2-B seal verification is not implemented.
+  void provenance.rows[0];
+  return { authorized: false, reason: 'F2B_PROVENANCE_SEAL_UNVERIFIED' };
+}
+
+/**
+ * Explicit rejection of in-memory/forged attestation objects.
+ * Any call that attempts to pass a JS object as provenance must fail closed.
+ */
+export function rejectInMemoryProvenanceAttestation(_forged: unknown): never {
+  throw new Error('IN_MEMORY_PROVENANCE_FORBIDDEN');
 }
 
 export function publicationIdempotencyKey(seriesId: string): string {

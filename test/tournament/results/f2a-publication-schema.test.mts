@@ -12,14 +12,12 @@ import {
   F2A_CATEGORIES,
   F2A_PUBLICATION_DROP_DDL,
   F2A_PUBLICATION_UPGRADE_DDL,
-  F2B_TRUSTED_PROVENANCE_BRAND,
   evaluateLeaderboardReadEligibility,
-  evaluatePublicationReadiness,
   evaluateStructuralReadiness,
   migrateF2APublicationSchema,
   onTimeBadgeFromClaim,
   publicationIdempotencyKey,
-  type F2BTrustedProvenanceAttestation,
+  rejectInMemoryProvenanceAttestation,
 } from '../../../src/tournament/results/f2a-publication-schema.mts';
 
 const url = process.env.PZD_INGRESS_DATABASE_URL;
@@ -310,10 +308,10 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
 
       // Missing completion => NOT_VISIBLE
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
+        const r = await evaluateStructuralReadiness(pool, seriesId);
         record(
           'missing completion receipt',
-          r.visible === false && r.reason === 'NOT_VISIBLE',
+          r.structurallyComplete === false && r.reason === 'STRUCTURAL_NOT_READY',
           JSON.stringify(r),
         );
       }
@@ -330,10 +328,10 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         );
       }
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
+        const r = await evaluateStructuralReadiness(pool, seriesId);
         record(
           'five of six verified subgames',
-          r.visible === false,
+          r.structurallyComplete === false,
           JSON.stringify(r),
         );
       }
@@ -366,8 +364,8 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         [seriesId],
       );
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
-        record('three of four categories', r.visible === false, JSON.stringify(r));
+        const r = await evaluateStructuralReadiness(pool, seriesId);
+        record('three of four categories', r.structurallyComplete === false, JSON.stringify(r));
       }
 
       await pool.query(
@@ -376,10 +374,10 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         [seriesId],
       );
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
+        const r = await evaluateStructuralReadiness(pool, seriesId);
         record(
           'incorrect category total / missing badge',
-          r.visible === false,
+          r.structurallyComplete === false,
           JSON.stringify(r),
         );
       }
@@ -396,11 +394,11 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         [seriesId, started, date],
       );
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
+        const r = await evaluateStructuralReadiness(pool, seriesId);
         // started is mid-day so awarded should be true; false is inconsistent
         record(
           'inconsistent On-Time badge decision',
-          r.visible === false,
+          r.structurallyComplete === false,
           JSON.stringify(r),
         );
       }
@@ -409,8 +407,8 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
         seriesId,
       ]);
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
-        record('missing On-Time badge decision', r.visible === false, JSON.stringify(r));
+        const r = await evaluateStructuralReadiness(pool, seriesId);
+        record('missing On-Time badge decision', r.structurallyComplete === false, JSON.stringify(r));
       }
 
       // Badge with wrong claim start rejected by FK
@@ -432,27 +430,24 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
 
       await insertBadge(pool, { seriesId, date, started });
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
         const structural = await evaluateStructuralReadiness(pool, seriesId);
         const leaderboard = await evaluateLeaderboardReadEligibility(
           pool,
           seriesId,
-          null,
         );
         record(
-          'correct complete fixture visible',
-          r.visible === true &&
-            r.easy === 60 &&
-            r.medium === 90 &&
-            r.hard === 60 &&
-            r.all === 210 &&
-            r.onTimeAwarded === true &&
-            structural.structurallyComplete === true &&
+          'correct complete fixture structurally complete but unauthorized',
+          structural.structurallyComplete === true &&
+            structural.easy === 60 &&
+            structural.medium === 90 &&
+            structural.hard === 60 &&
+            structural.all === 210 &&
+            structural.onTimeAwarded === true &&
             structural.replayVerified === false &&
             structural.publicationAuthorized === false &&
             leaderboard.authorized === false &&
             leaderboard.reason === 'TRUSTED_PROVENANCE_REQUIRED',
-          JSON.stringify({ r, structural, leaderboard }),
+          JSON.stringify({ structural, leaderboard }),
         );
       }
 
@@ -512,18 +507,18 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
           date,
           started,
         });
-        const inside = await evaluatePublicationReadiness(client, seriesTx);
-        const outside = await evaluatePublicationReadiness(pool, seriesTx);
+        const inside = await evaluateStructuralReadiness(client, seriesTx);
+        const outside = await evaluateStructuralReadiness(pool, seriesTx);
         record(
           'uncommitted TX no leak to second connection',
-          inside.visible === true && outside.visible === false,
+          inside.structurallyComplete === true && outside.structurallyComplete === false,
           JSON.stringify({ inside, outside }),
         );
         await client.query('ROLLBACK');
-        const after = await evaluatePublicationReadiness(pool, seriesTx);
+        const after = await evaluateStructuralReadiness(pool, seriesTx);
         record(
           'rollback leaves zero visible results',
-          after.visible === false,
+          after.structurallyComplete === false,
           JSON.stringify(after),
         );
       } finally {
@@ -533,10 +528,10 @@ describe('PZD-41 F2-A — claim identity integrity + readiness', () => {
       // Upgrade DDL is compatible after clean migrate (no mismatched rows)
       await pool.query(F2A_PUBLICATION_UPGRADE_DDL);
       {
-        const r = await evaluatePublicationReadiness(pool, seriesId);
+        const r = await evaluateStructuralReadiness(pool, seriesId);
         record(
           'upgrade DDL compatibility on clean schema',
-          r.visible === true,
+          r.structurallyComplete === true,
           JSON.stringify(r),
         );
       }
@@ -599,46 +594,49 @@ describe('PZD-41 F2-A — structural readiness is not publication authorization'
       assert.equal(viewFlags.rows[0].replay_verified, false);
       assert.equal(viewFlags.rows[0].publication_authorized, false);
 
-      const withoutAttestation = await evaluateLeaderboardReadEligibility(
+      const withoutProvenance = await evaluateLeaderboardReadEligibility(
         pool,
         seriesId,
-        null,
       );
-      assert.deepEqual(withoutAttestation, {
+      assert.deepEqual(withoutProvenance, {
         authorized: false,
         reason: 'TRUSTED_PROVENANCE_REQUIRED',
       });
 
-      // Forged plain-object "attestation" without brand must not authorize.
-      const forged = {
-        seriesId,
-        sixTerminalProvenanceVerified: true as const,
-        verifiedAtMs: Date.now(),
-        revision: 1,
-      };
-      const forgedResult = await evaluateLeaderboardReadEligibility(
-        pool,
-        seriesId,
-        forged as unknown as F2BTrustedProvenanceAttestation,
+      // Direct helper misuse: in-memory attestation objects are forbidden.
+      assert.throws(
+        () =>
+          rejectInMemoryProvenanceAttestation({
+            seriesId,
+            sixTerminalProvenanceVerified: true,
+            verifiedAtMs: Date.now(),
+            revision: 1,
+            __pzd_f2b_trusted_provenance_attestation__: true,
+          }),
+        /IN_MEMORY_PROVENANCE_FORBIDDEN/,
       );
-      assert.equal(forgedResult.authorized, false);
-      assert.equal(forgedResult.reason, 'TRUSTED_PROVENANCE_REQUIRED');
 
-      // Even a branded object cannot authorize until F2-B minting exists.
-      const branded = {
-        [F2B_TRUSTED_PROVENANCE_BRAND]: true as const,
-        seriesId,
-        sixTerminalProvenanceVerified: true as const,
-        verifiedAtMs: Date.now(),
-        revision: 1,
-      } as F2BTrustedProvenanceAttestation;
-      const brandedResult = await evaluateLeaderboardReadEligibility(
-        pool,
-        seriesId,
-        branded,
+      // Forged DB provenance row still cannot authorize (seal unverified / F2-B absent).
+      await pool.query(
+        `INSERT INTO tournament_f2b_trusted_provenance
+           (series_id, revision, verified_at_ms, provenance_seal)
+         VALUES ($1, $2, $3, $4)`,
+        [seriesId, structural.revision, Date.now(), 'd'.repeat(64)],
       );
-      assert.equal(brandedResult.authorized, false);
-      assert.equal(brandedResult.reason, 'F2B_GATE_NOT_IMPLEMENTED');
+      const forgedDb = await evaluateLeaderboardReadEligibility(pool, seriesId);
+      assert.equal(forgedDb.authorized, false);
+      assert.equal(forgedDb.reason, 'F2B_PROVENANCE_SEAL_UNVERIFIED');
+
+      // evaluatePublicationReadiness must not exist as an export.
+      const schemaMod = await import(
+        '../../../src/tournament/results/f2a-publication-schema.mts'
+      );
+      assert.equal(
+        'evaluatePublicationReadiness' in schemaMod,
+        false,
+        'deprecated evaluatePublicationReadiness must be removed',
+      );
+      assert.equal('F2B_TRUSTED_PROVENANCE_BRAND' in schemaMod, false);
 
       // Old publication_ready view name must not exist.
       const oldView = await pool.query(
