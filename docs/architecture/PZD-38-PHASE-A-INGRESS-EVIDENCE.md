@@ -15,7 +15,7 @@ Draft PR: [#13](https://github.com/puzzle-duel/puzzle-duel-backend/pull/13)
 | Nest / HTTP / auth | NOT implemented (Phase B) |
 | Reviewed HEAD before remediation | `4473a39a39def068701b2a0c8f633b2dfcc38dd2` |
 | P1-01…P1-04 fix commit | `79142766684f795733df60ab354cf11dcb3da1d3` |
-| Remediation tip | *(see git HEAD after P1-05 push)* |
+| Remediation tip |  |
 
 ## What Phase A proves vs does not prove
 
