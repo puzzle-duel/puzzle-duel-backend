@@ -14,7 +14,7 @@ Draft PR: [#13](https://github.com/puzzle-duel/puzzle-duel-backend/pull/13)
 | Runtime scope | Admission journal + series fence + arbiter only |
 | Nest / HTTP / auth | NOT implemented (Phase B) |
 | Reviewed HEAD before remediation | `4473a39a39def068701b2a0c8f633b2dfcc38dd2` |
-| Remediation tip | *(git HEAD after push)* |
+| Remediation tip | `79142766684f795733df60ab354cf11dcb3da1d3` |
 
 ## What Phase A proves vs does not prove
 
