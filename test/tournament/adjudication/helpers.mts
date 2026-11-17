@@ -87,6 +87,7 @@ export async function bootMemory(opts?: {
     score: 0,
     resultsPublished: false,
     lastAppliedAdmissionId: null,
+    thinkingExtensionConsumed: false,
   });
   const binding = bindTrustedChallenge({
     seriesKey,

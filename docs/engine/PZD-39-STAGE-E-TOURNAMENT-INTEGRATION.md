@@ -1,6 +1,6 @@
 # PZD-39 Stage E — Trusted tournament replay integration
 
-Status: **STAGE E — READY FOR INDEPENDENT RE-REVIEW** (engine+service layer; production ranked HTTP release remains BLOCKED)  
+Status: **STAGE E SYNC — READY FOR INDEPENDENT RE-REVIEW** (engine+service layer; production ranked HTTP release remains BLOCKED)  
 Date: 2026-11-17  
 Jira: [PZD-39](https://puzzle-duel-app.atlassian.net/browse/PZD-39) (depends on [PZD-38](https://puzzle-duel-app.atlassian.net/browse/PZD-38))  
 Branch: `feature/PZD-39-core001v3-tournament-integration`  
@@ -10,18 +10,59 @@ Draft PR: [#17](https://github.com/puzzle-duel/puzzle-duel-backend/pull/17)
 
 | Pin | SHA |
 | --- | --- |
-| Stage E remediation tip | `55cf5bbaca4838498f2e28bb1058924c3376a8c8` |
-| Stage E P0/P1 fix commit | `89f92eac6c52cce07163537403ff5fa002b6da98` |
+| Stage E starting HEAD (pre-sync) | `41e9e79c2b98b551b1dfcbbca415ee80e1fa2607` |
 | Stage E base (Stage D) | `7036f17f187742bf8551302801469673514650d9` |
 | Stage C engine | `25efb2473f3517027769ee978b31ab6e3dc41030` |
-| PZD-38 Phase A import provenance | `4473a39a39def068701b2a0c8f633b2dfcc38dd2` (copied; not merge-ancestor) |
+| Phase A squash merge on `main` | `2ea3d9337978321458ca9f0649f27e31454f710d` |
+| Phase A source HEAD | `733ee2e4d4aaa45058a2d9ce36d441890c17632e` |
 | Client Stage B | `946f015a5124d1a9dfd6f3440cc916b9eb1789f8` |
 
-**PR #13 was not merged.** Phase A files were copied into this stacked branch with an explicit import manifest (`docs/architecture/PZD-39-STAGE-E-PHASE-A-IMPORT-MANIFEST.md`).
+ADR-E01 / ADR-T01 / ADR-T02 were **not** modified by this sync. Draft PR #17 remains Draft.
 
-ADR-E01 and ADR-T02 were **not** modified by this remediation.
+## Phase A controlled sync (this delivery)
 
-## Trust boundary (post-remediation)
+Merged Phase A PR #13 (`2ea3d93` / source `733ee2e`) was synchronized into Stage E without wholesale ingress replacement.
+
+### P1-01 … P1-05 synchronization results
+
+| ID | Result | Stage E integration |
+| --- | --- | --- |
+| P1-01 one thinking extension | **SYNCED** | Durable `thinkingExtensionConsumed` on fence (DDL+ALTER+read/write); arbiter + `TrustedGameplayService.#nonMoveMutate` set flag on success; second distinct key → `EXTENSION_UNAVAILABLE`; same-key retry is duplicate without re-extend |
+| P1-02 hard cutoff | **SYNCED** | Both arbiter and trusted gameplay use `applyThinkingExtension`; never exceed `hardCutoffAt` |
+| P1-03 atomic forfeit vs pending | **SYNCED** | `PostgresSeriesFenceStore.tryForfeitAtomically` under same advisory+`FOR UPDATE` as admit; `BLOCKED_PENDING` when eligible pending exists |
+| P1-04 untrusted score/completion | **PRESERVED** | Arbiter rejects client `scoreDelta`/`completesSeries`; Stage E closed schema + server digest + resolver path retained |
+| P1-05 no premature forfeit | **SYNCED** | Trusted clock sampled under lock/TX; `−1ms` → `NOT_EXPIRED`; equality/+1ms may forfeit only with empty pending |
+
+### File-level reconciliation
+
+| File | Action | Notes |
+| --- | --- | --- |
+| `ingress/types.mts` | **Imported** | `thinkingExtensionConsumed`; `applyThinkingExtension`; `ServerMoveEffectResolver` |
+| `ingress/series-fence.mts` | **Imported** | Shared `seriesAdvisoryKeys`; DDL+ALTER for consumed flag; `tryForfeitAtomically`; memory `withSeriesLock` |
+| `ingress/arbiter.mts` | **Imported** | Extension consume + cutoff + clock-gated forfeit; untrusted score rejection |
+| `ingress/postgres-journal.mts` | **Adapted** | Keep Stage E `result_json` / `markOutcomeWithResult` / `getResult`; import shared `seriesAdvisoryKeys`; add `countEligiblePendingOn`; legacy score columns always NULL/FALSE |
+| `ingress/journal.mts` | **Excluded (intentional)** | Stage E memory journal retains immutable admission results |
+| `adjudication/trusted-gameplay.mts` | **Adapted** | Extension path uses `applyThinkingExtension` + consumed flag; auth/UoW/closed-schema unchanged |
+| `adjudication/postgres-uow.mts` | **Adapted** | Fence UPDATE/SELECT map `thinking_extension_consumed`; advisory keys from shared helper (deadlock-safe ordering) |
+| `AuthorizationGateway` / closed schema / V3-48 / CORE-001.v3 replay | **Preserved** | No regression intended |
+| Ingress P1 remediation tests + helpers | **Imported** | Wired into `npm run test:ingress` |
+| `test/.../phase-a-sync.test.mts` | **Added** | TrustedGameplayService extension + cutoff proofs |
+
+### Migration compatibility with `main`
+
+- Phase A on `main` already ships `thinking_extension_consumed` (CREATE + `ADD COLUMN IF NOT EXISTS`).
+- Stage E migrate uses the same additive ALTER; existing DBs without the column get `DEFAULT FALSE`.
+- Stage E keeps `result_json` (absent from Phase A journal DDL). Future main←Stage E merge must retain `result_json` ALTER/DDL; no conflicting column types.
+- Shared `seriesAdvisoryKeys` eliminates duplicate hash helpers that could diverge and deadlock across admit / UoW / forfeit.
+
+### PostgreSQL transaction proof (unchanged Stage E + sync)
+
+- Admission: separate durable write under series advisory lock (ADR-T02).
+- Adjudication UoW: advisory → admission `FOR UPDATE` → challenge → fence `FOR UPDATE` → replay → ledger → snapshot → fence UPDATE (incl. `thinking_extension_consumed`) → outcome+`result_json`.
+- Forfeit: same advisory key pair → fence `FOR UPDATE` → clock under TX → pending count on same connection → `FORFEITED` only if expired and pending=0.
+- Fault injection at eight in-TX points: full rollback; admission stays pending; no partial score.
+
+## Trust boundary (post-remediation + sync)
 
 ```text
 RankedCommandHints (non-authoritative lookup aids)
@@ -35,58 +76,21 @@ RankedCommandHints (non-authoritative lookup aids)
   → return frozen admission result (duplicates never re-resolve active ordinal)
 ```
 
-Client-reported hashes are diagnostics only. Matching a self-consistent forged hash never grants ranked success.
-
-### Public vs internal commands
-
-| Layer | Fields |
-| --- | --- |
-| Untrusted client | commandType, idempotencyKey, move.{offerIndex,tap,expectedBoardRevision,writerGeneration,clientReportedStateHash?} |
-| Forbidden on client | seriesKey, playerId, payloadHash, scoreDelta, score, completesSeries, terminalReason, board, offers, checkpoint, initialState, status, turnsUsed, stateHash (as authority) |
-| Server-derived | identity from TrustedAuthorizationContext; payload digest; scoreDelta; score; terminalReason; stateHash; ledger watermark; checkpoint snapshot; resultsPublished(=false until publish gate) |
-
-## Remediation findings (review at `0bf1e98`)
-
-| ID | Sev | Root cause | Patch | Evidence |
-| --- | --- | --- | --- | --- |
-| P0-E01 | P0 | `fence.mutate` committed before ledger/snapshot/outcome; catch marked rejected while fence advanced | `PostgresTrustedUnitOfWork.adjudicateAcceptedMove` — one TX; faults roll back; admission stays pending | `postgres-atomic-gameplay.test.mts` — 11 PASS (8 fault points + race + restart + happy path) |
-| P0-E02 | P0 | Untrusted `seriesKey`/`playerId` authorized mutations | `AuthorizationGateway` + fail-closed default; identity only from verified context | `authorization.test.mts` — 8 PASS; cross-player/series/stale-writer/handoff negatives |
-| P1-E03 | P1 | Open schema + client `payloadHash` | Closed TOP_LEVEL/MOVE keys; server `computeAuthoritativePayloadDigest` with recursive canonical JSON | `command-schema.test.mts` — 7 PASS |
-| P1-E04 | P1 | Duplicate replay used current active ordinal snapshot | Immutable `result_json` / `markOutcomeWithResult`; retries return frozen envelope | `duplicate-result.test.mts` — 4 PASS (before/after advance, completion, concurrent) |
-| P1-E05 | P1 | V3-48 only via memory helper | PG service-boundary checkpoint rejects + auth | PG V3-48 suite — 3 PASS; memory+auth — 8 PASS |
-
-## PostgreSQL transaction proof
-
-- Admission remains a separate durable write (ADR-T02).
-- Adjudication TX covers: advisory series lock → admission FOR UPDATE → challenge → fence FOR UPDATE → replay/`applyMove` → ledger INSERT → snapshot UPSERT → fence UPDATE → outcome+`result_json`.
-- Injected faults at `before_ledger`, `after_ledger`, `before_snapshot`, `after_snapshot`, `before_fence`, `after_fence`, `before_outcome`, `before_commit`: all roll back; fence score/revision unchanged; retry after clearing fault applies once.
-- Crash after COMMIT before response: state durable; new process duplicate returns frozen result.
-- Concurrent moves on separate pool connections: exactly one apply, one ledger row.
-
-## Authorization proof
-
-- Default gateway: `FailClosedAuthorizationGateway` → `AUTH_CONTRACT_UNAVAILABLE` (no invented HTTP auth).
-- Test gateway: `MemoryVerifiedAuthorizationGateway` — explicitly **not** HTTP authentication; pre-registered verified contexts only.
-- Negatives: cross-player, cross-series, stale writer, unauthorized handoff.
-- All mutating command types require authorize: start/move/advance/thinking_extension/device_handoff/abandon.
-- **Remaining limitation:** authenticated Nest/HTTP session wiring is **NOT_RUN** (no accepted session/token contract). Ranked production exposure stays fail-closed.
-
-## V3-48 evidence label
-
-Labeled **PostgreSQL service integration** (authorized service boundary), not HTTP E2E. Full V3-48 ranked authorization PASS is **not** claimed until HTTP ownership boundary exists.
-
-## Quality matrix (executed this worktree after remediation)
+## Quality matrix (executed on synchronized Stage E worktree)
 
 | Gate | PASS | FAIL | SKIP | NOT_RUN |
 | --- | ---: | ---: | ---: | ---: |
-| Stage C engine tests (`test:core001v3`) | 75 | 0 | 0 | |
-| Stage D checksum integrity | 33 | 0 | 0 | |
-| Stage D comparator mutations | 9 forced | 0 | 0 | |
-| Stage D 33-fixture parity | 33 | 0 | 0 | |
-| PZD-38 Phase A memory+PG ingress (`test:ingress`) | 25 | 0 | 0 | |
-| Stage E service+auth+schema+dup (`test:stage-e` excl. PG subset counted below) | 41 | 0 | 0 | |
-| PostgreSQL atomic gameplay TX + fault injection | 11 | 0 | 0 | |
-| PostgreSQL V3-48 service integration | 3 | 0 | 0 | |
+| PZD-38 Phase A ingress memory+PG (`test:ingress`) | **51** | 0 | 0 | |
+| Stage E adjudication (`test:stage-e`) | **44** | 0 | 0 | |
+| — incl. Phase A sync (TrustedGameplayService) | 3 | 0 | 0 | |
+| — incl. PG atomic UoW + faults + race + restart | 11 | 0 | 0 | |
+| — incl. PG V3-48 service | 3 | 0 | 0 | |
+| Stage C engine (`test:core001v3`) | **75** | 0 | 0 | |
+| Stage D 33-fixture parity | **33** | 0 | 0 | |
+| Stage D checksum integrity | **33** | 0 | 0 | |
+| Stage D comparator mutations | **9** forced fail | 0 | 0 | |
+| Historical v1/v2 + gen-001.v1 TS vectors | **6** | 0 | 0 | |
+| Generator GEN-07 Python/Dart fixture parity | | | | **NOT_RUN** (`PZD_GENERATOR_FIXTURES` unset; assert fails closed — not claimed PASS) |
 | Authentication HTTP boundary | | | | **NOT_RUN** |
 | Tournament HTTP E2E | | | | **NOT_RUN** |
 | Four-category leaderboard publish | | | | **NOT_RUN** |
@@ -95,16 +99,35 @@ Labeled **PostgreSQL service integration** (authorized service boundary), not HT
 Commands actually run (exit 0 unless noted):
 
 ```bash
-npm run typecheck
-npm run test:core001v3          # 75 PASS
-npm run test:stage-e            # 41 PASS (incl. PG when PZD_INGRESS_DATABASE_URL set)
-PZD_INGRESS_DATABASE_URL=... npm run test:ingress   # 25 PASS
-npm run test:stage-d-checksums  # verified 33; fail 0
+npx tsc --noEmit -p tsconfig.json
+PZD_INGRESS_DATABASE_URL=postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress npm run test:ingress   # 51 PASS
+PZD_INGRESS_DATABASE_URL=... npm run test:stage-e   # 44 PASS
+npm run test:core001v3                              # 75 PASS
+npm run test:stage-d-parity                         # pass 33 fail 0
+npm run test:stage-d-checksums                      # verified 33; fail 0
 python3 tools/stage_d/parity/test_comparator_mutations.py  # mutations=9 all_forced_fail=true
-npm run test:stage-d-parity     # pass 33 fail 0
+node --experimental-strip-types --test test/engine/core001v3/historical_regression.test.mts  # 6 PASS
 ```
 
-Disposable Postgres 18 via `docker-compose.ingress-test.yml` (`PZD_INGRESS_DATABASE_URL=postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress`).
+Disposable Postgres 18 via `docker-compose.ingress-test.yml`.
+
+### Independent sync review (pre-push)
+
+| Check | Result |
+| --- | --- |
+| Reintroduced untrusted score | No — client score still rejected / ignored |
+| Missing auth on non-move | No — gateway still required |
+| Repeatable thinking extension | No — consumed flag durable |
+| Premature forfeiture | No — NOT_EXPIRED under lock |
+| Extension past hard cutoff | No — applyThinkingExtension cap |
+| Advisory-lock deadlocks | Shared `seriesAdvisoryKeys`; same (k1,k2) for admit/UoW/forfeit |
+| Partial PG TX | UoW fault suite still PASS |
+| Ledger/snapshot disagreement | UoW one-TX preserved |
+| Missing fence field | INSERT/UPDATE/SELECT/map include `thinking_extension_consumed` |
+| Migration on existing DB | ADD COLUMN IF NOT EXISTS |
+| Stage E tests compile | typecheck exit 0; 44 Stage E PASS |
+
+**New P0/P1 findings from this sync:** none.
 
 ## Stage F / production blockers
 

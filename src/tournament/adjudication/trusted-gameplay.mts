@@ -20,6 +20,7 @@ import type { IngressClock } from '../ingress/clock.mts';
 import type { AdmissionJournal } from '../ingress/journal.mts';
 import type { SeriesFenceStore } from '../ingress/series-fence.mts';
 import {
+  applyThinkingExtension,
   idleDeadlineFrom,
   isTimely,
   type AdmitCommandInput,
@@ -924,20 +925,29 @@ export class TrustedGameplayService {
       };
     }
     if (command.commandType === 'thinking_extension') {
-      const remaining = current.idleDeadlineAt.getTime() - t.getTime();
-      if (remaining <= 0 || remaining > 60_000) {
+      // P1-01: one successful extension per six-game series.
+      if (current.thinkingExtensionConsumed) {
         return { ok: false, reason: 'EXTENSION_UNAVAILABLE' };
       }
-      const extended = new Date(current.idleDeadlineAt.getTime() + 60_000);
-      const clamped =
-        current.hardCutoffAt && extended.getTime() > current.hardCutoffAt.getTime()
-          ? current.hardCutoffAt
-          : extended;
+      const remaining = current.idleDeadlineAt.getTime() - t.getTime();
+      // P1-02: applyThinkingExtension enforces window + hard-cutoff cap.
+      const extended = applyThinkingExtension(
+        current.idleDeadlineAt,
+        remaining,
+        current.hardCutoffAt,
+      );
+      if (!extended) {
+        return { ok: false, reason: 'EXTENSION_UNAVAILABLE' };
+      }
+      if (current.hardCutoffAt && !isTimely(t, current.hardCutoffAt)) {
+        return { ok: false, reason: 'HARD_CUTOFF_EXPIRED' };
+      }
       return {
         ok: true,
         next: {
           ...current,
-          idleDeadlineAt: clamped,
+          idleDeadlineAt: extended,
+          thinkingExtensionConsumed: true,
           lastAppliedAdmissionId: admissionId,
         },
       };

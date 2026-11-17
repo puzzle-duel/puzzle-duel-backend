@@ -71,6 +71,7 @@ async function bootPg(pool: pg.Pool, seriesKey = 'pg-series-1') {
     score: 0,
     resultsPublished: false,
     lastAppliedAdmissionId: null,
+    thinkingExtensionConsumed: false,
   });
 
   const binding = bindTrustedChallenge({
