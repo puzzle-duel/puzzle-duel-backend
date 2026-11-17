@@ -1,6 +1,6 @@
 # PZD-41 Stage F2 — Atomic tournament result publication
 
-Status: **F2 CALCULATOR + F2-A SCHEMA + F2-B ATOMIC PUBLICATION IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, frozen production migrations, ADR-T01, F2-C weekly FINAL, or production release. Ranked HTTP stays disabled.
+Status: **F2 CALCULATOR + F2-A SCHEMA + F2-B ATOMIC PUBLICATION + F2-C RANKING/FINAL IMPLEMENTED**. This document is an implementation gate, not acceptance of new HTTP endpoint names, frozen production migrations, ADR-T01, TD-15 page defaults, or production release. Ranked HTTP stays disabled.
 
 Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-41
 Dependencies: PZD-40 Stage F1 and PZD-39 Stage E are **merged to `main`**. Ranked HTTP remains production-disabled.
@@ -54,9 +54,17 @@ Completion timing is recorded in [`PZD-41-STAGE-F2-B-IMPLEMENTATION.md`](./PZD-4
 
 Weekly ranking and FINAL settlement are not part of this transaction.
 
-### F2-C: weekly ranks and FINAL
+### F2-C: weekly ranks and FINAL — implemented
 
-Implement all four daily/weekly competition ranks, revision-pinned page cursors (TD-15 proposed 50/100), no personal metadata leak, and transactional Monday 01:00 UTC settlement with pre-cutoff eligible pending-admission barrier. Freeze daily+weekly together, forbid later silent mutation; explicit incident path only.
+`F2CRankingService` (`src/tournament/results/f2c-rankings.mts`) reads EASY, MEDIUM, HARD, and ALL only after `evaluateLeaderboardReadEligibility` recomputes the F2-B HMAC. `results_published` alone does not admit a row. Partial and forfeited series are absent. A completed authorized zero-score series is present with score 0. Competition rank is `1 + count(strictly greater score)`. Display order is score descending, internal `player_id` ascending, and does not break ties.
+
+A page cursor binds the period, daily or weekly board, category, revision or FINAL settlement id, offset, requested page size, and the preceding player/score anchor. A changed provisional board returns `SNAPSHOT_CHANGED`. TD-15's 50 and 100 stay Proposed and are not applied. Callers pass an explicit page size. The service limit of 1000 is a request-size bound, not an approved page policy.
+
+Weekly score is the safe-integer sum of authorized daily category scores for the UTC Monday–Sunday week. A missing day adds nothing. The read window is the current UTC week and five previous weeks. After FINAL, historical reads use the frozen snapshot.
+
+Monday FINAL takes the weekly settlement advisory lock, then series locks in series-id order, samples `clock_timestamp()`, and commits seven daily boards plus the weekly board, four categories each, in one transaction. It stays PROVISIONAL when the cutoff has not been reached, the admission journal is missing, a pre-cutoff admission is pending or has an unknown outcome, a completed series fails the HMAC, a non-terminal series is still inside its hard cutoff, or a snapshot write fails. Claim bootstrap takes the same settlement lock before it samples the database clock. F2-B publication does not take that lock. After commit, UPDATE and DELETE of the snapshot raise `F2C_FINAL_IMMUTABLE`.
+
+There is no separate global ingress watermark table. The durable barrier is the settlement lock, the series locks, and `command_admission_journal`. Production migration IDs remain NOT_RUN. Ranked HTTP stays disabled.
 
 ### F2-D: proof
 
@@ -68,6 +76,6 @@ Implement all four daily/weekly competition ranks, revision-pinned page cursors 
 
 ## Current non-claims
 
-**NOT_RUN:** production versioned migration acceptance, weekly snapshots/FINAL, four-category ranked read API, multi-host failover, ranked HTTP enablement, and production deployment. F2-B is implemented and covered by PostgreSQL 18 tests. It does not authorize merge, deploy, or PZD-41 Done.
+**NOT_RUN:** production versioned migration acceptance, multi-host failover, ranked HTTP enablement, compensation events, and production deployment. F2-B publication and F2-C ranking/FINAL are implemented and covered by PostgreSQL 18 tests. TD-15 page defaults remain Proposed. This does not authorize merge, deploy, or PZD-41 Done.
 
 The module and tests alone must NOT be interpreted as Stage F complete, PZD-41 Done, ranked rollout authorized or ADR-T01 Accepted.

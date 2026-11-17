@@ -175,12 +175,10 @@ export class SeriesCommandArbiter {
   }
 
   /**
-   * Weekly settlement barrier (TD-13): do not finalize while eligible
-   * pre-cutoff admissions remain pending across the settlement set.
-   *
-   * Phase A proves the pending-admission watermark check. A fully atomic
-   * multi-series weekly FINAL snapshot publish remains Phase C (NOT_RUN) —
-   * see evidence doc remaining limitations.
+   * Lists pending journal rows for a caller-supplied series set.
+   * This does not take the settlement lock, authorize F2-B publications,
+   * or commit an immutable snapshot. Weekly FINAL is
+   * F2CRankingService.finalizeWeek.
    */
   async canSafelyFinalizeWeekly(
     seriesKeys: string[],

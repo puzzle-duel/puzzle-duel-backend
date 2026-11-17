@@ -97,8 +97,9 @@ Stage F2 covers six valid games, five games, duplicate and missing ordinals, for
 
 - U-F2A-01 production migration IDs and backup/restore: **NOT_RUN**
 - U-F2A-02 a fence `results_published` flag alone must not gate reads; eligibility is the join plus seal
-- U-F2A-04 weekly shapes, U-F2A-05 TD-15 pagination, U-F2A-06 retention: still Proposed
-- F2-C weekly ranks and FINAL settlement: not implemented
+- U-F2A-04 weekly snapshot DDL is implemented for test environments in F2-C. Production migration IDs remain NOT_RUN
+- U-F2A-05 TD-15 pagination and U-F2A-06 retention: still Proposed
+- F2-C daily/weekly ranks and FINAL: implemented in `PZD-41-STAGE-F2-C-IMPLEMENTATION.md`
 - Ranked HTTP: disabled
 - Multi-host, NTP, and failover: **NOT_RUN**
 - Merge, deploy, and PZD-41 Done: not authorized

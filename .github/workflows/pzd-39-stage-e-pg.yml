@@ -101,7 +101,7 @@ jobs:
         run: npm run test:stage-f1
       - name: Stage F1 authenticated tournament HTTP E2E
         run: npm run test:stage-f1-http
-      - name: Stage F2 calculator, F2-A schema, and F2-B atomic publication
+      - name: Stage F2 calculator, F2-A schema, F2-B publication, and F2-C rankings
         run: npm run test:stage-f2
       - name: Core-001.v3 replay regression (including generator vectors)
         env:

@@ -39,6 +39,17 @@ export async function lockSeriesForTransaction(
   return keys;
 }
 
+/**
+ * First lock of weekly FINAL and of daily claim bootstrap.
+ * F2-B publication does not take this lock. It only takes the series lock,
+ * so settlement cannot deadlock with an H1 publication:
+ * settlement lock, then series locks in series-id order.
+ */
+export async function lockWeeklySettlement(client: pg.PoolClient): Promise<void> {
+  const keys = seriesAdvisoryKeys('pzd:f2c:weekly-settlement');
+  await client.query('SELECT pg_advisory_xact_lock($1, $2)', [keys[0], keys[1]]);
+}
+
 export interface SeriesFenceStore {
   get(seriesKey: string): Promise<SeriesFenceState | null>;
   put(state: SeriesFenceState): Promise<void>;

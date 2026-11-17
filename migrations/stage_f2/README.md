@@ -45,11 +45,22 @@ Production versioned migration IDs, expand/contract rollout, and backup/restore 
 
 The service is the only writer. A provenance row is authorized only when `evaluateLeaderboardReadEligibility` recomputes the HMAC from replayed evidence with the server key.
 
-## Explicitly deferred (F2-C / production)
+## F2-C ranking and FINAL
 
-- Weekly aggregates / period revision / immutable FINAL snapshots
-- Leaderboard read APIs and pagination defaults (TD-15 remains Proposed)
-- HTTP/OpenAPI publication surfaces
+`F2CRankingService.migrate()` applies `F2C_RANKING_DDL` for disposable proofs:
+
+- `tournament_f2c_settlement` — one FINAL row per UTC week
+- `tournament_f2c_board_header` — 32 boards (7 days × 4 categories + 1 week × 4 categories)
+- `tournament_f2c_rank_snapshot` — frozen competition-rank rows
+- `BEFORE UPDATE OR DELETE` triggers that raise `F2C_FINAL_IMMUTABLE`
+
+Drop order for a disposable database is `F2C_RANKING_DROP_DDL` before the F2-A publication drop. Production versioned migration IDs remain **NOT_RUN**.
+
+## Explicitly deferred (production)
+
+- Leaderboard HTTP/OpenAPI and ranked HTTP enablement
+- TD-15 pagination defaults 50/100 (remain Proposed; F2-C does not apply them)
+- Retention beyond the current week and five previous weeks
 
 ## Hardening notes
 
