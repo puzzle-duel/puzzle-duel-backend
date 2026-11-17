@@ -38,7 +38,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
     const fence = new MemorySeriesFenceStore();
     const idle = new Date(T0.getTime() + 30_000);
     await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     clock.set(new Date(idle.getTime() - 15_000));
 
     const first = await arbiter.admitAndEvaluate({
@@ -90,7 +90,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
     const fence = new MemorySeriesFenceStore();
     const idle = new Date(T0.getTime() + 30_000);
     await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     clock.set(new Date(idle.getTime() - 10_000));
 
     const [a, b] = await Promise.all([
@@ -120,7 +120,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
     const fence = new MemorySeriesFenceStore();
     const idle = new Date(T0.getTime() + 120_000); // 120s remaining > 60s
     await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     clock.set(T0);
 
     const bad = await arbiter.admitAndEvaluate({
@@ -140,7 +140,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
     const fence = new MemorySeriesFenceStore();
     const idle = new Date(T0.getTime() + 30_000);
     await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     clock.set(new Date(idle.getTime() - 5_000));
     await arbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -153,7 +153,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
     const fence2 = new MemorySeriesFenceStore();
     await fence2.put(snap!);
     assert.equal((await fence2.get('s1'))!.thinkingExtensionConsumed, true);
-    const arbiter2 = new SeriesCommandArbiter(journal, fence2);
+    const arbiter2 = new SeriesCommandArbiter(journal, fence2, { clock });
     const again = await arbiter2.admitAndEvaluate({
       seriesKey: 's1',
       playerId: 'p1',
@@ -178,7 +178,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
       const idle = new Date(T0.getTime() + 30_000);
       await fence.put(baseFence('pg-ext', { idleDeadlineAt: idle }));
       clock.set(new Date(idle.getTime() - 10_000));
-      const arbiter = new SeriesCommandArbiter(journal, fence);
+      const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
       const first = await arbiter.admitAndEvaluate({
         seriesKey: 'pg-ext',
         playerId: 'p1',
@@ -193,7 +193,7 @@ describe('PZD-38 P1-01 — one thinking extension per series', () => {
       const state = await fence2.get('pg-ext');
       assert.equal(state!.thinkingExtensionConsumed, true);
 
-      const arbiter2 = new SeriesCommandArbiter(journal, fence2);
+      const arbiter2 = new SeriesCommandArbiter(journal, fence2, { clock });
       const second = await arbiter2.admitAndEvaluate({
         seriesKey: 'pg-ext',
         playerId: 'p1',
@@ -223,7 +223,7 @@ describe('PZD-38 P1-02 — hard cutoff on thinking extension', () => {
       const fence = new MemorySeriesFenceStore();
       const idle = new Date(T0.getTime() + c.remaining);
       await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
-      const arbiter = new SeriesCommandArbiter(journal, fence);
+      const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
       clock.set(T0);
       const r = await arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -248,7 +248,7 @@ describe('PZD-38 P1-02 — hard cutoff on thinking extension', () => {
     await fence.put(
       baseFence('s1', { idleDeadlineAt: idle, hardCutoffAt: hard }),
     );
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     clock.set(new Date(idle.getTime() - 15_000));
     const r = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -303,6 +303,7 @@ describe('PZD-38 P1-02 — hard cutoff on thinking extension', () => {
       }),
     );
     const arbiter = new SeriesCommandArbiter(journal, fence, {
+      clock,
       resolveMoveEffect: fixedMoveEffect(1),
     });
     clock.set(new Date(hard.getTime() + 1));
@@ -346,6 +347,7 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
     await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
     const arbiter = new SeriesCommandArbiter(journal, fence, {
       resolveMoveEffect: fixedMoveEffect(1),
+      clock,
     });
     clock.set(new Date(idle.getTime() - 1));
     await journal.admit({
@@ -355,12 +357,15 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
       idempotencyKey: 'pend',
       payloadHash: 'h',
     });
+    // Expiry reached, but timely pending admission remains.
+    clock.set(idle);
     const f = await arbiter.tryForfeitForInactivity('s1');
     assert.equal(f.ok, false);
     if (!f.ok) assert.equal(f.reason, 'BLOCKED_PENDING');
+    assert.equal((await fence.get('s1'))!.status, 'ACTIVE');
   });
 
-  it('postgres: TOCTOU — admit between unlocked check and locked forfeit keeps pending', async (t) => {
+  it('postgres: TOCTOU — admit during forfeit pause then expire clock keeps pending', async (t) => {
     const pool = await connectOrSkip(t);
     if (!pool) return;
     try {
@@ -375,6 +380,7 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
       await fence.put(baseFence('pg-toc', { idleDeadlineAt: idle }));
       const arbiter = new SeriesCommandArbiter(journal, fence, {
         resolveMoveEffect: fixedMoveEffect(1),
+        clock,
       });
 
       let releaseAdmit!: () => void;
@@ -390,7 +396,6 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
 
       const forfeitPromise = arbiter.tryForfeitForInactivity('pg-toc', {
         beforeLockedBarrier: async () => {
-          // Signal concurrent admit, then wait until it has durably committed.
           releaseAdmit();
           await admitFinished;
         },
@@ -407,6 +412,8 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
         writerGeneration: 1,
       });
       assert.equal(admit.ok, true);
+      // Advance past idle so locked forfeit is expired, but pending receipt stays predeadline.
+      clock.set(new Date(idle.getTime() + 1));
       admitDone();
 
       const forfeit = await forfeitPromise;
@@ -422,7 +429,7 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
     }
   });
 
-  it('postgres: reversed order — admit commits first, then forfeit blocked', async (t) => {
+  it('postgres: reversed order — admit commits first, then forfeit blocked after expiry', async (t) => {
     const pool = await connectOrSkip(t);
     if (!pool) return;
     try {
@@ -437,6 +444,7 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
       await fence.put(baseFence('pg-rev', { idleDeadlineAt: idle }));
       const arbiter = new SeriesCommandArbiter(journal, fence, {
         resolveMoveEffect: fixedMoveEffect(1),
+        clock,
       });
       clock.set(new Date(idle.getTime() - 1));
       const admit = await journal.admit({
@@ -447,14 +455,17 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
         payloadHash: 'h',
       });
       assert.equal(admit.ok, true);
+      clock.set(idle);
       const forfeit = await arbiter.tryForfeitForInactivity('pg-rev');
       assert.equal(forfeit.ok, false);
+      if (!forfeit.ok) assert.equal(forfeit.reason, 'BLOCKED_PENDING');
+      assert.equal((await fence.get('pg-rev'))!.status, 'ACTIVE');
     } finally {
       await pool.end();
     }
   });
 
-  it('postgres: simultaneous completion vs forfeit — COMPLETED wins, no publish', async (t) => {
+  it('postgres: simultaneous completion vs forfeit before expiry — no premature forfeit', async (t) => {
     const pool = await connectOrSkip(t);
     if (!pool) return;
     try {
@@ -469,6 +480,7 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
       await fence.put(baseFence('pg-comp', { idleDeadlineAt: idle }));
       const arbiter = new SeriesCommandArbiter(journal, fence, {
         resolveMoveEffect: fixedMoveEffect(10, true),
+        clock,
       });
       clock.set(new Date(idle.getTime() - 1));
       const [done, forfeit] = await Promise.all([
@@ -483,15 +495,183 @@ describe('PZD-38 P1-03 — atomic expiry vs pending admission', () => {
         }),
         arbiter.tryForfeitForInactivity('pg-comp'),
       ]);
-      // Either forfeit blocked by pending/COMPLETED, or completion applied.
+      // P1-05: forfeit must never write FORFEITED before idle deadline.
+      // If the move completes first, forfeit may observe ALREADY_TERMINAL;
+      // if forfeit runs first while still predeadline, it must be NOT_EXPIRED.
+      assert.equal(forfeit.ok, false);
+      if (!forfeit.ok) {
+        assert.ok(
+          forfeit.reason === 'NOT_EXPIRED' ||
+            forfeit.reason === 'ALREADY_TERMINAL' ||
+            forfeit.reason === 'BLOCKED_PENDING',
+          forfeit.reason,
+        );
+      }
+      assert.equal(done.decision, 'apply');
       if (done.decision === 'apply') {
         assert.equal(done.state.status, 'COMPLETED');
         assert.equal(done.state.resultsPublished, false);
-        assert.equal(forfeit.ok, false);
-      } else {
-        // Rare: forfeit won empty-pending race before admit — admit then rejects terminal.
-        assert.ok(forfeit.ok || done.decision === 'reject');
       }
+      assert.equal((await fence.get('pg-comp'))!.status, 'COMPLETED');
+      assert.notEqual((await fence.get('pg-comp'))!.status, 'FORFEITED');
+    } finally {
+      await pool.end();
+    }
+  });
+});
+
+describe('PZD-38 P1-05 — no premature inactivity forfeiture', () => {
+  it('memory: deadline−1ms → NOT_EXPIRED; equality and +1ms forfeit when no pending', async () => {
+    const clock = new ControllableClock(T0);
+    const journal = new MemoryAdmissionJournal({ clock });
+    const fence = new MemorySeriesFenceStore();
+    const idle = idleDeadlineFrom(T0, 300);
+    await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
+
+    clock.set(new Date(idle.getTime() - 1));
+    const early = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(early.ok, false);
+    if (!early.ok) assert.equal(early.reason, 'NOT_EXPIRED');
+    assert.equal((await fence.get('s1'))!.status, 'ACTIVE');
+
+    clock.set(idle);
+    const atEq = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(atEq.ok, true);
+    if (atEq.ok) assert.equal(atEq.state.status, 'FORFEITED');
+
+    // Idempotent retry after terminal.
+    const again = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(again.ok, false);
+    if (!again.ok) assert.equal(again.reason, 'ALREADY_TERMINAL');
+  });
+
+  it('memory: +1ms forfeit when empty; early forfeit leaves no durable change', async () => {
+    const clock = new ControllableClock(T0);
+    const journal = new MemoryAdmissionJournal({ clock });
+    const fence = new MemorySeriesFenceStore();
+    const idle = idleDeadlineFrom(T0, 300);
+    await fence.put(baseFence('s1', { idleDeadlineAt: idle }));
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
+
+    clock.set(T0);
+    const early = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(early.ok, false);
+    if (!early.ok) assert.equal(early.reason, 'NOT_EXPIRED');
+    const before = await fence.get('s1');
+    assert.equal(before!.status, 'ACTIVE');
+    assert.equal(before!.lastAppliedAdmissionId, null);
+
+    clock.set(new Date(idle.getTime() + 1));
+    const late = await arbiter.tryForfeitForInactivity('s1');
+    assert.equal(late.ok, true);
+    if (late.ok) assert.equal(late.state.status, 'FORFEITED');
+  });
+
+  it('postgres: −1 / = / +1 ms forfeit boundaries with empty pending', async (t) => {
+    const pool = await connectOrSkip(t);
+    if (!pool) return;
+    try {
+      await pool.query('DROP TABLE IF EXISTS command_admission_journal');
+      await pool.query('DROP TABLE IF EXISTS series_fence_state');
+      const clock = new ControllableClock(T0);
+      const journal = new PostgresAdmissionJournal(pool, clock);
+      const fence = new PostgresSeriesFenceStore(pool);
+      await journal.migrate();
+      await fence.migrate();
+      const idle = idleDeadlineFrom(T0, 300);
+      await fence.put(baseFence('pg-p105', { idleDeadlineAt: idle }));
+      const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
+
+      clock.set(new Date(idle.getTime() - 1));
+      const early = await arbiter.tryForfeitForInactivity('pg-p105');
+      assert.equal(early.ok, false);
+      if (!early.ok) assert.equal(early.reason, 'NOT_EXPIRED');
+      assert.equal((await fence.get('pg-p105'))!.status, 'ACTIVE');
+
+      clock.set(idle);
+      const atEq = await arbiter.tryForfeitForInactivity('pg-p105');
+      assert.equal(atEq.ok, true);
+      if (atEq.ok) assert.equal(atEq.state.status, 'FORFEITED');
+
+      const retry = await arbiter.tryForfeitForInactivity('pg-p105');
+      assert.equal(retry.ok, false);
+      if (!retry.ok) assert.equal(retry.reason, 'ALREADY_TERMINAL');
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('postgres: two-connection race — predeadline move vs forfeit before expiry', async (t) => {
+    const pool = await connectOrSkip(t);
+    if (!pool) return;
+    try {
+      await pool.query('DROP TABLE IF EXISTS command_admission_journal');
+      await pool.query('DROP TABLE IF EXISTS series_fence_state');
+      const clock = new ControllableClock(T0);
+      const journal = new PostgresAdmissionJournal(pool, clock);
+      const fence = new PostgresSeriesFenceStore(pool);
+      await journal.migrate();
+      await fence.migrate();
+      const idle = idleDeadlineFrom(T0, 300);
+      await fence.put(baseFence('pg-race2', { idleDeadlineAt: idle }));
+      const arbiter = new SeriesCommandArbiter(journal, fence, {
+        resolveMoveEffect: fixedMoveEffect(3),
+        clock,
+      });
+
+      clock.set(new Date(idle.getTime() - 1));
+      const [move, forfeitEarly] = await Promise.all([
+        arbiter.admitAndEvaluate({
+          seriesKey: 'pg-race2',
+          playerId: 'p1',
+          commandType: 'move',
+          idempotencyKey: 'last-move',
+          payloadHash: 'h',
+          expectedBoardRevision: 0,
+          writerGeneration: 1,
+        }),
+        arbiter.tryForfeitForInactivity('pg-race2'),
+      ]);
+      assert.equal(move.decision, 'apply');
+      assert.equal(forfeitEarly.ok, false);
+      if (!forfeitEarly.ok) assert.equal(forfeitEarly.reason, 'NOT_EXPIRED');
+      assert.equal((await fence.get('pg-race2'))!.status, 'ACTIVE');
+    } finally {
+      await pool.end();
+    }
+  });
+
+  it('postgres: postdeadline forfeit blocked by durable predeadline pending admission', async (t) => {
+    const pool = await connectOrSkip(t);
+    if (!pool) return;
+    try {
+      await pool.query('DROP TABLE IF EXISTS command_admission_journal');
+      await pool.query('DROP TABLE IF EXISTS series_fence_state');
+      const clock = new ControllableClock(T0);
+      const journal = new PostgresAdmissionJournal(pool, clock);
+      const fence = new PostgresSeriesFenceStore(pool);
+      await journal.migrate();
+      await fence.migrate();
+      const idle = idleDeadlineFrom(T0, 300);
+      await fence.put(baseFence('pg-pend', { idleDeadlineAt: idle }));
+      const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
+
+      clock.set(new Date(idle.getTime() - 1));
+      const admit = await journal.admit({
+        seriesKey: 'pg-pend',
+        playerId: 'p1',
+        commandType: 'move',
+        idempotencyKey: 'queued',
+        payloadHash: 'h',
+      });
+      assert.equal(admit.ok, true);
+
+      clock.set(new Date(idle.getTime() + 1));
+      const forfeit = await arbiter.tryForfeitForInactivity('pg-pend');
+      assert.equal(forfeit.ok, false);
+      if (!forfeit.ok) assert.equal(forfeit.reason, 'BLOCKED_PENDING');
+      assert.equal((await fence.get('pg-pend'))!.status, 'ACTIVE');
     } finally {
       await pool.end();
     }
@@ -505,6 +685,7 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     const fence = new MemorySeriesFenceStore();
     await fence.put(baseFence('s1'));
     const arbiter = new SeriesCommandArbiter(journal, fence, {
+      clock,
       resolveMoveEffect: fixedMoveEffect(1),
     });
     for (const scoreDelta of [1, -1, Number.MAX_SAFE_INTEGER + 1, 999999]) {
@@ -533,6 +714,7 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     const fence = new MemorySeriesFenceStore();
     await fence.put(baseFence('s1'));
     const arbiter = new SeriesCommandArbiter(journal, fence, {
+      clock,
       resolveMoveEffect: fixedMoveEffect(5, false),
     });
     const r = await arbiter.admitAndEvaluate({
@@ -559,6 +741,7 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     const fence = new MemorySeriesFenceStore();
     await fence.put(baseFence('s1'));
     const arbiter = new SeriesCommandArbiter(journal, fence, {
+      clock,
       resolveMoveEffect: fixedMoveEffect(8, true),
     });
     const r = await arbiter.admitAndEvaluate({
@@ -583,7 +766,7 @@ describe('PZD-38 P1-04 — untrusted score/completion authority', () => {
     const journal = new MemoryAdmissionJournal({ clock });
     const fence = new MemorySeriesFenceStore();
     await fence.put(baseFence('s1'));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, { clock });
     const r = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
       playerId: 'p1',

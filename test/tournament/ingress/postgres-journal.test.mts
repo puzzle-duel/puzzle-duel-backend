@@ -51,6 +51,7 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     const arbiter = new SeriesCommandArbiter(journal, fence, {
       resolveMoveEffect: fixedMoveEffect(42, true),
+      clock,
     });
 
     const result = await arbiter.admitAndEvaluate(
@@ -208,6 +209,7 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
         a: { scoreDelta: 2 },
         b: { scoreDelta: 4 },
       }),
+      clock,
     });
     const [a, b] = await Promise.all([
       arbiter.admitAndEvaluate({

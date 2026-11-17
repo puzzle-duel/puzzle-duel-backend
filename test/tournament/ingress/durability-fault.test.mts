@@ -17,6 +17,7 @@ async function ready(
   await fence.put(baseFence('s1', { idleDeadlineAt }));
   return new SeriesCommandArbiter(journal, fence, {
     resolveMoveEffect: fixedMoveEffect(scoreDelta),
+    clock,
   });
 }
 
@@ -176,6 +177,7 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     await recoveredFence.put(baseFence('s1', { idleDeadlineAt }));
     const arbiter = new SeriesCommandArbiter(recovered, recoveredFence, {
       resolveMoveEffect: fixedMoveEffect(0),
+      clock,
     });
     const barrier = await arbiter.canSafelyForfeit('s1', idleDeadlineAt);
     assert.equal(barrier.allowed, false);
@@ -222,10 +224,13 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     recoveredJournal.restoreSnapshot(snap);
     const recoveredFence = new MemorySeriesFenceStore();
     await recoveredFence.put(fenceSnap!);
+    const recoveredClock = new ControllableClock(
+      new Date(idleDeadlineAt.getTime() + 60_000),
+    );
     const recoveredArbiter = new SeriesCommandArbiter(
       recoveredJournal,
       recoveredFence,
-      { resolveMoveEffect: fixedMoveEffect(7) },
+      { resolveMoveEffect: fixedMoveEffect(7), clock: recoveredClock },
     );
     const again = await recoveredArbiter.admitAndEvaluate({
       seriesKey: 's1',

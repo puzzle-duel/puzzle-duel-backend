@@ -14,7 +14,8 @@ Draft PR: [#13](https://github.com/puzzle-duel/puzzle-duel-backend/pull/13)
 | Runtime scope | Admission journal + series fence + arbiter only |
 | Nest / HTTP / auth | NOT implemented (Phase B) |
 | Reviewed HEAD before remediation | `4473a39a39def068701b2a0c8f633b2dfcc38dd2` |
-| Remediation tip | `79142766684f795733df60ab354cf11dcb3da1d3` |
+| P1-01…P1-04 fix commit | `79142766684f795733df60ab354cf11dcb3da1d3` |
+| Remediation tip | *(see git HEAD after P1-05 push)* |
 
 ## What Phase A proves vs does not prove
 
@@ -34,11 +35,11 @@ PZD_INGRESS_DATABASE_URL=postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress \
 
 `npm run typecheck` — **NOT_RUN** (Phase A branch has no `tsconfig.json`; Node `--experimental-strip-types` executes tests directly).
 
-## Evidence run (post P1 remediation)
+## Evidence run (post P1-05 premature-forfeit fix)
 
 ```
-ℹ tests 46
-ℹ pass 46
+ℹ tests 51
+ℹ pass 51
 ℹ fail 0
 ℹ skipped 0
 ```
@@ -85,6 +86,18 @@ Generator golden parity (`npm run test:generator` GEN-07): **NOT_RUN** without `
 | **Tests** | PG TOCTOU, reversed order, simultaneous completion vs forfeit |
 | **Remaining / blocked gate** | **Multi-series weekly FINAL snapshot publish in one atomic settlement TX is Phase C NOT_RUN.** Phase A proves pending watermark via `canSafelyFinalizeWeekly` (sorted keys + listEligiblePendingForSeries) only — not immutable period_snapshot rows. |
 
+### P1-05 — Premature inactivity forfeiture
+
+| | |
+| --- | --- |
+| **Original failure** | `tryForfeitForInactivity` / `tryForfeitAtomically` forfeited ACTIVE series with no pending commands even when trusted now was still before `idleDeadlineAt` |
+| **Root cause** | Expiry path checked terminal status + pending count only; never compared trusted clock to idle deadline under the same lock |
+| **Changed source** | `series-fence.mts` (`tryForfeitAtomically` samples `clock.now()` under advisory+FOR UPDATE); `arbiter.mts` injects `IngressClock`, memory path same check, generic fallback → `FORFEIT_UNAVAILABLE` (fail-closed) |
+| **Before** | Immediate forfeit on empty ACTIVE series at T0 with idle = T0+300s |
+| **After** | `now < idleDeadlineAt` → `NOT_EXPIRED` (no mutation); equality/+1ms may forfeit if no eligible pending; pending predeadline admission still blocks |
+| **Tests** | memory −1/=/+1; PG −1/=/+1; two-connection predeadline move vs forfeit; postdeadline pending barrier; simultaneous completion must not FORFEIT early |
+| **Remaining** | Hard-cutoff settlement windows remain distinct (not confused with idle expiry); Phase B auth still NOT_RUN |
+
 ### P1-04 — Untrusted score / completion authority
 
 | | |
@@ -125,6 +138,7 @@ Stage E (`feature/PZD-39-core001v3-tournament-integration` / PR #17) imported Ph
 | P1-02 hard cutoff boundaries | p1-remediation + deadline-boundary | PASS |
 | P1-03 PG TOCTOU / reverse / completion race | p1-remediation.test.mts | PASS |
 | P1-04 forged score/completion | p1-remediation.test.mts | PASS |
+| P1-05 premature forfeit / −1=+/1 ms | p1-remediation.test.mts | PASS |
 
 ## Gate matrix
 

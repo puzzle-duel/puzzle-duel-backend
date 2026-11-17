@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import type { SeriesFenceState, SeriesTerminalStatus } from './types.mts';
+import type { IngressClock } from './clock.mts';
+import { isTimely, type SeriesFenceState, type SeriesTerminalStatus } from './types.mts';
 
 export const SERIES_FENCE_DDL = `
 CREATE TABLE IF NOT EXISTS series_fence_state (
@@ -231,9 +232,14 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
   /**
    * Atomic inactivity forfeit under the same advisory+row lock ordering as admit.
    *
+   * Under the open transaction (after advisory + FOR UPDATE):
+   * 1. Sample trusted clock
+   * 2. Reject with NOT_EXPIRED if now < idleDeadlineAt (exclusive equality)
+   * 3. Count eligible pending admissions
+   * 4. FORFEITED only when expired and pending count is zero
+   *
    * Optional `beforeLockedBarrier` runs BEFORE acquiring locks so tests can
-   * interleave a concurrent predeadline admission (TOCTOU reproduction), then
-   * the locked section re-checks pending and only forfeits if still empty.
+   * interleave a concurrent predeadline admission (TOCTOU reproduction).
    */
   async tryForfeitAtomically(
     seriesKey: string,
@@ -241,12 +247,13 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
       client: pg.PoolClient | pg.Pool,
       idleDeadlineAt: Date,
     ) => Promise<number>,
+    clock: IngressClock,
     options?: { beforeLockedBarrier?: () => Promise<void> },
   ): Promise<
     | { ok: true; state: SeriesFenceState }
     | {
         ok: false;
-        reason: 'BLOCKED_PENDING' | 'ALREADY_TERMINAL';
+        reason: 'BLOCKED_PENDING' | 'ALREADY_TERMINAL' | 'NOT_EXPIRED';
         pendingCount?: number;
         state?: SeriesFenceState;
       }
@@ -278,6 +285,14 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
         await client.query('COMMIT');
         return { ok: false, reason: 'ALREADY_TERMINAL', state: current };
       }
+
+      // P1-05: trusted now sampled under the same TX/lock as pending + forfeit.
+      const trustedNow = clock.now();
+      if (isTimely(trustedNow, current.idleDeadlineAt)) {
+        await client.query('COMMIT');
+        return { ok: false, reason: 'NOT_EXPIRED', state: current };
+      }
+
       const pendingCount = await listEligiblePending(
         client,
         current.idleDeadlineAt,

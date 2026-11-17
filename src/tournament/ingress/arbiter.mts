@@ -1,3 +1,5 @@
+import type { IngressClock } from './clock.mts';
+import { SystemUtcClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
 import { PostgresAdmissionJournal } from './postgres-journal.mts';
 import type { SeriesFenceStore } from './series-fence.mts';
@@ -50,7 +52,25 @@ export interface SeriesCommandArbiterOptions {
    * with MOVE_EFFECT_UNAVAILABLE rather than trusting client fields.
    */
   resolveMoveEffect?: ServerMoveEffectResolver;
+  /**
+   * Authoritative trusted clock for inactivity expiry (P1-05).
+   * Must be the same ControllableClock used by the journal in tests.
+   */
+  clock?: IngressClock;
 }
+
+export type ForfeitAttemptResult =
+  | { ok: true; state: SeriesFenceState }
+  | {
+      ok: false;
+      reason:
+        | 'BLOCKED_PENDING'
+        | 'ALREADY_TERMINAL'
+        | 'NOT_EXPIRED'
+        | 'FORFEIT_UNAVAILABLE';
+      blocking?: AdmittedCommand[];
+      state?: SeriesFenceState;
+    };
 
 /**
  * Per-series arbiter: admit first (durable trusted time), then evaluate
@@ -61,6 +81,7 @@ export class SeriesCommandArbiter {
   readonly #journal: AdmissionJournal;
   readonly #fence: SeriesFenceStore;
   readonly #resolveMoveEffect: ServerMoveEffectResolver | null;
+  readonly #clock: IngressClock;
   /** Serialize adjudication per admissionId (duplicate concurrent retries). */
   readonly #admissionLocks = new Map<string, Promise<void>>();
 
@@ -74,8 +95,10 @@ export class SeriesCommandArbiter {
     // Back-compat: third arg may be the resolver function directly (tests).
     if (typeof options === 'function') {
       this.#resolveMoveEffect = options;
+      this.#clock = new SystemUtcClock();
     } else {
       this.#resolveMoveEffect = options?.resolveMoveEffect ?? null;
+      this.#clock = options?.clock ?? new SystemUtcClock();
     }
   }
 
@@ -174,18 +197,13 @@ export class SeriesCommandArbiter {
   /**
    * Attempt inactivity forfeiture only when barrier allows.
    * P1-03: pending check and FORFEITED transition share one locking protocol.
+   * P1-05: trusted clock must show idle deadline reached (equality = expired);
+   *         sampled under the same lock/TX as pending count + FORFEITED write.
    */
   async tryForfeitForInactivity(
     seriesKey: string,
     options?: { beforeLockedBarrier?: () => Promise<void> },
-  ): Promise<
-    | { ok: true; state: SeriesFenceState }
-    | {
-        ok: false;
-        reason: 'BLOCKED_PENDING' | 'ALREADY_TERMINAL';
-        blocking?: AdmittedCommand[];
-      }
-  > {
+  ): Promise<ForfeitAttemptResult> {
     if (this.#fence instanceof PostgresSeriesFenceStore) {
       if (!(this.#journal instanceof PostgresAdmissionJournal)) {
         throw new Error('postgres fence requires postgres journal');
@@ -195,6 +213,7 @@ export class SeriesCommandArbiter {
         seriesKey,
         (db, idleDeadlineAt) =>
           journal.countEligiblePendingOn(db, seriesKey, idleDeadlineAt),
+        this.#clock,
         { beforeLockedBarrier: options?.beforeLockedBarrier },
       );
       if (result.ok) return { ok: true, state: result.state };
@@ -206,12 +225,24 @@ export class SeriesCommandArbiter {
               state.idleDeadlineAt,
             )
           : [];
-        return { ok: false, reason: 'BLOCKED_PENDING', blocking };
+        return {
+          ok: false,
+          reason: 'BLOCKED_PENDING',
+          blocking,
+          state: state ?? undefined,
+        };
       }
-      return { ok: false, reason: 'ALREADY_TERMINAL' };
+      if (result.reason === 'NOT_EXPIRED') {
+        return {
+          ok: false,
+          reason: 'NOT_EXPIRED',
+          state: result.state,
+        };
+      }
+      return { ok: false, reason: 'ALREADY_TERMINAL', state: result.state };
     }
 
-    // Memory path: hold fence series lock across pending check + forfeit.
+    // Memory path: hold fence series lock across time + pending check + forfeit.
     if (this.#fence instanceof MemorySeriesFenceStore) {
       if (options?.beforeLockedBarrier) {
         await options.beforeLockedBarrier();
@@ -220,7 +251,19 @@ export class SeriesCommandArbiter {
         const state = await this.#fence.get(seriesKey);
         if (!state) throw new Error(`missing series ${seriesKey}`);
         if (state.status === 'COMPLETED' || state.status === 'FORFEITED') {
-          return { ok: false as const, reason: 'ALREADY_TERMINAL' as const };
+          return {
+            ok: false as const,
+            reason: 'ALREADY_TERMINAL' as const,
+            state,
+          };
+        }
+        const trustedNow = this.#clock.now();
+        if (isTimely(trustedNow, state.idleDeadlineAt)) {
+          return {
+            ok: false as const,
+            reason: 'NOT_EXPIRED' as const,
+            state,
+          };
         }
         const blocking = await this.#journal.listEligiblePending(
           seriesKey,
@@ -231,6 +274,7 @@ export class SeriesCommandArbiter {
             ok: false as const,
             reason: 'BLOCKED_PENDING' as const,
             blocking,
+            state,
           };
         }
         // Put under held withSeriesLock (mutate is not reentrant).
@@ -244,33 +288,13 @@ export class SeriesCommandArbiter {
       });
     }
 
-    // Generic fallback (should not be used in production proofs).
-    if (options?.beforeLockedBarrier) {
-      await options.beforeLockedBarrier();
-    }
-    const state = await this.#fence.get(seriesKey);
-    if (!state) throw new Error(`missing series ${seriesKey}`);
-    if (state.status === 'COMPLETED' || state.status === 'FORFEITED') {
-      return { ok: false, reason: 'ALREADY_TERMINAL' };
-    }
-    const barrier = await this.canSafelyForfeit(seriesKey, state.idleDeadlineAt);
-    if (!barrier.allowed) {
-      return { ok: false, reason: 'BLOCKED_PENDING', blocking: barrier.blocking };
-    }
-    const mutated = await this.#fence.mutate(seriesKey, (current) => {
-      if (current.status === 'COMPLETED' || current.status === 'FORFEITED') {
-        return { ok: false, reason: 'ALREADY_TERMINAL', current };
-      }
-      // Re-check would need journal inside mutate — generic path is best-effort.
-      return {
-        ok: true,
-        next: { ...current, status: 'FORFEITED', resultsPublished: false },
-      };
-    });
-    if (!mutated.ok) {
-      return { ok: false, reason: 'ALREADY_TERMINAL' };
-    }
-    return { ok: true, state: mutated.state };
+    // P1-05: generic fallback without atomic trusted-time + pending + forfeit
+    // is unsafe — fail closed (no mutation).
+    return {
+      ok: false,
+      reason: 'FORFEIT_UNAVAILABLE',
+      state: (await this.#fence.get(seriesKey)) ?? undefined,
+    };
   }
 
   async #adjudicateAdmitted(

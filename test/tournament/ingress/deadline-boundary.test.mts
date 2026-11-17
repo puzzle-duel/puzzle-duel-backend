@@ -71,6 +71,7 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     await seed(fence, { idleDeadlineAt });
     const arbiter = new SeriesCommandArbiter(journal, fence, {
       resolveMoveEffect: fixedMoveEffect(10),
+      clock,
     });
 
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
@@ -111,6 +112,7 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     await seed(fence, { idleDeadlineAt });
     const arbiter = new SeriesCommandArbiter(journal, fence, {
       resolveMoveEffect: fixedMoveEffect(1),
+      clock,
     });
     clock.set(idleDeadlineAt);
 
@@ -138,6 +140,7 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     await seed(fence, { idleDeadlineAt });
     const arbiter = new SeriesCommandArbiter(journal, fence, {
       resolveMoveEffect: fixedMoveEffect(1),
+      clock,
     });
 
     const result = await arbiter.admitAndEvaluate({

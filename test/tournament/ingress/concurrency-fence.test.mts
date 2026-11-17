@@ -23,7 +23,10 @@ async function setup(resolver = fixedMoveEffect(0)) {
     journal,
     fence,
     idleDeadlineAt,
-    arbiter: new SeriesCommandArbiter(journal, fence, { resolveMoveEffect: resolver }),
+    arbiter: new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: resolver,
+      clock,
+    }),
   };
 }
 
