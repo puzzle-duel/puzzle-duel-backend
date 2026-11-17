@@ -95,6 +95,8 @@ jobs:
           ref: 946f015a5124d1a9dfd6f3440cc916b9eb1789f8
           path: puzzle-duel-client
           persist-credentials: false
+      - name: Stage F2 six-game category calculation (no publication authority)
+        run: npm run test:stage-f2
       - name: Core-001.v3 replay regression (including generator vectors)
         env:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
