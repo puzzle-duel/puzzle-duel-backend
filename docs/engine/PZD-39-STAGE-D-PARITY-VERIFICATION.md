@@ -11,7 +11,7 @@ Draft PR: https://github.com/puzzle-duel/puzzle-duel-backend/pull/16
 | --- | --- |
 | Starting HEAD (pre gap-closure) | `d0f12659d1b336fa83ae4d89d431dbb8d38a8a38` |
 | Prior Stage D implementation commit | `3c90532b5247bd7ec168cc432ba880bb27cecb76` |
-| Final HEAD | *(recorded after push; see PR #16)* |
+| Final HEAD | `a0c26b63b70d85e1a83af75c641b5fc42139abd7` |
 
 ## Engine / toolchain pins
 
