@@ -1,5 +1,11 @@
 node_modules/
 tools/__pycache__/
+**/__pycache__/
+*.pyc
 *.log
 .DS_Store
 *.tsbuildinfo
+tools/stage_d/out/
+.dart_tool/
+tools/stage_d/dart_runner/.dart_tool/
+tools/stage_d/dart_runner/pubspec.lock

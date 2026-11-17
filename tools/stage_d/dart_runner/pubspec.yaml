@@ -1,0 +1,7 @@
+name: stage_d_dart_runner
+publish_to: none
+environment:
+  sdk: ^3.14.0
+dependencies:
+  puzzle_duel_rules:
+    path: ../../../../puzzle-duel-client-core001v3-dart/packages/puzzle_duel_rules

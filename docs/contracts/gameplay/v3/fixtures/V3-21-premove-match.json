@@ -1,0 +1,87 @@
+{
+  "id": "V3-21",
+  "kind": "fullMove",
+  "rulesVersion": "core-001.v3",
+  "summary": "Unresolved pre-move match is unsafe",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "initialState": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 3,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        {
+          "shape": "circle",
+          "direction": "right"
+        },
+        {
+          "shape": "circle",
+          "direction": "right"
+        },
+        {
+          "shape": "circle",
+          "direction": "right"
+        }
+      ],
+      [
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "right"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "moves": [
+    {
+      "offerIndex": 0,
+      "tap": [
+        1,
+        0
+      ]
+    }
+  ],
+  "requireInitial": false,
+  "expected": {
+    "ok": false,
+    "result": {
+      "kind": "unsafe",
+      "reason": "unresolved_pre_move_match"
+    }
+  }
+}
