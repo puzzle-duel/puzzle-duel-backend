@@ -4,9 +4,16 @@
  * Fail-closed / default-deny. Server-side configuration only.
  * Request headers, query strings, and bodies MUST NEVER influence this gate.
  *
- * HARD DENY (P0-FG01): if the actual process `NODE_ENV` is `production` or `prod`,
- * ranked HTTP is ALWAYS disabled — even when `PZD_RUNTIME_PROFILE=development`
- * and/or an injected test `rankedHttpGate` claims enablement.
+ * HARD DENY (P0-FG01 / P0-FG02): the real process `NODE_ENV` (`process.env`)
+ * is the non-overridable production veto. If it is `production` or `prod`,
+ * ranked HTTP is ALWAYS disabled — even when:
+ *   - `PZD_RUNTIME_PROFILE=development`
+ *   - an injected `rankedHttpGate` claims enablement
+ *   - an injected `actualRuntimeEnv` / `injectedRuntimeEnv` claims `NODE_ENV=test`
+ *
+ * Injected runtime env may ONLY add restrictions (e.g. also deny when the
+ * injected env itself looks like production). It must never loosen a real
+ * process.env production veto.
  *
  * Otherwise ENABLED only when BOTH:
  *   1) runtime profile is exactly `test` or `development`
@@ -39,10 +46,12 @@ export type RankedHttpGateDecision =
 
 export type RankedHttpGateResolveOptions = {
   /**
-   * Actual process environment used for the non-overridable NODE_ENV hard deny.
-   * Defaults to `process.env`. Injected gate config cannot override this check.
+   * Optional injected runtime env that may ONLY tighten denial (P0-FG02).
+   * Never replaces `process.env` for the production veto.
+   * If this env's NODE_ENV is production/prod, deny; if process.env is
+   * production/prod, deny regardless of this value.
    */
-  actualEnv?: NodeJS.ProcessEnv;
+  injectedRuntimeEnv?: NodeJS.ProcessEnv;
 };
 
 function normalizeNodeEnv(value: unknown): string {
@@ -50,8 +59,8 @@ function normalizeNodeEnv(value: unknown): string {
 }
 
 /**
- * Non-overridable production hard deny based on actual NODE_ENV.
- * PZD_RUNTIME_PROFILE and injected rankedHttpGate MUST NOT bypass this.
+ * Production hard deny based on NODE_ENV of the given env object.
+ * Callers that need the non-overridable veto must pass `process.env`.
  */
 export function isNodeEnvProductionHardDeny(
   env: NodeJS.ProcessEnv = process.env,
@@ -62,14 +71,29 @@ export function isNodeEnvProductionHardDeny(
 
 /**
  * Resolve ranked HTTP availability.
- * Always applies NODE_ENV production hard deny before profile/flag checks.
+ *
+ * Order (P0-FG02):
+ * 1) Real `process.env` production veto — non-overridable
+ * 2) Optional injected runtime env — may only add a production deny
+ * 3) Profile / enable-flag checks (fail-closed)
  */
 export function resolveRankedHttpFeatureGate(
   config: RankedHttpGateConfig = rankedHttpGateConfigFromEnv(),
   options: RankedHttpGateResolveOptions = {},
 ): RankedHttpGateDecision {
-  const actualEnv = options.actualEnv ?? process.env;
-  if (isNodeEnvProductionHardDeny(actualEnv)) {
+  // Non-overridable: actual process production always wins.
+  if (isNodeEnvProductionHardDeny(process.env)) {
+    return {
+      enabled: false,
+      denyReason: 'node_env_production_hard_deny',
+    };
+  }
+
+  // Injection may only tighten (deny if injected env looks like production).
+  if (
+    options.injectedRuntimeEnv !== undefined &&
+    isNodeEnvProductionHardDeny(options.injectedRuntimeEnv)
+  ) {
     return {
       enabled: false,
       denyReason: 'node_env_production_hard_deny',

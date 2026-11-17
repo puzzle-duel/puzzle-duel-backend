@@ -27,12 +27,15 @@ export function createInternalSessionHttpHandler(deps: {
   sessions: PostgresVerifiedIdentitySessionStore;
   /** Server-side gate; defaults to env. Never from the request. */
   rankedHttpGate?: RankedHttpGateConfig;
-  /** Actual runtime env for NODE_ENV hard deny (P0-FG01). Defaults to process.env. */
+  /**
+   * Optional injected runtime env — may ONLY tighten denial (P0-FG02).
+   * Never overrides real process.env.NODE_ENV=production|prod.
+   */
   actualRuntimeEnv?: NodeJS.ProcessEnv;
 }) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate, {
-      actualEnv: deps.actualRuntimeEnv ?? process.env,
+      injectedRuntimeEnv: deps.actualRuntimeEnv,
     });
     if (!gate.enabled) {
       send(res, 503, {

@@ -86,8 +86,10 @@ export interface TournamentHttpDeps {
    */
   rankedHttpGate?: RankedHttpGateConfig;
   /**
-   * Actual runtime env for NODE_ENV hard deny. Defaults to `process.env`.
-   * Test harnesses may inject a synthetic env; production omits this.
+   * Optional injected runtime env that may ONLY tighten denial (P0-FG02).
+   * Never overrides a real `process.env.NODE_ENV=production|prod` veto.
+   * Production omits this; harnesses may inject a synthetic production-like
+   * env to force deny, but cannot use NODE_ENV=test to enable under prod.
    */
   actualRuntimeEnv?: NodeJS.ProcessEnv;
 }
@@ -113,10 +115,10 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     // P0 ranked gate: before any JWT verify, session, claim, or gameplay work.
     // Client enable/bypass headers/query/body are intentionally ignored.
-    // P0-FG01: actual NODE_ENV=production hard-denies even if rankedHttpGate
-    // is an injected test/development enable config.
+    // P0-FG01/FG02: real process.env.NODE_ENV=production hard-denies even if
+    // rankedHttpGate or actualRuntimeEnv claim test/development enablement.
     const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate, {
-      actualEnv: deps.actualRuntimeEnv ?? process.env,
+      injectedRuntimeEnv: deps.actualRuntimeEnv,
     });
     if (!gate.enabled) {
       send(res, 503, {
