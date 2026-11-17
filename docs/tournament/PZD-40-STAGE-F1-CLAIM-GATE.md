@@ -1,6 +1,6 @@
 # PZD-40 Stage F1 — Authenticated HTTP and immutable daily claim
 
-Status: **F1 CANDIDATE IMPLEMENTATION — READY FOR INDEPENDENT RE-REVIEW**  
+Status: **F1 CANDIDATE IMPLEMENTATION — READY FOR INDEPENDENT RE-REVIEW** (HEAD `bf95b50e9d07166e52f2f5e991a5a78c86299c79`)  
 (Live Apple/Google provider credentials and Accepted OpenAPI freeze remain BLOCKED.)
 
 Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-40  
