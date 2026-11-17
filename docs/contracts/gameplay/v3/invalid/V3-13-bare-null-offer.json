@@ -1,0 +1,57 @@
+{
+  "id": "V3-13",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Bare null offer",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      null,
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "initial": false,
+  "expected": {
+    "ok": false,
+    "codes": [
+      "null_offer"
+    ]
+  }
+}

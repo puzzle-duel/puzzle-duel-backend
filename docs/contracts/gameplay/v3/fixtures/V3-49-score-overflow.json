@@ -1,0 +1,80 @@
+{
+  "id": "V3-49",
+  "kind": "fullMove",
+  "summary": "Score overflow fails closed",
+  "rulesVersion": "core-001.v3",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "initialState": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 3,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        {
+          "shape": "circle",
+          "direction": "up"
+        },
+        {
+          "shape": "circle",
+          "direction": "up"
+        },
+        null
+      ],
+      [
+        null,
+        null,
+        null
+      ],
+      [
+        null,
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "left"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "up"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "diamond",
+        "direction": "right"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 9007199254740891,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "moves": [
+    {
+      "offerIndex": 0,
+      "tap": [
+        0,
+        2
+      ]
+    }
+  ],
+  "requireInitial": false,
+  "expected": {
+    "ok": false,
+    "result": {
+      "kind": "unsafe",
+      "reason": "score_overflow"
+    }
+  }
+}

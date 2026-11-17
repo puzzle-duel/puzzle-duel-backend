@@ -1,0 +1,55 @@
+{
+  "id": "V3-33",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Spent with future pieces",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "right"
+      }
+    ],
+    "turnsUsed": 1,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "initial": false,
+  "expected": {
+    "ok": false,
+    "codes": [
+      "spent_with_future_pieces"
+    ]
+  }
+}

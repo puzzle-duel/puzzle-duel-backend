@@ -1,0 +1,76 @@
+{
+  "id": "V3-15",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Ended snapshot stable",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      }
+    ],
+    "futurePieces": [],
+    "turnsUsed": 2,
+    "score": 0,
+    "status": "ended",
+    "terminalReason": "no_legal_moves"
+  },
+  "initial": false,
+  "expected": {
+    "ok": true,
+    "state": {
+      "rulesVersion": "core-001.v3",
+      "boardSize": 2,
+      "moveLimit": 5,
+      "blocked": [],
+      "cells": [
+        [
+          null,
+          null
+        ],
+        [
+          null,
+          null
+        ]
+      ],
+      "offers": [
+        {
+          "kind": "spent"
+        },
+        {
+          "kind": "spent"
+        },
+        {
+          "kind": "spent"
+        }
+      ],
+      "futurePieces": [],
+      "turnsUsed": 2,
+      "score": 0,
+      "status": "ended",
+      "terminalReason": "no_legal_moves"
+    },
+    "stateHash": "cc68027a41bb4205974019983e691cf244cfb78ac407fa5d3f7e78456e239ab1"
+  }
+}

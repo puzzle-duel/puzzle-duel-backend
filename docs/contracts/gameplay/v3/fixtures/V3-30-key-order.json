@@ -1,0 +1,58 @@
+{
+  "id": "V3-30",
+  "kind": "hashOnly",
+  "summary": "Canonical key-order independence for GameState",
+  "rulesVersion": "core-001.v3",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "right"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "expected": {
+    "stateHash": "83e936d8f27fc0e54d4c0b2470744f9bf16cc0b1622d97213565f84f7119adec",
+    "canonicalJson": "{\"blocked\":[],\"boardSize\":2,\"cells\":[[null,null],[null,null]],\"futurePieces\":[{\"direction\":\"up\",\"shape\":\"circle\"},{\"direction\":\"left\",\"shape\":\"diamond\"}],\"moveLimit\":5,\"offers\":[{\"direction\":\"right\",\"kind\":\"piece\",\"shape\":\"circle\"},{\"direction\":\"down\",\"kind\":\"piece\",\"shape\":\"diamond\"},{\"direction\":\"left\",\"kind\":\"piece\",\"shape\":\"triangle\"}],\"rulesVersion\":\"core-001.v3\",\"score\":0,\"status\":\"in_progress\",\"terminalReason\":null,\"turnsUsed\":0}"
+  }
+}

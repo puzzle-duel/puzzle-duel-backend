@@ -1,0 +1,58 @@
+{
+  "id": "V3-23",
+  "kind": "fullMove",
+  "summary": "Post-terminal in-bounds tap \u2192 game_ended",
+  "rulesVersion": "core-001.v3",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "initialState": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 1,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        {
+          "shape": "circle",
+          "direction": "right"
+        }
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [],
+    "turnsUsed": 1,
+    "score": 0,
+    "status": "ended",
+    "terminalReason": "no_legal_moves"
+  },
+  "moves": [
+    {
+      "offerIndex": 1,
+      "tap": [
+        0,
+        0
+      ]
+    }
+  ],
+  "requireInitial": false,
+  "expected": {
+    "ok": false,
+    "result": {
+      "kind": "rejected",
+      "code": "game_ended"
+    }
+  }
+}

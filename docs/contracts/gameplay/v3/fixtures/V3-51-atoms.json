@@ -1,0 +1,56 @@
+{
+  "id": "V3-51",
+  "kind": "hashOnly",
+  "summary": "Independent CV-01\u202609 atom digests",
+  "rulesVersion": "core-001.v3",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "expected": {
+    "atoms": [
+      {
+        "id": "CV-01",
+        "canonicalJson": "{}",
+        "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      {
+        "id": "CV-02",
+        "canonicalJson": "{\"kind\":\"spent\"}",
+        "sha256": "684ab5937663746640cb17fa8b29254454be394376269cdaeca1743a7577fa82"
+      },
+      {
+        "id": "CV-03",
+        "canonicalJson": "{\"direction\":\"up\",\"kind\":\"piece\",\"shape\":\"circle\"}",
+        "sha256": "1f18d4b9a43e29c7a72d1309f531088c32d792d4e6a31a9a7194637676916186"
+      },
+      {
+        "id": "CV-04",
+        "canonicalJson": "null",
+        "sha256": "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
+      },
+      {
+        "id": "CV-05",
+        "canonicalJson": "0",
+        "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+      },
+      {
+        "id": "CV-06",
+        "canonicalJson": "900",
+        "sha256": "bdc5d8a48c23897906b09a9a3680bd2e9c8b3121edbda36f949800f0959c8d55"
+      },
+      {
+        "id": "CV-07",
+        "canonicalJson": "\"ended\"",
+        "sha256": "0f27529487e95082cf0bd9f021be1ede2adc650b34db2ba96235d8805ad49bb3"
+      },
+      {
+        "id": "CV-08",
+        "canonicalJson": "\"a\\\"b\"",
+        "sha256": "8bbcb681750af483258c5ca72e83c5c397bf66aa01e7c7787c0d212fc1f6fa1d"
+      },
+      {
+        "id": "CV-09",
+        "canonicalJson": "\"a\\\\b\"",
+        "sha256": "d6b4439bd2d0fecbb8aeb27d4370b0354683ea72adc84cca99b5fe80aa0b62d0"
+      }
+    ]
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "id": "V3-27",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Extra piece property",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        {
+          "shape": "circle",
+          "direction": "right",
+          "x": 1
+        },
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "right"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "initial": false,
+  "expected": {
+    "ok": false,
+    "codes": [
+      "unexpected_property"
+    ]
+  }
+}
