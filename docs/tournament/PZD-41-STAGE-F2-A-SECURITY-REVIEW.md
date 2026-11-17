@@ -60,6 +60,13 @@ Original 20 adversarial claim/integrity cases preserved.
 - U-F2A-05 TD-15 pagination (Proposed in ADR-T02)
 - U-F2A-06 retention
 
+## Commit / CI
+
+- Commit SHA: `93c4786ae91ff4f6917f78fd1223578d8df37d72`
+- quality-gate: https://github.com/puzzle-duel/puzzle-duel-backend/actions/runs/44178442053
+- stage-e-pg: https://github.com/puzzle-duel/puzzle-duel-backend/actions/runs/44178442031
+- generator-parity: https://github.com/puzzle-duel/puzzle-duel-backend/actions/runs/44178442276
+
 ## Hard restrictions observed
 
 Draft PR only; no merge/deploy; PZD-41 not Done; no F2-B implementation beyond table shape; PZD-40 untouched.
