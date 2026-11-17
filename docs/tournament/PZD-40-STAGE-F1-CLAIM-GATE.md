@@ -1,11 +1,12 @@
 # PZD-40 Stage F1 — Authenticated HTTP and immutable daily claim
 
-Status: **PZD-40 F1 — READY FOR INDEPENDENT SECURITY RE-REVIEW**  
-(Live Apple/Google provider credentials and Accepted OpenAPI freeze remain BLOCKED.)
+Status: **PZD-40 F1 — READY FOR INDEPENDENT FEATURE-GATE REVIEW**  
+(Owner Option A: candidate merge only behind production-disabled ranked HTTP gate. Live Apple/Google credentials, Accepted OpenAPI, deploy, and Jira Done remain BLOCKED.)
 
 Jira: https://puzzle-duel-app.atlassian.net/browse/PZD-40  
 Draft PR: https://github.com/puzzle-duel/puzzle-duel-backend/pull/19  
 Branch: `feature/PZD-40-stage-f1-verified-claim-foundation`  
+Feature gate: [PZD-40-RANKED-HTTP-FEATURE-GATE.md](./PZD-40-RANKED-HTTP-FEATURE-GATE.md)  
 Prior remediation HEAD: `fb71c28950ea171969408859c96ea5bc383f40e7`  
 Re-review: https://github.com/puzzle-duel/puzzle-duel-backend/pull/19#pullrequestreview-5943414691
 
@@ -41,6 +42,10 @@ Re-review: https://github.com/puzzle-duel/puzzle-duel-backend/pull/19#pullreques
 
 SKIP never counted as PASS. Prior 26 auth cases retained; +12 P1-R01..R03 integrity proofs.
 
+## P0 ranked HTTP feature gate (owner comment 10364)
+
+Server-side default-deny gate (`ranked-feature-gate.mts`) wraps `/v1/tournament/*` and `/internal/tournament/session` **before** JWT/session/claim/gameplay. Production cannot enable. See [PZD-40-RANKED-HTTP-FEATURE-GATE.md](./PZD-40-RANKED-HTTP-FEATURE-GATE.md).
+
 ## Remaining BLOCKED / NOT_RUN
 
 - Live Apple/Google OIDC credentials, JWKS fetch, PKCE
@@ -51,4 +56,4 @@ SKIP never counted as PASS. Prior 26 auth cases retained; +12 P1-R01..R03 integr
 
 ## Gate
 
-Do not merge/deploy or mark PZD-40 Done. ADR-T01 remains Proposed. ADR-T02 unchanged. **PZD-40 blocks PZD-41**.
+Conditional candidate merge only with production-disabled ranked HTTP gate verified. **Do not deploy or mark PZD-40 Done.** ADR-T01 remains Proposed. ADR-T02 unchanged. **PZD-40 blocks PZD-41**.

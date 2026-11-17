@@ -13,6 +13,7 @@ import { PinnedRs256JwtVerifier } from '../../../src/tournament/auth/pinned-jwt-
 import { PostgresVerifiedIdentitySessionStore } from '../../../src/tournament/auth/postgres-verified-sessions.mts';
 import { PostgresSeriesWriterStore } from '../../../src/tournament/auth/series-writer-binding.mts';
 import { createTournamentHttpHandler } from '../../../src/tournament/auth/tournament-http.mts';
+import { explicitTestRankedHttpGateConfig } from '../../../src/tournament/auth/ranked-feature-gate.mts';
 import { AtomicDailyClaimBootstrap } from '../../../src/tournament/claims/atomic-claim-bootstrap.mts';
 import {
   digestManifestPayload,
@@ -139,6 +140,8 @@ async function boot() {
     writers,
     fence,
     pool,
+    // Candidate ranked HTTP enabled only via explicit test gate — never production.
+    rankedHttpGate: explicitTestRankedHttpGateConfig(),
     gameplayForSession: (gateway: SessionAuthorizationGateway) =>
       new TrustedGameplayService({
         journal,

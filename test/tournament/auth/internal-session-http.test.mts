@@ -6,6 +6,7 @@ import pg from 'pg';
 import { PinnedRs256JwtVerifier } from '../../../src/tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../../../src/tournament/auth/postgres-verified-sessions.mts';
 import { createInternalSessionHttpHandler } from '../../../src/tournament/auth/internal-session-http.mts';
+import { explicitTestRankedHttpGateConfig } from '../../../src/tournament/auth/ranked-feature-gate.mts';
 
 const url=process.env.PZD_INGRESS_DATABASE_URL;
 assert.ok(url,'PostgreSQL required for HTTP auth integration');
@@ -29,7 +30,11 @@ async function fixture() {
  await pool.query('DROP TABLE IF EXISTS tournament_verified_identity');
  const sessions=new PostgresVerifiedIdentitySessionStore(pool);
  await sessions.migrate();
- const handler=createInternalSessionHttpHandler({sessions,verifier});
+ const handler=createInternalSessionHttpHandler({
+  sessions,
+  verifier,
+  rankedHttpGate: explicitTestRankedHttpGateConfig(),
+ });
  const server=createServer((req,res)=>{void handler(req,res);});
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
  const address=server.address();

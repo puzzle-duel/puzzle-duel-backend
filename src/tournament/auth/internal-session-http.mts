@@ -7,20 +7,36 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { JwtVerificationError, type PinnedRs256JwtVerifier } from './pinned-jwt-verifier.mts';
 import type { PostgresVerifiedIdentitySessionStore } from './postgres-verified-sessions.mts';
+import {
+  RANKED_HTTP_DISABLED_ERROR,
+  resolveRankedHttpFeatureGate,
+  type RankedHttpGateConfig,
+} from './ranked-feature-gate.mts';
 
 function send(res: ServerResponse, status: number, data: unknown) {
+  const body = status === 204 ? '' : JSON.stringify(data);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
   });
-  res.end(JSON.stringify(data));
+  res.end(body);
 }
 export function createInternalSessionHttpHandler(deps: {
   verifier: PinnedRs256JwtVerifier;
   sessions: PostgresVerifiedIdentitySessionStore;
+  /** Server-side gate; defaults to env. Never from the request. */
+  rankedHttpGate?: RankedHttpGateConfig;
 }) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate);
+    if (!gate.enabled) {
+      send(res, 503, {
+        error: RANKED_HTTP_DISABLED_ERROR,
+        reason: gate.denyReason,
+      });
+      return;
+    }
     if (req.url !== '/internal/tournament/session' ||
         !['POST','GET','DELETE'].includes(req.method ?? '')) {
       send(res,404,{error:'NOT_FOUND'});

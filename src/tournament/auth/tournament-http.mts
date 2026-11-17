@@ -21,6 +21,11 @@ import type { TrustedGameplayService } from '../adjudication/trusted-gameplay.mt
 import { validateUntrustedClientCommand } from '../adjudication/client-commands.mts';
 import type { SeriesFenceStore } from '../ingress/series-fence.mts';
 import type pg from 'pg';
+import {
+  RANKED_HTTP_DISABLED_ERROR,
+  resolveRankedHttpFeatureGate,
+  type RankedHttpGateConfig,
+} from './ranked-feature-gate.mts';
 
 const MAX_BODY = 16_384;
 
@@ -74,6 +79,11 @@ export interface TournamentHttpDeps {
     maxPerWindow: number;
     windowMs: number;
   };
+  /**
+   * Server-side ranked HTTP gate config. Defaults to process env.
+   * Never derived from request headers/query/body.
+   */
+  rankedHttpGate?: RankedHttpGateConfig;
 }
 
 type RateBucket = { count: number; resetAt: number };
@@ -95,6 +105,17 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
   }
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    // P0 ranked gate: before any JWT verify, session, claim, or gameplay work.
+    // Client enable/bypass headers/query/body are intentionally ignored.
+    const gate = resolveRankedHttpFeatureGate(deps.rankedHttpGate);
+    if (!gate.enabled) {
+      send(res, 503, {
+        error: RANKED_HTTP_DISABLED_ERROR,
+        reason: gate.denyReason,
+      });
+      return;
+    }
+
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const path = url.pathname;
     const method = req.method ?? 'GET';
