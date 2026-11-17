@@ -4,6 +4,7 @@ Status: **STAGE D — BLOCKED** (executable subset verified; full catalogue free
 Date: 2026-11-17
 Jira: [PZD-39](https://puzzle-duel-app.atlassian.net/browse/PZD-39)
 Branch: `feature/PZD-39-core001v3-golden-parity`
+Stage D HEAD: `3c90532b5247bd7ec168cc432ba880bb27cecb76`
 Base: `feature/PZD-39-core001v3-ts-replay` @ `25efb2473f3517027769ee978b31ab6e3dc41030`
 
 ## Engine / toolchain pins
