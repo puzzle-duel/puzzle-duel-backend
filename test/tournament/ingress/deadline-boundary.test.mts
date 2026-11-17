@@ -10,26 +10,13 @@ import {
   isTimely,
   type SeriesFenceState,
 } from '../../../src/tournament/ingress/types.mts';
-
-const T0 = new Date('2026-11-16T12:00:00.000Z');
+import { T0, baseFence, fixedMoveEffect } from './test-helpers.mts';
 
 function seed(
   fence: MemorySeriesFenceStore,
   overrides: Partial<SeriesFenceState> = {},
 ): Promise<void> {
-  const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-  return fence.put({
-    seriesKey: 's1',
-    boardRevision: 0,
-    writerGeneration: 1,
-    status: 'ACTIVE',
-    idleDeadlineAt,
-    hardCutoffAt: null,
-    score: 0,
-    resultsPublished: false,
-    lastAppliedAdmissionId: null,
-    ...overrides,
-  });
+  return fence.put(baseFence('s1', overrides));
 }
 
 describe('PZD-38 Gate A — deadline boundaries', () => {
@@ -57,13 +44,34 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     assert.equal(applyThinkingExtension(idle, 60_001, null), null);
   });
 
+  it('P1-02: applyThinkingExtension caps at hard cutoff and rejects outside window', () => {
+    const idle = new Date(T0.getTime() + 30_000);
+    const hard = new Date(idle.getTime() + 30_000); // 30s after idle
+    const capped = applyThinkingExtension(idle, 30_000, hard);
+    assert.ok(capped);
+    assert.equal(capped!.getTime(), hard.getTime());
+
+    assert.equal(applyThinkingExtension(idle, 60_000, hard)?.getTime(), hard.getTime());
+    assert.equal(applyThinkingExtension(idle, 60_001, hard), null);
+    // remaining=1 is eligible, but +60s still exceeds hard → capped
+    assert.equal(applyThinkingExtension(idle, 1, hard)?.getTime(), hard.getTime());
+    assert.equal(applyThinkingExtension(idle, 0, hard), null);
+    // Without hard cutoff, remaining=1 extends fully.
+    assert.equal(
+      applyThinkingExtension(idle, 1, null)?.getTime(),
+      idle.getTime() + 60_000,
+    );
+  });
+
   it('predeadline admit + postdeadline adjudication still eligible', async () => {
     const clock = new ControllableClock(T0);
     const journal = new MemoryAdmissionJournal({ clock });
     const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
     await seed(fence, { idleDeadlineAt });
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: fixedMoveEffect(10),
+    });
 
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
 
@@ -76,7 +84,6 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
         payloadHash: 'h1',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 10,
       },
       {
         afterAdmit: async () => {
@@ -102,7 +109,9 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
     await seed(fence, { idleDeadlineAt });
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: fixedMoveEffect(1),
+    });
     clock.set(idleDeadlineAt);
 
     const result = await arbiter.admitAndEvaluate({
@@ -127,7 +136,9 @@ describe('PZD-38 Gate A — deadline boundaries', () => {
     const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
     await seed(fence, { idleDeadlineAt });
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: fixedMoveEffect(1),
+    });
 
     const result = await arbiter.admitAndEvaluate({
       seriesKey: 's1',

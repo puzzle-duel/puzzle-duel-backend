@@ -5,37 +5,36 @@ import { MemoryAdmissionJournal } from '../../../src/tournament/ingress/journal.
 import { MemorySeriesFenceStore } from '../../../src/tournament/ingress/series-fence.mts';
 import { SeriesCommandArbiter } from '../../../src/tournament/ingress/arbiter.mts';
 import { idleDeadlineFrom } from '../../../src/tournament/ingress/types.mts';
+import {
+  T0,
+  baseFence,
+  moveEffectsByKey,
+  fixedMoveEffect,
+} from './test-helpers.mts';
 
-const T0 = new Date('2026-11-16T12:00:00.000Z');
-
-async function setup() {
+async function setup(resolver = fixedMoveEffect(0)) {
   const clock = new ControllableClock(T0);
   const journal = new MemoryAdmissionJournal({ clock });
   const fence = new MemorySeriesFenceStore();
   const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-  await fence.put({
-    seriesKey: 's1',
-    boardRevision: 0,
-    writerGeneration: 1,
-    status: 'ACTIVE',
-    idleDeadlineAt,
-    hardCutoffAt: null,
-    score: 0,
-    resultsPublished: false,
-    lastAppliedAdmissionId: null,
-  });
+  await fence.put(baseFence('s1', { idleDeadlineAt }));
   return {
     clock,
     journal,
     fence,
     idleDeadlineAt,
-    arbiter: new SeriesCommandArbiter(journal, fence),
+    arbiter: new SeriesCommandArbiter(journal, fence, { resolveMoveEffect: resolver }),
   };
 }
 
 describe('PZD-38 Gate A — concurrency fences', () => {
   it('Case A: two distinct moves at same revision => one apply, one STATE_CONFLICT, one score', async () => {
-    const { arbiter, fence } = await setup();
+    const { arbiter, fence } = await setup(
+      moveEffectsByKey({
+        'm-a': { scoreDelta: 5 },
+        'm-b': { scoreDelta: 9 },
+      }),
+    );
     const [a, b] = await Promise.all([
       arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -45,7 +44,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
         payloadHash: 'ha',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 5,
       }),
       arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -55,7 +53,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
         payloadHash: 'hb',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 9,
       }),
     ]);
 
@@ -70,12 +67,11 @@ describe('PZD-38 Gate A — concurrency fences', () => {
     }
     const state = await fence.get('s1');
     assert.equal(state!.boardRevision, 1);
-    assert.equal(state!.score, applied.decision === 'apply' ? applied.state.score : -1);
     assert.ok(state!.score === 5 || state!.score === 9);
   });
 
   it('Case B: concurrent duplicate idempotency => one logical apply, no double score', async () => {
-    const { arbiter, fence } = await setup();
+    const { arbiter, fence } = await setup(fixedMoveEffect(3));
     const results = await Promise.all([
       arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -85,7 +81,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
         payloadHash: 'h',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 3,
       }),
       arbiter.admitAndEvaluate({
         seriesKey: 's1',
@@ -95,7 +90,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
         payloadHash: 'h',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 3,
       }),
     ]);
 
@@ -106,7 +100,9 @@ describe('PZD-38 Gate A — concurrency fences', () => {
   });
 
   it('Case C: expiry worker cannot forfeit while timely pending move exists', async () => {
-    const { clock, journal, arbiter, idleDeadlineAt } = await setup();
+    const { clock, journal, arbiter, idleDeadlineAt } = await setup(
+      fixedMoveEffect(1),
+    );
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     await journal.admit({
       seriesKey: 's1',
@@ -116,15 +112,16 @@ describe('PZD-38 Gate A — concurrency fences', () => {
       payloadHash: 'h',
       expectedBoardRevision: 0,
       writerGeneration: 1,
-      scoreDelta: 1,
     });
     clock.set(new Date(idleDeadlineAt.getTime() + 1));
     const attempt = await arbiter.tryForfeitForInactivity('s1');
     assert.equal(attempt.ok, false);
   });
 
-  it('Case D: timely H1 completes once; timeout cannot overwrite COMPLETED', async () => {
-    const { clock, arbiter, fence, idleDeadlineAt } = await setup();
+  it('Case D: timely H1 completes once; timeout cannot overwrite COMPLETED; no publish', async () => {
+    const { clock, arbiter, fence, idleDeadlineAt } = await setup(
+      fixedMoveEffect(100, true),
+    );
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     const done = await arbiter.admitAndEvaluate(
       {
@@ -135,8 +132,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
         payloadHash: 'h1',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 100,
-        completesSeries: true,
       },
       {
         afterAdmit: async () => {
@@ -147,17 +142,17 @@ describe('PZD-38 Gate A — concurrency fences', () => {
     assert.equal(done.decision, 'apply');
     if (done.decision === 'apply') {
       assert.equal(done.state.status, 'COMPLETED');
-      assert.equal(done.state.resultsPublished, true);
+      assert.equal(done.state.resultsPublished, false);
     }
     const forfeit = await arbiter.tryForfeitForInactivity('s1');
     assert.equal(forfeit.ok, false);
     const state = await fence.get('s1');
     assert.equal(state!.status, 'COMPLETED');
-    assert.equal(state!.resultsPublished, true);
+    assert.equal(state!.resultsPublished, false);
   });
 
   it('Case E: handoff fences old writer; handoff does not refresh idle deadline', async () => {
-    const { arbiter, fence, idleDeadlineAt } = await setup();
+    const { arbiter, fence, idleDeadlineAt } = await setup(fixedMoveEffect(50));
     const before = (await fence.get('s1'))!.idleDeadlineAt.getTime();
     const handoff = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -181,7 +176,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
       payloadHash: 'old',
       expectedBoardRevision: 0,
       writerGeneration: 1,
-      scoreDelta: 50,
     });
     assert.equal(stale.decision, 'reject');
     if (stale.decision === 'reject') {
@@ -200,7 +194,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
       commandType: 'move',
       idempotencyKey: 'week-h1',
       payloadHash: 'h',
-      completesSeries: true,
     });
     clock.set(new Date(mondayCutoff.getTime() + 60_000));
     const barrier = await arbiter.canSafelyFinalizeWeekly(
@@ -209,8 +202,6 @@ describe('PZD-38 Gate A — concurrency fences', () => {
     );
     assert.equal(barrier.allowed, false);
     assert.equal(barrier.blocking.length, 1);
-    // Independent idle watermark: this admission is after idle deadline, so
-    // inactivity forfeit barrier is not blocked by it (weekly barrier still is).
     assert.equal(
       (await arbiter.canSafelyForfeit('s1', idleDeadlineAt)).allowed,
       true,

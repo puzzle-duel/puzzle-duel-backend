@@ -5,27 +5,19 @@ import { MemoryAdmissionJournal } from '../../../src/tournament/ingress/journal.
 import { MemorySeriesFenceStore } from '../../../src/tournament/ingress/series-fence.mts';
 import { SeriesCommandArbiter } from '../../../src/tournament/ingress/arbiter.mts';
 import { idleDeadlineFrom } from '../../../src/tournament/ingress/types.mts';
-
-const T0 = new Date('2026-11-16T12:00:00.000Z');
+import { T0, baseFence, fixedMoveEffect } from './test-helpers.mts';
 
 async function ready(
   clock: ControllableClock,
   journal: MemoryAdmissionJournal,
   fence: MemorySeriesFenceStore,
   idleDeadlineAt = idleDeadlineFrom(T0, 300),
+  scoreDelta = 0,
 ) {
-  await fence.put({
-    seriesKey: 's1',
-    boardRevision: 0,
-    writerGeneration: 1,
-    status: 'ACTIVE',
-    idleDeadlineAt,
-    hardCutoffAt: null,
-    score: 0,
-    resultsPublished: false,
-    lastAppliedAdmissionId: null,
+  await fence.put(baseFence('s1', { idleDeadlineAt }));
+  return new SeriesCommandArbiter(journal, fence, {
+    resolveMoveEffect: fixedMoveEffect(scoreDelta),
   });
-  return new SeriesCommandArbiter(journal, fence);
 }
 
 describe('PZD-38 Gate A — durability and fault injection', () => {
@@ -181,18 +173,10 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     const recovered = new MemoryAdmissionJournal({ clock });
     recovered.restoreSnapshot(snap);
     const recoveredFence = new MemorySeriesFenceStore();
-    await recoveredFence.put({
-      seriesKey: 's1',
-      boardRevision: 0,
-      writerGeneration: 1,
-      status: 'ACTIVE',
-      idleDeadlineAt,
-      hardCutoffAt: null,
-      score: 0,
-      resultsPublished: false,
-    lastAppliedAdmissionId: null,
+    await recoveredFence.put(baseFence('s1', { idleDeadlineAt }));
+    const arbiter = new SeriesCommandArbiter(recovered, recoveredFence, {
+      resolveMoveEffect: fixedMoveEffect(0),
     });
-    const arbiter = new SeriesCommandArbiter(recovered, recoveredFence);
     const barrier = await arbiter.canSafelyForfeit('s1', idleDeadlineAt);
     assert.equal(barrier.allowed, false);
 
@@ -218,7 +202,7 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     const journal = new MemoryAdmissionJournal({ clock });
     const fence = new MemorySeriesFenceStore();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-    const arbiter = await ready(clock, journal, fence, idleDeadlineAt);
+    const arbiter = await ready(clock, journal, fence, idleDeadlineAt, 7);
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
     const first = await arbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -228,7 +212,6 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
       payloadHash: 'h',
       expectedBoardRevision: 0,
       writerGeneration: 1,
-      scoreDelta: 7,
     });
     assert.equal(first.decision, 'apply');
     const snap = journal.snapshot();
@@ -242,6 +225,7 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
     const recoveredArbiter = new SeriesCommandArbiter(
       recoveredJournal,
       recoveredFence,
+      { resolveMoveEffect: fixedMoveEffect(7) },
     );
     const again = await recoveredArbiter.admitAndEvaluate({
       seriesKey: 's1',
@@ -251,7 +235,6 @@ describe('PZD-38 Gate A — durability and fault injection', () => {
       payloadHash: 'h',
       expectedBoardRevision: 0,
       writerGeneration: 1,
-      scoreDelta: 7,
     });
     assert.equal(again.decision, 'apply');
     if (again.decision === 'apply' && first.decision === 'apply') {

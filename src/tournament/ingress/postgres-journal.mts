@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import type { IngressClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
+import { seriesAdvisoryKeys } from './series-fence.mts';
 import type {
   AdmitCommandInput,
   AdmitResult,
@@ -23,6 +24,8 @@ CREATE TABLE IF NOT EXISTS command_admission_journal (
   outcome TEXT NOT NULL DEFAULT 'pending',
   expected_board_revision BIGINT NULL,
   writer_generation BIGINT NULL,
+  -- Legacy columns retained for migration compatibility; Phase A never
+  -- authorizes client score/completion (always NULL/FALSE on insert).
   score_delta BIGINT NULL,
   completes_series BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -35,10 +38,7 @@ CREATE INDEX IF NOT EXISTS command_admission_journal_pending_idx
   WHERE outcome = 'pending';
 `;
 
-function seriesAdvisoryKeys(seriesKey: string): [number, number] {
-  const digest = createHash('sha256').update(seriesKey).digest();
-  return [digest.readInt32BE(0), digest.readInt32BE(4)];
-}
+export { seriesAdvisoryKeys };
 
 /**
  * PostgreSQL-backed durable ingress journal.
@@ -108,7 +108,7 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
            idempotency_key, payload_hash, trusted_received_at_ms,
            admission_seq, outcome, expected_board_revision, writer_generation,
            score_delta, completes_series
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,$11,$12)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,NULL,FALSE)`,
         [
           admissionId,
           input.seriesKey,
@@ -120,8 +120,6 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
           admissionSeq,
           input.expectedBoardRevision ?? null,
           input.writerGeneration ?? null,
-          input.scoreDelta ?? null,
-          input.completesSeries ?? false,
         ],
       );
 
@@ -140,8 +138,6 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
           status: 'admitted',
           expectedBoardRevision: input.expectedBoardRevision,
           writerGeneration: input.writerGeneration,
-          scoreDelta: input.scoreDelta,
-          completesSeries: input.completesSeries,
         },
         outcome: 'pending',
       };
@@ -243,6 +239,24 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
     return (res.rowCount ?? 0) > 0;
   }
 
+  /**
+   * Count eligible pending rows using an existing connection (for atomic forfeit).
+   */
+  async countEligiblePendingOn(
+    db: pg.Pool | pg.PoolClient,
+    seriesKey: string,
+    cutoffExclusive: Date,
+  ): Promise<number> {
+    const res = await db.query(
+      `SELECT COUNT(*)::int AS c FROM command_admission_journal
+       WHERE series_key = $1
+         AND outcome = 'pending'
+         AND trusted_received_at_ms < $2`,
+      [seriesKey, cutoffExclusive.getTime()],
+    );
+    return Number(res.rows[0].c);
+  }
+
   #map(row: Record<string, unknown>): AdmittedCommand {
     return {
       admissionId: String(row.admission_id),
@@ -262,8 +276,6 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
         row.writer_generation == null
           ? undefined
           : Number(row.writer_generation),
-      scoreDelta: row.score_delta == null ? undefined : Number(row.score_delta),
-      completesSeries: Boolean(row.completes_series),
     };
   }
 }

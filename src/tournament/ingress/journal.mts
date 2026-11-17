@@ -134,6 +134,7 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
       const admissionSeq = (this.#seqBySeries.get(input.seriesKey) ?? 0) + 1;
       this.#seqBySeries.set(input.seriesKey, admissionSeq);
 
+      // P1-04: never persist client scoreDelta / completesSeries.
       const command: Stored = {
         admissionId: randomUUID(),
         seriesKey: input.seriesKey,
@@ -147,8 +148,6 @@ export class MemoryAdmissionJournal implements AdmissionJournal {
         outcome: 'pending',
         expectedBoardRevision: input.expectedBoardRevision,
         writerGeneration: input.writerGeneration,
-        scoreDelta: input.scoreDelta,
-        completesSeries: input.completesSeries,
       };
       this.#byId.set(command.admissionId, command);
       this.#byIdempotency.set(idemKey, command.admissionId);

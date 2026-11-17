@@ -6,12 +6,16 @@ import { PostgresAdmissionJournal } from '../../../src/tournament/ingress/postgr
 import { PostgresSeriesFenceStore } from '../../../src/tournament/ingress/series-fence.mts';
 import { SeriesCommandArbiter } from '../../../src/tournament/ingress/arbiter.mts';
 import { idleDeadlineFrom } from '../../../src/tournament/ingress/types.mts';
+import {
+  T0,
+  baseFence,
+  fixedMoveEffect,
+  moveEffectsByKey,
+} from './test-helpers.mts';
 
 const DATABASE_URL =
   process.env.PZD_INGRESS_DATABASE_URL ??
   'postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress';
-
-const T0 = new Date('2026-11-16T12:00:00.000Z');
 
 async function connectOrSkip(t: { skip: (msg?: string) => void }) {
   const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 8 });
@@ -25,6 +29,11 @@ async function connectOrSkip(t: { skip: (msg?: string) => void }) {
   return pool;
 }
 
+async function reset(pool: pg.Pool) {
+  await pool.query('DROP TABLE IF EXISTS command_admission_journal');
+  await pool.query('DROP TABLE IF EXISTS series_fence_state');
+}
+
 describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
   it('admits predeadline H1, survives delayed commit past deadline', async (t) => {
     const pool = await connectOrSkip(t);
@@ -33,25 +42,16 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     const clock = new ControllableClock(T0);
     const journal = new PostgresAdmissionJournal(pool, clock);
     const fence = new PostgresSeriesFenceStore(pool);
-    await pool.query('DROP TABLE IF EXISTS command_admission_journal');
-    await pool.query('DROP TABLE IF EXISTS series_fence_state');
+    await reset(pool);
     await journal.migrate();
     await fence.migrate();
 
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-    await fence.put({
-      seriesKey: 'pg-s1',
-      boardRevision: 0,
-      writerGeneration: 1,
-      status: 'ACTIVE',
-      idleDeadlineAt,
-      hardCutoffAt: null,
-      score: 0,
-      resultsPublished: false,
-    lastAppliedAdmissionId: null,
-    });
+    await fence.put(baseFence('pg-s1', { idleDeadlineAt }));
     clock.set(new Date(idleDeadlineAt.getTime() - 1));
-    const arbiter = new SeriesCommandArbiter(journal, fence);
+    const arbiter = new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: fixedMoveEffect(42, true),
+    });
 
     const result = await arbiter.admitAndEvaluate(
       {
@@ -62,8 +62,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
         payloadHash: 'h1',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 42,
-        completesSeries: true,
       },
       {
         afterAdmit: async () => {
@@ -75,7 +73,7 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     assert.equal(result.decision, 'apply');
     if (result.decision === 'apply') {
       assert.equal(result.state.status, 'COMPLETED');
-      assert.equal(result.state.resultsPublished, true);
+      assert.equal(result.state.resultsPublished, false);
       assert.equal(
         result.command.trustedReceivedAt.getTime(),
         idleDeadlineAt.getTime() - 1,
@@ -90,8 +88,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
       payloadHash: 'h1',
       expectedBoardRevision: 0,
       writerGeneration: 1,
-      scoreDelta: 42,
-      completesSeries: true,
     });
     assert.equal(again.decision, 'apply');
     if (again.decision === 'apply' && result.decision === 'apply') {
@@ -161,7 +157,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.reason, 'INGRESS_UNAVAILABLE');
     await bad.end();
-    // Silence unused skip helper when DB is up for other tests.
     void t;
   });
 
@@ -173,8 +168,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     await pool.query('DROP TABLE IF EXISTS command_admission_journal');
     await journal.migrate();
 
-    // Force failure after migrate by admitting with a broken connection mid-flight:
-    // close pool then attempt admit => INGRESS_UNAVAILABLE and no recoverable row.
     await pool.end();
     const deadPool = new pg.Pool({
       connectionString: 'postgresql://pzd:pzd@127.0.0.1:1/nope',
@@ -205,23 +198,17 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
     const clock = new ControllableClock(T0);
     const journal = new PostgresAdmissionJournal(pool, clock);
     const fence = new PostgresSeriesFenceStore(pool);
-    await pool.query('DROP TABLE IF EXISTS command_admission_journal');
-    await pool.query('DROP TABLE IF EXISTS series_fence_state');
+    await reset(pool);
     await journal.migrate();
     await fence.migrate();
     const idleDeadlineAt = idleDeadlineFrom(T0, 300);
-    await fence.put({
-      seriesKey: 'pg-cas',
-      boardRevision: 0,
-      writerGeneration: 1,
-      status: 'ACTIVE',
-      idleDeadlineAt,
-      hardCutoffAt: null,
-      score: 0,
-      resultsPublished: false,
-    lastAppliedAdmissionId: null,
+    await fence.put(baseFence('pg-cas', { idleDeadlineAt }));
+    const arbiter = new SeriesCommandArbiter(journal, fence, {
+      resolveMoveEffect: moveEffectsByKey({
+        a: { scoreDelta: 2 },
+        b: { scoreDelta: 4 },
+      }),
     });
-    const arbiter = new SeriesCommandArbiter(journal, fence);
     const [a, b] = await Promise.all([
       arbiter.admitAndEvaluate({
         seriesKey: 'pg-cas',
@@ -231,7 +218,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
         payloadHash: 'ha',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 2,
       }),
       arbiter.admitAndEvaluate({
         seriesKey: 'pg-cas',
@@ -241,7 +227,6 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
         payloadHash: 'hb',
         expectedBoardRevision: 0,
         writerGeneration: 1,
-        scoreDelta: 4,
       }),
     ]);
     const decisions = [a.decision, b.decision].sort();
