@@ -49,7 +49,7 @@ describe('PZD-40 cryptographically verified JWT, fail-closed', () => {
     for (const claims of [{ ...payload, iss: 'https://evil.test' }, { ...payload, aud: 'different-api' }, { ...payload, aud: [config.audience] }, { ...payload, sub: '' }, { ...payload, sub: '   ' }]) rejects(jwt(claims));
   });
   it('rejects expired, future nbf, future iat, stale and missing exp', () => {
-    for (const claims of [{ ...payload, exp: now }, { ...payload, nbf: now + 1 }, { ...payload, iat: now + 1 }, { ...payload, iat: now - 4000 }, { ...payload, exp: undefined }, { ...payload, exp: 1.2 }]) rejects(jwt(claims));
+    for (const claims of [{ ...payload, exp: now }, { ...payload, nbf: now + 1 }, { ...payload, iat: now + 1 }, { ...payload, iat: now - 4000 }, { ...payload, exp: undefined }, { ...payload, exp: 1.2 }, { ...payload, exp: now + 7200 }]) rejects(jwt(claims));
   });
   it('rejects header crit extensions and extra Bearer text', () => {
     rejects(jwt(payload, { alg:'RS256', kid:config.keyId, crit:['exp'] }));
