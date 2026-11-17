@@ -44,19 +44,52 @@ export type ReplayFailure = Readonly<{
 export type ReplayResult = ReplaySuccess | ReplayFailure;
 
 export type ReplayInput = Readonly<{
-  /** Trusted immutable initial challenge (caller-authenticated). */
+  /**
+   * Starting snapshot for deterministic transition replay.
+   *
+   * Default path (`allowNonInitialTrustedSnapshot` unset/false) requires a
+   * valid **initial challenge** via `parseInitialGameState`.
+   *
+   * The engine never authenticates this value. Tournament callers (PZD-38)
+   * must supply a challenge/checkpoint already bound to server-side trust
+   * (identity, entitlement, authenticated checkpoint ledger). Passing JSON
+   * from the client here does not make it trusted.
+   */
   initialState: unknown;
   /** Ordered accepted move inputs. */
   moves: readonly unknown[];
   /** Explicit pinned rules version. */
   rulesVersion?: string;
-  /** When true, require parseInitialGameState invariants. Default true. */
+  /**
+   * When true, parse `initialState` with `parseGameState` (non-initial
+   * snapshots allowed structurally).
+   *
+   * **This flag is not checkpoint authentication.** It only relaxes initial
+   * challenge invariants for callers that already authenticated a snapshot
+   * out-of-band (future PZD-38). Stage C provides no such proof. Prefer the
+   * default (`false` / omitted) for trusted challenge + move ledger replay.
+   *
+   * @deprecated Prefer omitting; use only with explicit external trust proof.
+   */
+  allowNonInitialTrustedSnapshot?: boolean;
+  /**
+   * @deprecated Alias of `allowNonInitialTrustedSnapshot`. Kept so existing
+   * call sites compile; does not authenticate checkpoints.
+   */
   requireInitialChallenge?: boolean;
 }>;
 
+function shouldRequireInitialChallenge(input: ReplayInput): boolean {
+  if (input.allowNonInitialTrustedSnapshot === true) return false;
+  if (input.requireInitialChallenge === false) return false;
+  return true;
+}
+
 /**
- * Authoritative pure replay from a trusted initial challenge + move ledger.
+ * Pure transition replay from a caller-supplied starting snapshot + move ledger.
+ *
  * Does not consult clocks, databases, identity, or client hashes for authority.
+ * Does not authenticate `initialState` — trust is entirely the caller's duty.
  */
 export function replayCore001V3(input: ReplayInput): ReplayResult {
   const pinned = input.rulesVersion ?? RULES_VERSION;
@@ -78,10 +111,9 @@ export function replayCore001V3(input: ReplayInput): ReplayResult {
 
   let state: GameState;
   try {
-    state =
-      input.requireInitialChallenge === false
-        ? parseGameState(input.initialState)
-        : parseInitialGameState(input.initialState);
+    state = shouldRequireInitialChallenge(input)
+      ? parseInitialGameState(input.initialState)
+      : parseGameState(input.initialState);
   } catch (error) {
     if (error instanceof ValidationFailure) {
       return { ok: false, reason: 'invalid_initial', codes: error.wires };

@@ -78,7 +78,7 @@ test('invalid offer index fails closed', () => {
   assert.equal(result.reason, 'invalid_move');
 });
 
-test('forged score with self-consistent hash is not ranked proof', () => {
+test('forged score with self-consistent hash fails full report verification', () => {
   const honest = parseGameState(v3Playable());
   const forgedJson = { ...v3Playable(), score: 999 };
   const forged = parseGameState(forgedJson);
@@ -92,30 +92,47 @@ test('forged score with self-consistent hash is not ranked proof', () => {
   });
   assert.equal(replayed.ok, true);
   if (!replayed.ok) return;
+  const expected = stateToJson(replayed.finalState);
   const cmp = compareReplayToClientReport({
     replayed: replayed.finalState,
-    client: { score: 999, stateHash: forgedHash },
+    client: {
+      score: 999,
+      board: expected.cells,
+      offers: expected.offers,
+      turnsUsed: replayed.finalState.turnsUsed,
+      status: replayed.finalState.status,
+      terminalReason: replayed.finalState.terminalReason,
+      stateHash: forgedHash,
+    },
   });
   assert.equal(cmp.ok, false);
   if (cmp.ok) return;
+  assert.equal(cmp.mode, 'full');
   assert.ok(cmp.mismatches.includes('score_mismatch'));
   assert.ok(cmp.mismatches.includes('state_hash_mismatch'));
 });
 
-test('forged board rejected by replay comparison', () => {
+test('forged board rejected by full report verification', () => {
   const replayed = replayCore001V3({
     initialState: v3Playable(),
     moves: [{ offerIndex: 0, tap: [0, 0] }],
   });
   assert.equal(replayed.ok, true);
   if (!replayed.ok) return;
+  const expected = stateToJson(replayed.finalState);
   const cmp = compareReplayToClientReport({
     replayed: replayed.finalState,
     client: {
+      score: replayed.finalState.score,
       board: [
         [null, null],
         [null, null],
       ],
+      offers: expected.offers,
+      turnsUsed: replayed.finalState.turnsUsed,
+      status: replayed.finalState.status,
+      terminalReason: replayed.finalState.terminalReason,
+      stateHash: stateHashV3(replayed.finalState),
     },
   });
   assert.equal(cmp.ok, false);
