@@ -10,7 +10,7 @@ Draft PR: [#17](https://github.com/puzzle-duel/puzzle-duel-backend/pull/17)
 
 | Pin | SHA |
 | --- | --- |
-| Stage E remediation tip | *(see git HEAD after remediation commit)* |
+| Stage E remediation tip | `89f92eac6c52cce07163537403ff5fa002b6da98` |
 | Stage E base (Stage D) | `7036f17f187742bf8551302801469673514650d9` |
 | Stage C engine | `25efb2473f3517027769ee978b31ab6e3dc41030` |
 | PZD-38 Phase A import provenance | `4473a39a39def068701b2a0c8f633b2dfcc38dd2` (copied; not merge-ancestor) |
