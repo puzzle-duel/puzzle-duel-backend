@@ -1,9 +1,8 @@
 name: PR quality gate
 
 on:
+  # All pull requests, including stacked feature-to-feature PRs.
   pull_request:
-    branches:
-      - main
     types:
       - opened
       - synchronize
