@@ -43,11 +43,12 @@ function utcWeekStart(dayMs: number): number {
   return dayMs - ((new Date(dayMs).getUTCDay() + 6) % 7) * 86400000;
 }
 function mapClaim(row: Record<string, unknown>): ImmutableDailyClaim {
-  const d = row.original_utc_date;
+  // PostgreSQL DATE must be serialized as UTC calendar text, not JS-local midnight.
+  const d = String(row.original_utc_date_text);
   return {
     seriesId: String(row.series_id),
     playerId: String(row.player_id),
-    originalUtcDate: d instanceof Date ? d.toISOString().slice(0, 10) : String(d).slice(0, 10),
+    originalUtcDate: d,
     startedAtMs: Number(row.started_at_ms),
     manifestDigest: String(row.manifest_digest),
     status: String(row.status) as ImmutableDailyClaim['status'],
@@ -74,7 +75,7 @@ export class PostgresDailyClaimStore {
         return { ok: false, reason: 'CLAIM_WINDOW_CLOSED' };
       }
       const inserted = await client.query(
-        'INSERT INTO tournament_daily_claim (series_id, player_id, original_utc_date, started_at_ms, manifest_digest) VALUES ($1, $2, $3::date, $4, $5) ON CONFLICT (player_id, original_utc_date) DO NOTHING RETURNING *',
+        'INSERT INTO tournament_daily_claim (series_id, player_id, original_utc_date, started_at_ms, manifest_digest) VALUES ($1, $2, $3::date, $4, $5) ON CONFLICT (player_id, original_utc_date) DO NOTHING RETURNING *, to_char(original_utc_date, \'YYYY-MM-DD\') AS original_utc_date_text',
         [randomUUID(), input.playerId, input.originalUtcDate, now, input.manifestDigest],
       );
       if (inserted.rowCount) {
@@ -82,7 +83,7 @@ export class PostgresDailyClaimStore {
         return { ok: true, original: true, claim: mapClaim(inserted.rows[0]) };
       }
       const existing = await client.query(
-        'SELECT * FROM tournament_daily_claim WHERE player_id = $1 AND original_utc_date = $2::date',
+        'SELECT *, to_char(original_utc_date, \'YYYY-MM-DD\') AS original_utc_date_text FROM tournament_daily_claim WHERE player_id = $1 AND original_utc_date = $2::date',
         [input.playerId, input.originalUtcDate],
       );
       if (!existing.rowCount) throw new Error('claim unique conflict with missing row');
