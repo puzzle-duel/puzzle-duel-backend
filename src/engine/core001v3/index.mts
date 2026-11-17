@@ -96,8 +96,15 @@ export {
 } from './replay.mts';
 
 export {
+  FULL_CLIENT_REPORT_FIELDS,
   compareReplayToClientReport,
+  diagnoseClientReportFields,
+  structuralEqual,
   compareStates,
   type CompareResult,
+  type FullCompareResult,
+  type PartialCompareResult,
   type ClientResultMismatch,
+  type ClientReportField,
+  type FullClientReport,
 } from './compare.mts';

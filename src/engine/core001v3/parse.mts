@@ -42,15 +42,25 @@ const TERMINAL_REASONS = new Set<TerminalReason>([
   'no_legal_moves',
 ]);
 
+/**
+ * Own-property dictionary with a null prototype.
+ * Never assign into a normal `{}` — that loses JSON `__proto__` own keys and
+ * can inherit attacker-controlled fields via the Object prototype chain.
+ */
 function asObject(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return null;
   }
-  const result: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    result[key] = entry;
+  const source = value as object;
+  const result = Object.create(null) as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(source)) {
+    result[key] = (source as Record<string, unknown>)[key];
   }
   return result;
+}
+
+function hasOwn(json: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(json, key);
 }
 
 function closed(
@@ -58,11 +68,11 @@ function closed(
   allowed: ReadonlySet<string>,
   issues: Issues,
 ): void {
-  for (const key of Object.keys(json)) {
+  for (const key of Object.getOwnPropertyNames(json)) {
     if (!allowed.has(key)) issues.add('unexpected_property');
   }
   for (const key of allowed) {
-    if (!(key in json)) issues.add('missing_field');
+    if (!hasOwn(json, key)) issues.add('missing_field');
   }
 }
 
@@ -314,26 +324,30 @@ function parseState(json: unknown, initial: boolean): GameState {
   closed(object, STATE_KEYS, issues);
 
   if (object.rulesVersion !== RULES_VERSION) {
-    if ('rulesVersion' in object) issues.add('unknown_rules_version');
+    if (hasOwn(object, 'rulesVersion')) issues.add('unknown_rules_version');
   }
 
   const boardSizeRaw = asSafeInt(object.boardSize);
-  if ('boardSize' in object && !boardSizeRaw.ok && boardSizeRaw.reason === 'range') {
+  if (hasOwn(object, 'boardSize') && !boardSizeRaw.ok && boardSizeRaw.reason === 'range') {
     issues.add('integer_out_of_range');
   }
   const boardSize = boardSizeRaw.ok ? boardSizeRaw.value : null;
   const usableSize = boardSize !== null && boardSize >= 1 ? boardSize : null;
-  if ('boardSize' in object && usableSize === null && boardSizeRaw.ok) {
+  if (hasOwn(object, 'boardSize') && usableSize === null && boardSizeRaw.ok) {
     issues.add('malformed_board');
-  } else if ('boardSize' in object && !boardSizeRaw.ok && boardSizeRaw.reason === 'type') {
+  } else if (
+    hasOwn(object, 'boardSize') &&
+    !boardSizeRaw.ok &&
+    boardSizeRaw.reason === 'type'
+  ) {
     issues.add('malformed_board');
   }
 
   const moveLimitRaw = asSafeInt(object.moveLimit);
   const turnsUsedRaw = asSafeInt(object.turnsUsed);
   if (
-    ('moveLimit' in object && !moveLimitRaw.ok && moveLimitRaw.reason === 'range') ||
-    ('turnsUsed' in object && !turnsUsedRaw.ok && turnsUsedRaw.reason === 'range')
+    (hasOwn(object, 'moveLimit') && !moveLimitRaw.ok && moveLimitRaw.reason === 'range') ||
+    (hasOwn(object, 'turnsUsed') && !turnsUsedRaw.ok && turnsUsedRaw.reason === 'range')
   ) {
     issues.add('integer_out_of_range');
   }
@@ -345,7 +359,7 @@ function parseState(json: unknown, initial: boolean): GameState {
     moveLimit >= 1 &&
     turnsUsed >= 0 &&
     turnsUsed <= moveLimit;
-  if ('moveLimit' in object && 'turnsUsed' in object && !turnsOk) {
+  if (hasOwn(object, 'moveLimit') && hasOwn(object, 'turnsUsed') && !turnsOk) {
     issues.add('illegal_turn_count');
   }
 
@@ -356,7 +370,7 @@ function parseState(json: unknown, initial: boolean): GameState {
 
   const scoreRaw = asSafeInt(object.score);
   let score: number | null = null;
-  if ('score' in object) {
+  if (hasOwn(object, 'score')) {
     if (!scoreRaw.ok) {
       if (scoreRaw.reason === 'range') issues.add('integer_out_of_range');
       else issues.add('malformed_score');
@@ -374,7 +388,7 @@ function parseState(json: unknown, initial: boolean): GameState {
     typeof statusRaw === 'string' && STATUSES.has(statusRaw as GameStatus)
       ? (statusRaw as GameStatus)
       : null;
-  if ('status' in object && status === null) issues.add('inconsistent_status');
+  if (hasOwn(object, 'status') && status === null) issues.add('inconsistent_status');
 
   let terminalReason: TerminalReason | null = null;
   const rawReason = object.terminalReason;
@@ -382,7 +396,7 @@ function parseState(json: unknown, initial: boolean): GameState {
     terminalReason = null;
   } else if (typeof rawReason === 'string' && TERMINAL_REASONS.has(rawReason as TerminalReason)) {
     terminalReason = rawReason as TerminalReason;
-  } else if ('terminalReason' in object) {
+  } else if (hasOwn(object, 'terminalReason')) {
     issues.add('inconsistent_terminal_reason');
   }
 
@@ -471,7 +485,7 @@ export function parseMove(json: unknown): Move {
   const indexRaw = asSafeInt(object.offerIndex);
   const index = indexRaw.ok ? indexRaw.value : null;
   if (
-    'offerIndex' in object &&
+    hasOwn(object, 'offerIndex') &&
     (index === null || index < 0 || index > 2)
   ) {
     issues.add('illegal_offer_index');
