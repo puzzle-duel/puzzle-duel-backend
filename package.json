@@ -1,0 +1,19 @@
+{
+  "name": "puzzle-duel-backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test 'test/**/*.test.mts'",
+    "test:generator": "node --experimental-strip-types --test test/generator.test.mts",
+    "test:core001v3": "node --experimental-strip-types --test 'test/engine/core001v3/**/*.test.mts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.9.3"
+  }
+}
