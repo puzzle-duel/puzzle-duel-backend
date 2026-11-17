@@ -15,10 +15,11 @@
     "test:stage-d-parity": "python3 tools/stage_d/parity/run_parity.py",
     "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py",
     "test:stage-e": "node --experimental-strip-types --test 'test/tournament/adjudication/**/*.test.mts'",
-    "test:stage-f1": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/claims/**/*.test.mts'"
+    "test:stage-f1": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/claims/**/*.test.mts'",
+    "test:stage-f1-auth": "node --experimental-strip-types --test 'test/tournament/auth/**/*.test.mts'"
   },
   "devDependencies": {
-    "@types/node": "^24.10.1",
+    "@types/node": "^22.10.0",
     "@types/pg": "^8.15.6",
     "typescript": "^5.9.3"
   },
