@@ -15,7 +15,20 @@ Accepted Q13 and ADR-T02 TD-12 publish the four category rows together when the 
 
 F2-B therefore publishes only for `event: 'h1_terminal_move'` after replay shows H1 `status === 'ended'`. `event: 'between_game_advance'` returns `COMPLETION_EVENT_BLOCKED` and writes nothing. A nonterminal H1 returns `H1_NOT_TERMINAL`.
 
-Residual, not a new product decision: pre-F2 `applyAdvance` on ordinal 6 can still set `series_fence_state.status = COMPLETED` with `results_published=false` and no category rows. F2-B does not publish from that path. A later `h1_terminal_move` may publish once if H1 replays as terminal and no completion row exists.
+## Ordinal-6 Advance
+
+`applyAdvance` lives only inside `TrustedGameplayService.#handleAdvance`. Both the PostgreSQL unit of work and the memory fence path call it.
+
+Authenticated HTTP (`tournament-http.mts`) reaches that method through `SessionAuthorizationGateway`. The gateway takes the ordinal from `resolveActiveSubgameOrdinal`, not from the client. `AWAIT_ADVANCE` with six ended snapshots is `SERIES_STATE_CORRUPT` before the handler runs. Ingress `SeriesCommandArbiter` is not on that HTTP path. Its advance branch sets `ACTIVE`, and it does not call `applyAdvance`.
+
+The writer itself used to set `COMPLETED` with `results_published=false` when the authorized ordinal was 6. That transition is now rejected:
+
+- writer generation must match the fence, or the result is `STALE_WRITER`
+- `COMPLETED` or `FORFEITED` returns `SERIES_TERMINAL`
+- ordinal 6 or above returns `NO_NEXT_ORDINAL`
+- ordinals 1 through 5 still require `AWAIT_ADVANCE` and an ended snapshot, then move to `ACTIVE`
+
+A rejected advance stores the frozen rejection and does not change the fence. A later verified terminal H1 move can still publish once. Phase A ingress completion on `completesSubgame` is a separate, non-HTTP path and was not changed.
 
 ## Transaction and lock
 
@@ -61,7 +74,7 @@ Node 26.13.1. PostgreSQL 18 at `127.0.0.1:55432`, database `pzd_ingress`. No ski
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | PASS |
-| `npm run test:stage-f2` | 51 pass, 0 fail, 0 skip |
+| `npm run test:stage-f2` | 55 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1` | 10 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-auth` | 49 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-http` | 2 pass, 0 fail, 0 skip |

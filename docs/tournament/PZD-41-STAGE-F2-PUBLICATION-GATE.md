@@ -45,7 +45,7 @@ Inside one PostgreSQL transaction it:
 
 1. Holds that series lock and checks the authenticated player, writer generation, and claim.
 2. Replays all six pinned subgames from `trusted_challenge_binding` plus `accepted_move_ledger`. Snapshot state hash, ledger hash, and engine replay must match. Individual scores are the replayed per-ordinal totals, not six copies of `series_fence_state.score`.
-3. Rejects a nonterminal H1 and rejects `event: 'between_game_advance'`.
+3. Rejects a nonterminal H1 and rejects `event: 'between_game_advance'`. The gameplay writer also rejects ordinal-6 Advance with `NO_NEXT_ORDINAL` before any fence write.
 4. Inserts one completion, six subgame scores, four categories from `computeFourCategoryScores`, one On-Time badge from the immutable claim start, and one HMAC provenance row.
 5. Sets the claim and fence to `COMPLETED` and `results_published=true` only on that H1-terminal publication.
 6. Commits once. A fault before commit rolls every publication row back. A retry after commit returns the original revision, scores, badge, and seal.

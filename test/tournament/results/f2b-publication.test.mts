@@ -9,9 +9,26 @@ import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { PostgresTrustedUnitOfWork } from '../../../src/tournament/adjudication/postgres-uow.mts';
-import { ADMISSION_JOURNAL_DDL } from '../../../src/tournament/ingress/postgres-journal.mts';
-import { SERIES_FENCE_DDL, seriesAdvisoryKeys } from '../../../src/tournament/ingress/series-fence.mts';
+import {
+  MemoryVerifiedAuthorizationGateway,
+  PostgresAcceptedMoveLedger,
+  PostgresAuthoritativeSnapshotStore,
+  PostgresTrustedChallengeStore,
+  PostgresTrustedUnitOfWork,
+  TrustedGameplayService,
+} from '../../../src/tournament/adjudication/index.mts';
+import { makeAuth } from '../adjudication/helpers.mts';
+import { ControllableClock } from '../../../src/tournament/ingress/clock.mts';
+import {
+  ADMISSION_JOURNAL_DDL,
+  PostgresAdmissionJournal,
+} from '../../../src/tournament/ingress/postgres-journal.mts';
+import {
+  lockSeriesForTransaction,
+  PostgresSeriesFenceStore,
+  SERIES_FENCE_DDL,
+  seriesAdvisoryKeys,
+} from '../../../src/tournament/ingress/series-fence.mts';
 import { TRUSTED_GAMEPLAY_DDL } from '../../../src/tournament/adjudication/postgres-stores.mts';
 import { DAILY_CLAIM_DDL } from '../../../src/tournament/claims/postgres-daily-claim.mts';
 import {
@@ -386,6 +403,46 @@ async function seed(args?: {
     played,
     running,
     manifest,
+  };
+}
+
+function advanceHarness(row: {
+  seriesId: string;
+  playerId: string;
+  writerGeneration: number;
+  h1ReceivedAtMs: number;
+  ordinal: number;
+}) {
+  const clock = new ControllableClock(new Date(row.h1ReceivedAtMs + 1_000));
+  const authGw = new MemoryVerifiedAuthorizationGateway();
+  authGw.register(
+    makeAuth({
+      seriesKey: row.seriesId,
+      playerId: row.playerId,
+      writerGeneration: row.writerGeneration,
+      ordinal: row.ordinal,
+      status: 'AWAIT_ADVANCE',
+    }),
+  );
+  const uow = new PostgresTrustedUnitOfWork(pool);
+  const gameplay = new TrustedGameplayService({
+    journal: new PostgresAdmissionJournal(pool, clock),
+    fence: new PostgresSeriesFenceStore(pool),
+    challenges: new PostgresTrustedChallengeStore(pool),
+    ledger: new PostgresAcceptedMoveLedger(pool),
+    snapshots: new PostgresAuthoritativeSnapshotStore(pool),
+    clock,
+    authorization: authGw,
+    postgresUow: uow,
+  });
+  return {
+    gameplay,
+    uow,
+    hints: {
+      seriesKeyHint: row.seriesId,
+      playerIdHint: row.playerId,
+      writerGenerationHint: row.writerGeneration,
+    },
   };
 }
 
@@ -1199,5 +1256,207 @@ describe('PZD-41 F2-B atomic six-game publication', () => {
     });
     assert.equal(recovered.decision, 'apply');
     assert.equal((await counts(crashed.seriesId)).categories, 4);
+  });
+
+  it('rejects ordinal-6 advance without a publication-less COMPLETED fence', async () => {
+    const row = await seed();
+    const { gameplay, hints } = advanceHarness({ ...row, ordinal: 6 });
+    const forged = await gameplay.handleClientCommand(
+      {
+        commandType: 'advance',
+        idempotencyKey: 'forged-ordinal',
+        completesSeries: true,
+        subgameOrdinal: 6,
+      },
+      hints,
+    );
+    assert.equal(forged.decision, 'reject');
+    if (forged.decision === 'reject') {
+      assert.equal(forged.reason, 'FORBIDDEN_AUTHORITY_FIELD');
+    }
+    const before = await pool.query(
+      `SELECT count(*)::int AS n FROM command_admission_journal
+       WHERE series_key=$1 AND command_type='advance'`,
+      [row.seriesId],
+    );
+    assert.equal(before.rows[0].n, 0);
+
+    const adv = await gameplay.handleClientCommand(
+      { commandType: 'advance', idempotencyKey: 'h1-advance' },
+      hints,
+    );
+    assert.equal(adv.decision, 'reject');
+    if (adv.decision === 'reject') assert.equal(adv.reason, 'NO_NEXT_ORDINAL');
+    const again = await gameplay.handleClientCommand(
+      { commandType: 'advance', idempotencyKey: 'h1-advance' },
+      hints,
+    );
+    assert.equal(again.decision, 'reject');
+    if (again.decision === 'reject') {
+      assert.equal(again.reason, 'NO_NEXT_ORDINAL');
+      assert.equal(again.admissionResult?.decision, 'reject');
+    }
+    const other = await gameplay.handleClientCommand(
+      { commandType: 'advance', idempotencyKey: 'h1-advance-other' },
+      hints,
+    );
+    assert.equal(other.decision, 'reject');
+    if (other.decision === 'reject') assert.equal(other.reason, 'NO_NEXT_ORDINAL');
+
+    const fence = await pool.query(
+      `SELECT status, results_published, writer_generation
+       FROM series_fence_state WHERE series_key=$1`,
+      [row.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'AWAIT_ADVANCE');
+    assert.equal(fence.rows[0].results_published, false);
+    assert.equal(Number(fence.rows[0].writer_generation), 1);
+    assert.deepEqual(await counts(row.seriesId), {
+      completion: 0,
+      scores: 0,
+      categories: 0,
+      badge: 0,
+      provenance: 0,
+    });
+    const published = publishedScores(
+      await service().publish({
+        seriesId: row.seriesId,
+        playerId: row.playerId,
+        writerGeneration: 1,
+        commandIdempotencyKey: 'after-rejected-advance',
+        event: 'h1_terminal_move',
+      }),
+    );
+    assert.equal(published.outcome, 'published');
+    assert.equal((await counts(row.seriesId)).categories, 4);
+  });
+
+  it('rejects a stale writer on ordinal-6 advance without fence or publication writes', async () => {
+    const row = await seed();
+    await pool.query(
+      `UPDATE series_fence_state SET writer_generation=2 WHERE series_key=$1`,
+      [row.seriesId],
+    );
+    const { gameplay, hints } = advanceHarness({ ...row, writerGeneration: 1, ordinal: 6 });
+    const adv = await gameplay.handleClientCommand(
+      { commandType: 'advance', idempotencyKey: 'stale-h1-advance' },
+      hints,
+    );
+    assert.equal(adv.decision, 'reject');
+    if (adv.decision === 'reject') assert.equal(adv.reason, 'STALE_WRITER');
+    const fence = await pool.query(
+      `SELECT status, results_published, writer_generation, last_applied_admission_id
+       FROM series_fence_state WHERE series_key=$1`,
+      [row.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'AWAIT_ADVANCE');
+    assert.equal(fence.rows[0].results_published, false);
+    assert.equal(Number(fence.rows[0].writer_generation), 2);
+    assert.equal((await counts(row.seriesId)).completion, 0);
+  });
+
+  it('serializes a terminal H1 move against a concurrent ordinal-6 advance', async () => {
+    const open = await seed({ mode: 'h1_open' });
+    const { gameplay, uow, hints } = advanceHarness({ ...open, ordinal: 6 });
+    uow.setSixGamePublisher(service());
+    const [moved, advanced] = await Promise.all([
+      uow.adjudicateAcceptedMove({
+        seriesKey: open.seriesId,
+        playerId: open.playerId,
+        subgameOrdinal: 6,
+        admissionId: open.h1AdmissionId,
+        admissionSeq: 6,
+        trustedReceivedAt: new Date(open.h1ReceivedAtMs),
+        move: {
+          offerIndex: 0,
+          tap: [0, 0],
+          expectedBoardRevision: 5,
+          writerGeneration: 1,
+        },
+      }),
+      gameplay.handleClientCommand(
+        { commandType: 'advance', idempotencyKey: 'concurrent-h1-advance' },
+        hints,
+      ),
+    ]);
+    assert.equal(moved.decision, 'apply');
+    if (moved.decision === 'apply') {
+      assert.equal(moved.fence.status, 'COMPLETED');
+      assert.equal(moved.fence.resultsPublished, true);
+    }
+    assert.equal(advanced.decision, 'reject');
+    if (advanced.decision === 'reject') {
+      assert.ok(
+        advanced.reason === 'NO_NEXT_ORDINAL' || advanced.reason === 'SERIES_TERMINAL',
+        advanced.reason,
+      );
+    }
+    assert.equal((await counts(open.seriesId)).completion, 1);
+    assert.equal((await counts(open.seriesId)).scores, 6);
+    assert.equal((await counts(open.seriesId)).categories, 4);
+    const fence = await pool.query(
+      `SELECT status, results_published FROM series_fence_state WHERE series_key=$1`,
+      [open.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'COMPLETED');
+    assert.equal(fence.rows[0].results_published, true);
+  });
+
+  it('rolls back an uncommitted COMPLETED fence and a failed next-ordinal advance', async () => {
+    const held = await seed();
+    const holder = await pool.connect();
+    try {
+      await holder.query('BEGIN');
+      await lockSeriesForTransaction(holder, held.seriesId);
+      await holder.query(
+        `UPDATE series_fence_state
+         SET status='COMPLETED', results_published=FALSE
+         WHERE series_key=$1`,
+        [held.seriesId],
+      );
+      const visible = await pool.query(
+        `SELECT status FROM series_fence_state WHERE series_key=$1`,
+        [held.seriesId],
+      );
+      assert.equal(visible.rows[0].status, 'AWAIT_ADVANCE');
+      await holder.query('ROLLBACK');
+    } finally {
+      holder.release();
+    }
+    const after = await pool.query(
+      `SELECT status, results_published FROM series_fence_state WHERE series_key=$1`,
+      [held.seriesId],
+    );
+    assert.equal(after.rows[0].status, 'AWAIT_ADVANCE');
+    assert.equal(after.rows[0].results_published, false);
+    assert.equal((await counts(held.seriesId)).categories, 0);
+
+    const broken = await seed({ mode: 'five', fenceStatus: 'AWAIT_ADVANCE' });
+    await pool.query(
+      `DELETE FROM trusted_challenge_binding
+       WHERE series_key=$1 AND subgame_ordinal=6`,
+      [broken.seriesId],
+    );
+    const { gameplay, hints } = advanceHarness({ ...broken, ordinal: 5 });
+    const failed = await gameplay.handleClientCommand(
+      { commandType: 'advance', idempotencyKey: 'advance-missing-next' },
+      hints,
+    );
+    assert.equal(failed.decision, 'unavailable');
+    const fence = await pool.query(
+      `SELECT status, results_published, last_applied_admission_id
+       FROM series_fence_state WHERE series_key=$1`,
+      [broken.seriesId],
+    );
+    assert.equal(fence.rows[0].status, 'AWAIT_ADVANCE');
+    assert.equal(fence.rows[0].results_published, false);
+    assert.equal(fence.rows[0].last_applied_admission_id, null);
+    const snap = await pool.query(
+      `SELECT count(*)::int AS n FROM authoritative_game_snapshot
+       WHERE series_key=$1 AND subgame_ordinal=6`,
+      [broken.seriesId],
+    );
+    assert.equal(snap.rows[0].n, 0);
+    assert.equal((await counts(broken.seriesId)).completion, 0);
   });
 });

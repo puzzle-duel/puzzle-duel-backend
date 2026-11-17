@@ -16,9 +16,9 @@
  * - Between-game Advance applies only when a next ordinal exists. Passing
  *   event `between_game_advance` is rejected and writes nothing.
  * - A nonterminal H1 move does not publish.
- * - Pre-F2 code can set COMPLETED on Advance without rows. This service still
- *   refuses that event. A later `h1_terminal_move` publish may write the rows
- *   once when H1 is replay-terminal and results are not yet published.
+ * - Ordinal-6 Advance is rejected by the gameplay writer (`NO_NEXT_ORDINAL`)
+ *   and cannot mark the fence COMPLETED. Publication still happens only on
+ *   `h1_terminal_move` when H1 is replay-terminal and no completion row exists.
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';

@@ -87,7 +87,7 @@ describe('Stage E — P1-E04 immutable duplicate admission results', () => {
     }
   });
 
-  it('retry after series completion returns original immutable result', async () => {
+  it('ordinal-6 advance does not complete the series and the H1 result stays immutable', async () => {
     const { service, fence, snapshots, authGw } = await bootMemory({
       ordinal: 6,
     });
@@ -118,8 +118,11 @@ describe('Stage E — P1-E04 immutable duplicate admission results', () => {
         writerGenerationHint: 1,
       },
     );
-    assert.equal(adv.decision, 'apply');
-    assert.equal((await fence.get('series-1'))!.status, 'COMPLETED');
+    assert.equal(adv.decision, 'reject');
+    if (adv.decision === 'reject') assert.equal(adv.reason, 'NO_NEXT_ORDINAL');
+    const afterAdvance = (await fence.get('series-1'))!;
+    assert.equal(afterAdvance.status, 'AWAIT_ADVANCE');
+    assert.equal(afterAdvance.resultsPublished, false);
 
     const dup = await service.handleClientCommand(legalMoveCmd('h1'), {
       seriesKeyHint: 'series-1',
