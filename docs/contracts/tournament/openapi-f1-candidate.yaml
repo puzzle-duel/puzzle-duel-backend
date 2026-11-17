@@ -1,0 +1,161 @@
+openapi: 3.1.0
+info:
+  title: Puzzle Duel Tournament F1 (candidate)
+  version: 0.1.0-candidate
+  description: |
+    Candidate OpenAPI for PZD-40 Stage F1. NOT an Accepted production contract.
+    Owner freeze required before production release. Live Apple/Google OAuth
+    provider credentials are out of band and not invented by this document.
+servers:
+  - url: https://api.example.invalid
+    description: Placeholder only — no production host claimed
+paths:
+  /v1/tournament/session:
+    post:
+      summary: Open opaque server session after verified bearer JWT
+      security:
+        - bearerAuth: []
+      responses:
+        '201':
+          description: Session minted (secret returned once)
+        '401':
+          description: UNAUTHENTICATED
+    get:
+      summary: Read session metadata (no playerId disclosure)
+      security:
+        - bearerAuth: []
+        - sessionSecret: []
+      responses:
+        '200':
+          description: Active session
+        '401':
+          description: UNAUTHENTICATED
+    delete:
+      summary: Revoke session (does not reset daily claim)
+      security:
+        - bearerAuth: []
+        - sessionSecret: []
+      responses:
+        '204':
+          description: Revoked
+  /v1/tournament/claims/daily:
+    post:
+      summary: Immutable daily claim + Stage E bootstrap
+      security:
+        - bearerAuth: []
+        - sessionSecret: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [originalUtcDate]
+              properties:
+                originalUtcDate:
+                  type: string
+                  pattern: '^\d{4}-\d{2}-\d{2}$'
+      responses:
+        '201':
+          description: Original claim created
+        '200':
+          description: Idempotent recovery of original claim
+        '400':
+          description: MALFORMED_REQUEST / INVALID_DATE
+        '403':
+          description: CLAIM_WINDOW_CLOSED
+        '401':
+          description: UNAUTHENTICATED
+  /v1/tournament/series/{seriesId}:
+    get:
+      summary: Canonical series recovery (does not renew inactivity)
+      security:
+        - bearerAuth: []
+        - sessionSecret: []
+      parameters:
+        - name: seriesId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Owned series snapshot
+        '404':
+          description: SERIES_NOT_OWNED
+  /v1/tournament/series/{seriesId}/commands:
+    post:
+      summary: Authenticated ranked command (closed schema)
+      security:
+        - bearerAuth: []
+        - sessionSecret: []
+      parameters:
+        - name: seriesId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [commandType, idempotencyKey]
+              properties:
+                commandType:
+                  type: string
+                  enum:
+                    - start
+                    - move
+                    - advance
+                    - thinking_extension
+                    - device_handoff
+                    - abandon
+                idempotencyKey:
+                  type: string
+                  maxLength: 128
+                move:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    offerIndex:
+                      type: integer
+                      enum: [0, 1, 2]
+                    tap:
+                      type: array
+                      minItems: 2
+                      maxItems: 2
+                      items:
+                        type: integer
+                    expectedBoardRevision:
+                      type: integer
+                    writerGeneration:
+                      type: integer
+                    clientReportedStateHash:
+                      type: string
+      responses:
+        '200':
+          description: Applied (possibly duplicateReplay)
+        '400':
+          description: Schema / authority rejection
+        '401':
+          description: UNAUTHENTICATED
+        '403':
+          description: SERIES_NOT_OWNED
+        '409':
+          description: Conflict / stale writer / reject
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    sessionSecret:
+      type: apiKey
+      in: header
+      name: x-pzd-session-secret
