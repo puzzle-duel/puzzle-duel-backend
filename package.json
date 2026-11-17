@@ -11,7 +11,9 @@
     "test:ingress": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/ingress/deadline-boundary.test.mts test/tournament/ingress/durability-fault.test.mts test/tournament/ingress/concurrency-fence.test.mts test/tournament/ingress/postgres-journal.test.mts test/tournament/ingress/p1-remediation.test.mts",
     "test:generator": "node --experimental-strip-types --test test/generator.test.mts",
     "test:core001v3": "node --experimental-strip-types --test 'test/engine/core001v3/**/*.test.mts'",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:stage-d-parity": "python3 tools/stage_d/parity/run_parity.py",
+    "test:stage-d-checksums": "python3 tools/stage_d/parity/verify_checksums.py"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

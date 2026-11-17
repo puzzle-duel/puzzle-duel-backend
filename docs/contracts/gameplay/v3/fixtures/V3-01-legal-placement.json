@@ -1,0 +1,173 @@
+{
+  "id": "V3-01",
+  "kind": "fullMove",
+  "rulesVersion": "core-001.v3",
+  "summary": "Normal legal placement; stream advances; scoreDelta 0",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "initialState": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "piece",
+        "shape": "circle",
+        "direction": "right"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [
+      {
+        "shape": "circle",
+        "direction": "up"
+      },
+      {
+        "shape": "diamond",
+        "direction": "left"
+      }
+    ],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "moves": [
+    {
+      "offerIndex": 0,
+      "tap": [
+        0,
+        0
+      ]
+    }
+  ],
+  "requireInitial": true,
+  "expected": {
+    "ok": true,
+    "finalState": {
+      "rulesVersion": "core-001.v3",
+      "boardSize": 2,
+      "moveLimit": 5,
+      "blocked": [],
+      "cells": [
+        [
+          null,
+          {
+            "shape": "circle",
+            "direction": "right"
+          }
+        ],
+        [
+          null,
+          null
+        ]
+      ],
+      "offers": [
+        {
+          "kind": "piece",
+          "shape": "circle",
+          "direction": "up"
+        },
+        {
+          "kind": "piece",
+          "shape": "diamond",
+          "direction": "down"
+        },
+        {
+          "kind": "piece",
+          "shape": "triangle",
+          "direction": "left"
+        }
+      ],
+      "futurePieces": [
+        {
+          "shape": "diamond",
+          "direction": "left"
+        }
+      ],
+      "turnsUsed": 1,
+      "score": 0,
+      "status": "in_progress",
+      "terminalReason": null
+    },
+    "stateHash": "b0ecee3d68d889fe2c540f58019fb7a748d4c7af3c53b96bd03aa4e591e2c4dd",
+    "canonicalJson": "{\"blocked\":[],\"boardSize\":2,\"cells\":[[null,{\"direction\":\"right\",\"shape\":\"circle\"}],[null,null]],\"futurePieces\":[{\"direction\":\"left\",\"shape\":\"diamond\"}],\"moveLimit\":5,\"offers\":[{\"direction\":\"up\",\"kind\":\"piece\",\"shape\":\"circle\"},{\"direction\":\"down\",\"kind\":\"piece\",\"shape\":\"diamond\"},{\"direction\":\"left\",\"kind\":\"piece\",\"shape\":\"triangle\"}],\"rulesVersion\":\"core-001.v3\",\"score\":0,\"status\":\"in_progress\",\"terminalReason\":null,\"turnsUsed\":1}",
+    "applied": [
+      {
+        "landing": [
+          0,
+          1
+        ],
+        "turnsUsed": 1,
+        "scoreDelta": 0,
+        "waves": [],
+        "finalState": {
+          "rulesVersion": "core-001.v3",
+          "boardSize": 2,
+          "moveLimit": 5,
+          "blocked": [],
+          "cells": [
+            [
+              null,
+              {
+                "shape": "circle",
+                "direction": "right"
+              }
+            ],
+            [
+              null,
+              null
+            ]
+          ],
+          "offers": [
+            {
+              "kind": "piece",
+              "shape": "circle",
+              "direction": "up"
+            },
+            {
+              "kind": "piece",
+              "shape": "diamond",
+              "direction": "down"
+            },
+            {
+              "kind": "piece",
+              "shape": "triangle",
+              "direction": "left"
+            }
+          ],
+          "futurePieces": [
+            {
+              "shape": "diamond",
+              "direction": "left"
+            }
+          ],
+          "turnsUsed": 1,
+          "score": 0,
+          "status": "in_progress",
+          "terminalReason": null
+        },
+        "stateHash": "b0ecee3d68d889fe2c540f58019fb7a748d4c7af3c53b96bd03aa4e591e2c4dd"
+      }
+    ]
+  }
+}

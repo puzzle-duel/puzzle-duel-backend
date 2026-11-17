@@ -1,0 +1,84 @@
+{
+  "id": "V3-24",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "One spent mid-game still in_progress",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "piece",
+        "shape": "diamond",
+        "direction": "down"
+      },
+      {
+        "kind": "piece",
+        "shape": "triangle",
+        "direction": "left"
+      }
+    ],
+    "futurePieces": [],
+    "turnsUsed": 1,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "initial": false,
+  "expected": {
+    "ok": true,
+    "state": {
+      "rulesVersion": "core-001.v3",
+      "boardSize": 2,
+      "moveLimit": 5,
+      "blocked": [],
+      "cells": [
+        [
+          null,
+          null
+        ],
+        [
+          null,
+          null
+        ]
+      ],
+      "offers": [
+        {
+          "kind": "spent"
+        },
+        {
+          "kind": "piece",
+          "shape": "diamond",
+          "direction": "down"
+        },
+        {
+          "kind": "piece",
+          "shape": "triangle",
+          "direction": "left"
+        }
+      ],
+      "futurePieces": [],
+      "turnsUsed": 1,
+      "score": 0,
+      "status": "in_progress",
+      "terminalReason": null
+    },
+    "stateHash": "bbed4755c785f5e981a375889f75a0f10685470c9898ee02a7a2a365b3af94ae"
+  }
+}

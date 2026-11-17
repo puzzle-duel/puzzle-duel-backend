@@ -1,0 +1,47 @@
+{
+  "id": "V3-14",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Impossible initial (all spent)",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 2,
+    "moveLimit": 5,
+    "blocked": [],
+    "cells": [
+      [
+        null,
+        null
+      ],
+      [
+        null,
+        null
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      }
+    ],
+    "futurePieces": [],
+    "turnsUsed": 0,
+    "score": 0,
+    "status": "in_progress",
+    "terminalReason": null
+  },
+  "initial": true,
+  "expected": {
+    "ok": false,
+    "codes": [
+      "inconsistent_status",
+      "inconsistent_terminal_reason"
+    ]
+  }
+}

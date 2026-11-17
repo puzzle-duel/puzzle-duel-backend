@@ -1,0 +1,72 @@
+{
+  "id": "V3-26",
+  "kind": "parseOnly",
+  "rulesVersion": "core-001.v3",
+  "summary": "Budget+no-legal \u2192 move_limit_reached",
+  "oracleVersion": "stage-d-python-stdlib-1",
+  "state": {
+    "rulesVersion": "core-001.v3",
+    "boardSize": 1,
+    "moveLimit": 1,
+    "blocked": [],
+    "cells": [
+      [
+        {
+          "shape": "circle",
+          "direction": "right"
+        }
+      ]
+    ],
+    "offers": [
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      },
+      {
+        "kind": "spent"
+      }
+    ],
+    "futurePieces": [],
+    "turnsUsed": 1,
+    "score": 0,
+    "status": "ended",
+    "terminalReason": "move_limit_reached"
+  },
+  "initial": false,
+  "expected": {
+    "ok": true,
+    "state": {
+      "rulesVersion": "core-001.v3",
+      "boardSize": 1,
+      "moveLimit": 1,
+      "blocked": [],
+      "cells": [
+        [
+          {
+            "shape": "circle",
+            "direction": "right"
+          }
+        ]
+      ],
+      "offers": [
+        {
+          "kind": "spent"
+        },
+        {
+          "kind": "spent"
+        },
+        {
+          "kind": "spent"
+        }
+      ],
+      "futurePieces": [],
+      "turnsUsed": 1,
+      "score": 0,
+      "status": "ended",
+      "terminalReason": "move_limit_reached"
+    },
+    "stateHash": "6625117a9d0eed96921c1fae42cf063b20159031e298a09ff6c0cd562a36b2ac"
+  }
+}
