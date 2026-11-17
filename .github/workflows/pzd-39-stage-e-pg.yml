@@ -1,0 +1,92 @@
+name: PZD-39 Stage E PostgreSQL integration
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  stage-e-pg:
+    name: stage-e-pg
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: pzd
+          POSTGRES_PASSWORD: pzd
+          POSTGRES_DB: pzd_ingress
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U pzd -d pzd_ingress"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PZD_INGRESS_DATABASE_URL: postgresql://pzd:pzd@127.0.0.1:55432/pzd_ingress
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26'
+          cache: npm
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Verify PostgreSQL 18 connectivity (no silent skip)
+        run: |
+          node --input-type=module -e "
+            import pg from 'pg';
+            const pool = new pg.Pool({connectionString:process.env.PZD_INGRESS_DATABASE_URL});
+            try {
+              const r = await pool.query('SHOW server_version_num');
+              const version = Number(r.rows[0].server_version_num);
+              if (version < 180000 || version >= 190000) throw Error('Expected PostgreSQL 18, got '+version);
+              console.log('PostgreSQL 18 connectivity PASS');
+            } finally { await pool.end(); }
+          "
+      - name: TypeScript typecheck
+        run: npm run typecheck
+      - name: Phase A ingress memory + PostgreSQL
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:ingress | tee /tmp/stage-e-ingress.log
+          python3 - <<'PY'
+          import pathlib, re, sys
+          log = pathlib.Path('/tmp/stage-e-ingress.log').read_text()
+          for field in ('pass', 'fail', 'skipped'):
+              match = re.search(r'(?m)^[#ℹ]\s*'+field+r'\s+(\d+)\s*$', log)
+              if not match:
+                  sys.exit('Missing Node test count for '+field)
+              count = int(match.group(1))
+              if field == 'pass' and count == 0:
+                  sys.exit('No tests passed')
+              if field != 'pass' and count != 0:
+                  sys.exit(f'{field}={count} is unacceptable')
+          print('Ingress PASS, FAIL=0, SKIP=0')
+          PY
+      - name: Stage E adjudication memory + PostgreSQL
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run test:stage-e | tee /tmp/stage-e-adjudication.log
+          python3 - <<'PY'
+          import pathlib, re, sys
+          log = pathlib.Path('/tmp/stage-e-adjudication.log').read_text()
+          for field in ('pass', 'fail', 'skipped'):
+              match = re.search(r'(?m)^[#ℹ]\s*'+field+r'\s+(\d+)\s*$', log)
+              if not match:
+                  sys.exit('Missing Node test count for '+field)
+              count = int(match.group(1))
+              if field == 'pass' and count == 0:
+                  sys.exit('No tests passed')
+              if field != 'pass' and count != 0:
+                  sys.exit(f'{field}={count} is unacceptable')
+          print('Stage E PASS, FAIL=0, SKIP=0')
+          PY
+      - name: Core-001.v3 replay regression
+        run: npm run test:core001v3
