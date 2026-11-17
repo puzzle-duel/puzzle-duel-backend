@@ -85,6 +85,11 @@ export class MemoryAcceptedMoveLedger implements AcceptedMoveLedger {
       admissionSeq: last.admissionSeq,
     };
   }
+
+  /** Memory-only rollback helper for failed multi-store commits. */
+  async removeByAdmissionId(admissionId: string): Promise<void> {
+    this.#rows = this.#rows.filter((r) => r.admissionId !== admissionId);
+  }
 }
 
 export interface AuthoritativeGameSnapshot {

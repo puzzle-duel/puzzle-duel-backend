@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import type { ImmutableAdmissionResult } from '../adjudication/admission-result.mts';
 import type { IngressClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
 import type {
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS command_admission_journal (
   writer_generation BIGINT NULL,
   score_delta BIGINT NULL,
   completes_series BOOLEAN NOT NULL DEFAULT FALSE,
+  result_json JSONB NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (series_key, player_id, idempotency_key),
   UNIQUE (series_key, admission_seq)
@@ -56,6 +58,10 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
 
   async migrate(): Promise<void> {
     await this.#pool.query(ADMISSION_JOURNAL_DDL);
+    await this.#pool.query(
+      `ALTER TABLE command_admission_journal
+       ADD COLUMN IF NOT EXISTS result_json JSONB NULL`,
+    );
   }
 
   async admit(input: AdmitCommandInput): Promise<AdmitResult> {
@@ -237,6 +243,32 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
       [admissionId, outcome],
     );
     return (res.rowCount ?? 0) > 0;
+  }
+
+  async markOutcomeWithResult(
+    admissionId: string,
+    outcome: 'applied' | 'rejected',
+    result: ImmutableAdmissionResult,
+  ): Promise<boolean> {
+    const res = await this.#pool.query(
+      `UPDATE command_admission_journal
+       SET outcome = $2, result_json = $3::jsonb
+       WHERE admission_id = $1 AND outcome = 'pending'`,
+      [admissionId, outcome, JSON.stringify(result)],
+    );
+    return (res.rowCount ?? 0) > 0;
+  }
+
+  async getResult(
+    admissionId: string,
+  ): Promise<ImmutableAdmissionResult | null> {
+    const res = await this.#pool.query(
+      `SELECT result_json FROM command_admission_journal WHERE admission_id = $1`,
+      [admissionId],
+    );
+    if (!res.rowCount || res.rows[0].result_json == null) return null;
+    const raw = res.rows[0].result_json;
+    return typeof raw === 'string' ? JSON.parse(raw) : { ...raw };
   }
 
   #map(row: Record<string, unknown>): AdmittedCommand {
