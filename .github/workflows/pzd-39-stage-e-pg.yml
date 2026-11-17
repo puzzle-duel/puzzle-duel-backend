@@ -95,6 +95,8 @@ jobs:
           ref: 946f015a5124d1a9dfd6f3440cc916b9eb1789f8
           path: puzzle-duel-client
           persist-credentials: false
+      - name: Stage F1 signed JWT verification negatives
+        run: npm run test:stage-f1-auth
       - name: Stage F1 immutable daily claim PostgreSQL proof
         run: npm run test:stage-f1
       - name: Core-001.v3 replay regression (including generator vectors)
