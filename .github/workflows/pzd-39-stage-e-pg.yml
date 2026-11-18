@@ -116,10 +116,9 @@ jobs:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
 
-  # Runs 44352245384 and 44352338386 reached this harness inside the
-  # service-container job and stayed there until the 40-minute job timeout.
-  # GitHub records that timeout as CANCELLED. This job has no service
-  # container, so the harness starts its own primary and replica.
+  # Run 44383306295 job 135081089978 printed 1 pass, then stayed open
+  # until GitHub's annotation "maximum execution time of 20m0s". The harness
+  # script exits with the test status once that result is known.
   stage-e-failover:
     name: stage-e-failover
     runs-on: ubuntu-latest
