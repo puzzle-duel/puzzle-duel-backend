@@ -5,6 +5,7 @@
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -16,9 +17,11 @@ import { F2CRankingService } from '../../../src/tournament/results/f2c-rankings.
 import {
   applyMigrations,
   applyRollback,
+  assertMigrationStartupReady,
   loadMigrationFiles,
   MigrationRefusal,
   rollbackDisposition,
+  sqlStatements,
   verifyMigrations,
   type MigrationFile,
 } from '../../../src/tournament/migrations/f2-migrator.mts';
@@ -29,6 +32,9 @@ const UPGRADE = 'pzd_f2_migration_upgrade';
 const BROKEN = 'pzd_f2_migration_broken';
 const PROBE = 'pzd_f2_migration_probe';
 const RESTORE = 'pzd_f2_migration_restore';
+const DUMP = 'pzd_f2_migration_dump';
+const PRIV = 'pzd_f2_migration_priv';
+const ABSENT = 'pzd_f2_migration_absent';
 const ROLE_PASSWORD = 'pzd-gate-test-only-not-a-secret';
 const PROVENANCE_KEY = 'test-only-f2b-provenance-key-not-a-secret';
 const DIGEST = 'ab'.repeat(32);
@@ -81,7 +87,7 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
 
   after(async () => {
     if (!databaseUrl) return;
-    for (const name of [GATE, UPGRADE, BROKEN, PROBE, RESTORE]) {
+    for (const name of [GATE, UPGRADE, BROKEN, PROBE, RESTORE, DUMP, PRIV, ABSENT]) {
       await dropDatabase(name);
     }
     const admin = new pg.Client({ connectionString: urlFor('postgres') });
@@ -641,7 +647,7 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
     }
   });
 
-  it('restores a cloned database without changing the committed FINAL identity', async () => {
+  it('clones a database with CREATE DATABASE TEMPLATE and does not treat that as a pg_dump restore', async () => {
     await dropDatabase(RESTORE);
     const admin = new pg.Client({ connectionString: urlFor('postgres') });
     await admin.connect();
@@ -679,7 +685,399 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
       await source.end();
     }
   });
+
+  it('retries 0010 after the privilege block commits and before its history row', async () => {
+    await recreate(PRIV);
+    const pool = new pg.Pool({ connectionString: urlFor(PRIV) });
+    const files = loadMigrationFiles();
+    const privileges = files.find((file) => file.id === '0010_f2_privileges');
+    assert.ok(privileges);
+    const doIndex = sqlStatements(privileges.sql).findIndex((statement) =>
+      statement.includes('trg_pzd_schema_migration_immutable'),
+    );
+    assert.ok(doIndex > 0);
+    const previousFault = process.env.PZD_MIGRATION_FAULT;
+    process.env.PZD_MIGRATION_FAULT = '1';
+    try {
+      await applyMigrations(pool, files.slice(0, 10));
+      await assert.rejects(
+        applyMigrations(pool, files, {
+          faultAfterStatements: { id: privileges.id, count: doIndex + 1 },
+        }),
+        (err: unknown) => {
+          assert.ok(err instanceof MigrationRefusal);
+          assert.equal(err.refusal, 'MIGRATION_INTERRUPTED');
+          return true;
+        },
+      );
+      const recorded = await pool.query(
+        `SELECT 1 FROM pzd_schema_migration WHERE migration_id = '0010_f2_privileges'`,
+      );
+      assert.equal(recorded.rowCount, 0);
+      const owner = await pool.query(
+        `SELECT pg_get_userbyid(relowner) AS owner FROM pg_class WHERE relname = 'tournament_daily_claim'`,
+      );
+      assert.equal(owner.rows[0].owner, 'pzd_migration_owner');
+      const revoked = await pool.query(
+        `SELECT has_table_privilege('pzd_app_runtime', 'public.tournament_daily_claim', 'INSERT') AS allowed`,
+      );
+      assert.equal(revoked.rows[0].allowed, false);
+      if (previousFault === undefined) delete process.env.PZD_MIGRATION_FAULT;
+      else process.env.PZD_MIGRATION_FAULT = previousFault;
+      const retry = await applyMigrations(pool, files);
+      assert.equal(retry.applied.includes('0010_f2_privileges'), true);
+      assert.equal(retry.applied.includes('0011_journal_receipt_immutable'), true);
+      const granted = await pool.query(
+        `SELECT has_table_privilege('pzd_app_runtime', 'public.tournament_daily_claim', 'INSERT') AS allowed`,
+      );
+      assert.equal(granted.rows[0].allowed, true);
+      await assertMigrationStartupReady(pool);
+    } finally {
+      if (previousFault === undefined) delete process.env.PZD_MIGRATION_FAULT;
+      else process.env.PZD_MIGRATION_FAULT = previousFault;
+      await pool.end();
+    }
+  });
+
+  it('rejects startup when history or a security trigger is not exactly this build', async () => {
+    await recreate(ABSENT);
+    const absent = new pg.Pool({ connectionString: urlFor(ABSENT) });
+    try {
+      await assert.rejects(verifyMigrations(absent), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_SCHEMA_INCOMPATIBLE');
+        assert.match(err.message, /absent/);
+        return true;
+      });
+    } finally {
+      await absent.end();
+    }
+
+    const pool = new pg.Pool({ connectionString: urlFor(GATE) });
+    try {
+      await assertMigrationStartupReady(pool);
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `INSERT INTO public.pzd_schema_migration (migration_id, checksum, reversible)
+           VALUES ('9999_future', $1, false)`,
+          ['ab'.repeat(32)],
+        );
+      });
+      await assert.rejects(verifyMigrations(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_VERSION_AHEAD');
+        return true;
+      });
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(`DELETE FROM public.pzd_schema_migration WHERE migration_id = '9999_future'`);
+      });
+
+      const original = await pool.query(
+        `SELECT checksum FROM public.pzd_schema_migration WHERE migration_id = '0004_f2a_publication'`,
+      );
+      const originalChecksum = String(original.rows[0].checksum);
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `UPDATE public.pzd_schema_migration SET checksum = $1 WHERE migration_id = '0004_f2a_publication'`,
+          ['cd'.repeat(32)],
+        );
+      });
+      await assert.rejects(verifyMigrations(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_CHECKSUM_CONFLICT');
+        return true;
+      });
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `UPDATE public.pzd_schema_migration SET checksum = $1 WHERE migration_id = '0004_f2a_publication'`,
+          [originalChecksum],
+        );
+      });
+
+      const removed = await pool.query(
+        `SELECT checksum, reversible FROM public.pzd_schema_migration WHERE migration_id = '0011_journal_receipt_immutable'`,
+      );
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `DELETE FROM public.pzd_schema_migration WHERE migration_id = '0011_journal_receipt_immutable'`,
+        );
+      });
+      await assert.rejects(verifyMigrations(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_DEPENDENCY_MISSING');
+        return true;
+      });
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `INSERT INTO public.pzd_schema_migration (migration_id, checksum, reversible)
+           VALUES ('0011_journal_receipt_immutable', $1, $2)`,
+          [removed.rows[0].checksum, removed.rows[0].reversible],
+        );
+      });
+
+      const constraint = await pool.query(
+        `SELECT conname FROM pg_constraint
+         WHERE conrelid = 'public.pzd_schema_migration'::regclass AND contype = 'c'`,
+      );
+      const constraintName = String(constraint.rows[0].conname);
+      await pool.query(`ALTER TABLE public.pzd_schema_migration DROP CONSTRAINT ${quoteIdent(constraintName)}`);
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `UPDATE public.pzd_schema_migration SET checksum = 'corrupt' WHERE migration_id = '0000_schema_history'`,
+        );
+      });
+      await assert.rejects(verifyMigrations(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_SCHEMA_INCOMPATIBLE');
+        assert.match(err.message, /corrupt/);
+        return true;
+      });
+      await withHistoryUnlocked(pool, async (client) => {
+        await client.query(
+          `UPDATE public.pzd_schema_migration SET checksum = $1 WHERE migration_id = '0000_schema_history'`,
+          [(await loadChecksum(pool, '0000_schema_history'))],
+        );
+      });
+      await pool.query(
+        `ALTER TABLE public.pzd_schema_migration ADD CONSTRAINT ${quoteIdent(constraintName)} CHECK (checksum ~ '^[0-9a-f]{64}$')`,
+      );
+
+      await pool.query(
+        `ALTER TABLE public.command_admission_journal DISABLE TRIGGER trg_admission_receipt_immutable`,
+      );
+      await assert.rejects(assertMigrationStartupReady(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'SECURITY_TRIGGER_DISABLED');
+        return true;
+      });
+      await pool.query(
+        `ALTER TABLE public.command_admission_journal ENABLE TRIGGER trg_admission_receipt_immutable`,
+      );
+      await assertMigrationStartupReady(pool);
+    } finally {
+      await restoreGateHistory(pool).catch(() => undefined);
+      await pool.end();
+    }
+  });
+
+  it('rejects startup against a PostgreSQL server that is not version 18', async (t) => {
+    const container = 'pzd-f2-pg17-startup';
+    try {
+      await command('docker', ['info']);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      t.diagnostic(`incompatible-server=NOT_RUN ${message.split('\n')[0]}`);
+      return;
+    }
+    await command('docker', ['rm', '-f', container]).catch(() => undefined);
+    await command('docker', [
+      'run', '-d', '--name', container,
+      '-e', 'POSTGRES_PASSWORD=pzd',
+      '-p', '55445:5432',
+      'postgres:17',
+    ]);
+    const pool = new pg.Pool({
+      connectionString: 'postgresql://postgres:pzd@127.0.0.1:55445/postgres',
+      connectionTimeoutMillis: 1000,
+    });
+    try {
+      await waitForPostgres(pool);
+      const version = await pool.query('SHOW server_version_num');
+      assert.ok(Number(version.rows[0].server_version_num) < 180000);
+      await assert.rejects(assertMigrationStartupReady(pool), (err: unknown) => {
+        assert.ok(err instanceof MigrationRefusal);
+        assert.equal(err.refusal, 'MIGRATION_SCHEMA_INCOMPATIBLE');
+        assert.match(err.message, /PostgreSQL 18/);
+        return true;
+      });
+      t.diagnostic('incompatible-server=PASS');
+    } finally {
+      await pool.end();
+      await command('docker', ['rm', '-f', container]).catch(() => undefined);
+    }
+  });
+
+  it('restores a custom-format pg_dump without using a template database', async (t) => {
+    const dumpDir = mkdtempSync(join(tmpdir(), 'pzd-f2-dump-'));
+    const dumpFile = join(dumpDir, 'pzd.dump');
+    try {
+      const mode = await dumpAndRestore(GATE, DUMP, dumpFile);
+      t.diagnostic(`pg_dump_restore=${mode}`);
+      if (mode === 'NOT_RUN') {
+        assert.equal(mode, 'NOT_RUN');
+        return;
+      }
+      const source = new pg.Pool({ connectionString: urlFor(GATE) });
+      const restored = new pg.Pool({ connectionString: urlFor(DUMP) });
+      try {
+        await verifyMigrations(restored);
+        await assertMigrationStartupReady(restored);
+        const left = await source.query(
+          `SELECT week_start::text AS week_start, settlement_id::text AS settlement_id
+           FROM tournament_f2c_settlement ORDER BY week_start`,
+        );
+        const right = await restored.query(
+          `SELECT week_start::text AS week_start, settlement_id::text AS settlement_id
+           FROM tournament_f2c_settlement ORDER BY week_start`,
+        );
+        assert.deepEqual(right.rows, left.rows);
+        assert.ok(right.rows.length >= 1);
+        await assert.rejects(restored.query(`DELETE FROM tournament_f2c_settlement`), /F2C_FINAL_IMMUTABLE/);
+      } finally {
+        await source.end();
+        await restored.end();
+      }
+    } finally {
+      rmSync(dumpDir, { recursive: true, force: true });
+    }
+  });
 });
+
+async function withHistoryUnlocked(
+  pool: pg.Pool,
+  mutate: (client: pg.PoolClient) => Promise<void>,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `ALTER TABLE public.pzd_schema_migration DISABLE TRIGGER trg_pzd_schema_migration_immutable`,
+    );
+    await mutate(client);
+    await client.query(
+      `ALTER TABLE public.pzd_schema_migration ENABLE TRIGGER trg_pzd_schema_migration_immutable`,
+    );
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => undefined);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+async function loadChecksum(pool: pg.Pool, id: string): Promise<string> {
+  const file = loadMigrationFiles().find((candidate) => candidate.id === id);
+  assert.ok(file);
+  return file.checksum;
+}
+
+async function restoreGateHistory(pool: pg.Pool): Promise<void> {
+  await pool.query(
+    `ALTER TABLE public.command_admission_journal ENABLE TRIGGER trg_admission_receipt_immutable`,
+  ).catch(() => undefined);
+  const files = loadMigrationFiles();
+  await withHistoryUnlocked(pool, async (client) => {
+    await client.query(`DELETE FROM public.pzd_schema_migration WHERE migration_id = '9999_future'`);
+    for (const file of files) {
+      await client.query(
+        `INSERT INTO public.pzd_schema_migration (migration_id, checksum, reversible)
+         VALUES ($1, $2, false)
+         ON CONFLICT (migration_id) DO UPDATE SET checksum = EXCLUDED.checksum`,
+        [file.id, file.checksum],
+      );
+    }
+  });
+  const checks = await pool.query(
+    `SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.pzd_schema_migration'::regclass AND contype = 'c'`,
+  );
+  if (checks.rowCount === 0) {
+    await pool.query(
+      `ALTER TABLE public.pzd_schema_migration
+       ADD CONSTRAINT pzd_schema_migration_checksum_check CHECK (checksum ~ '^[0-9a-f]{64}$')`,
+    );
+  }
+}
+
+function quoteIdent(value: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/.test(value)) throw new Error(`Unexpected identifier ${value}`);
+  return value;
+}
+
+async function waitForPostgres(pool: pg.Pool): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  throw new Error('Timed out waiting for PostgreSQL');
+}
+
+async function commandExists(executable: string): Promise<boolean> {
+  const finder = process.platform === 'win32' ? 'where' : 'which';
+  return command(finder, [executable]).then(() => true).catch(() => false);
+}
+
+async function dumpAndRestore(
+  sourceDb: string,
+  targetDb: string,
+  dumpFile: string,
+): Promise<'host-binaries' | 'postgres-18-image' | 'NOT_RUN'> {
+  const source = new URL(databaseUrl!);
+  const password = decodeURIComponent(source.password);
+  const user = decodeURIComponent(source.username);
+  const port = source.port || '5432';
+  if ((await commandExists('pg_dump')) && (await commandExists('pg_restore'))) {
+    await command('pg_dump', [
+      '-h', source.hostname, '-p', port, '-U', user, '-d', sourceDb,
+      '--format=custom', '--no-owner', '--file', dumpFile,
+    ], password);
+    await recreate(targetDb);
+    await command('pg_restore', [
+      '-h', source.hostname, '-p', port, '-U', user, '-d', targetDb,
+      '--no-owner', '--exit-on-error', dumpFile,
+    ], password);
+    return 'host-binaries';
+  }
+  try {
+    await command('docker', ['info']);
+  } catch {
+    return 'NOT_RUN';
+  }
+  await command('docker', [
+    'run', '--rm', '-e', `PGPASSWORD=${password}`, '-v', `${dirnameOf(dumpFile)}:/dump`,
+    'postgres:18', 'pg_dump',
+    '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', sourceDb,
+    '--format=custom', '--no-owner', '--file', '/dump/pzd.dump',
+  ]);
+  await recreate(targetDb);
+  await command('docker', [
+    'run', '--rm', '-e', `PGPASSWORD=${password}`, '-v', `${dirnameOf(dumpFile)}:/dump`,
+    'postgres:18', 'pg_restore',
+    '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', targetDb,
+    '--no-owner', '--exit-on-error', '/dump/pzd.dump',
+  ]);
+  return 'postgres-18-image';
+}
+
+function dirnameOf(file: string): string {
+  return file.slice(0, file.lastIndexOf('/'));
+}
+
+function command(
+  executable: string,
+  args: readonly string[],
+  password?: string,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: password ? { ...process.env, PGPASSWORD: password } : process.env,
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { err += chunk.toString(); });
+    child.on('close', (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error(`${executable} ${args.join(' ')} exited ${code}\n${err}\n${out}`));
+    });
+  });
+}
 
 function roleUrl(role: string): string {
   const url = new URL(databaseUrl!);

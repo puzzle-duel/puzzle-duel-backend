@@ -14,7 +14,9 @@ sha256sum pzd-f2.dump pzd-f2.schema.sql
 
 Record `server_version_num`, the rows in `pzd_schema_migration`, and the `settlement_id` values in `tournament_f2c_settlement`.
 
-`pg_dump` was not installed on the machine that ran this gate. The executed restore proof is PostgreSQL's `CREATE DATABASE ... TEMPLATE` copy of the disposable database `pzd_f2_migration_gate` into `pzd_f2_migration_restore`. The copy kept the same settlement id and claim count. `DELETE` from settlement raised `F2C_FINAL_IMMUTABLE`. `UPDATE` of a completion raised `F2B_PUBLICATION_IMMUTABLE`.
+`CREATE DATABASE ... TEMPLATE` is a file-level clone. It is not a `pg_dump` / `pg_restore` pass. The migration test records `pg_dump_restore=NOT_RUN` when neither host `pg_dump` and `pg_restore` nor a Docker daemon that can run `postgres:18` is available. It does not relabel the template clone as that pass. When either tool can run, the test dumps `pzd_f2_migration_gate` in custom format with `--no-owner` and restores it with `pg_restore --exit-on-error --no-owner` into the empty database `pzd_f2_migration_dump`.
+
+The local run printed `pg_dump_restore=postgres-18-image`. Host `pg_dump` was not on `PATH`. The `postgres:18` image supplied `pg_dump` and `pg_restore`. The restored database kept the source settlement id, `verifyMigrations` and `assertMigrationStartupReady` passed, and `DELETE` from settlement raised `F2C_FINAL_IMMUTABLE`. That is a disposable-database result, not a production backup sign-off. GitHub Actions for this job has no Docker daemon, so the same test records `NOT_RUN` there.
 
 ## Restore
 
@@ -24,6 +26,6 @@ Record `server_version_num`, the rows in `pzd_schema_migration`, and the `settle
 4. Compare every `settlement_id` with the backup record. Do not rerun settlement for a week that already has a FINAL row.
 5. Confirm the immutability triggers are enabled. An owner or superuser can disable them, so a restore that omitted the triggers is not acceptable.
 
-A failed migration that is still inside its transaction rolls back with the history insert. `0010_f2_privileges` is the exception: a failure can leave a role behind, and running it again is safe. It does not delete leaderboard rows.
+A failed migration that is still inside its transaction rolls back with the history insert. `0010_f2_privileges` is the exception. `CREATE ROLE` and the privilege `DO` block commit on their own. If the process stops after that block revokes write privileges and before the later grants, the history row is absent and a retry restores the grants. It does not delete leaderboard rows.
 
 Do not use `DROP TABLE` as a rollback once a publication or FINAL row exists.
