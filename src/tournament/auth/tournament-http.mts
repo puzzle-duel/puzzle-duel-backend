@@ -21,6 +21,15 @@ import type { TrustedGameplayService } from '../adjudication/trusted-gameplay.mt
 import { validateUntrustedClientCommand } from '../adjudication/client-commands.mts';
 import type { SeriesFenceStore } from '../ingress/series-fence.mts';
 import type pg from 'pg';
+import { OrdinalIntegrityError } from '../claims/active-ordinal.mts';
+import { evaluateLeaderboardReadEligibility } from '../results/f2a-publication-schema.mts';
+import {
+  F2C_CATEGORIES,
+  F2C_PAGE_SIZE_LIMIT,
+  visibleWeekStarts,
+  type F2CCategory,
+  type F2CRankingService,
+} from '../results/f2c-rankings.mts';
 import {
   RANKED_HTTP_DISABLED_ERROR,
   resolveRankedHttpFeatureGate,
@@ -84,6 +93,13 @@ export interface TournamentHttpDeps {
    * Never derived from request headers/query/body.
    * Cannot override NODE_ENV=production hard deny (P0-FG01).
    */
+  /**
+   * Present only when this process is allowed to read F2 rankings.
+   * The UAT server sets it. Production does not construct that server.
+   */
+  rankings?: F2CRankingService;
+  /** Server HMAC key. Never read from the request. */
+  provenanceKey?: string;
   rankedHttpGate?: RankedHttpGateConfig;
   /**
    * Optional injected runtime env that may ONLY tighten denial (P0-FG02).
@@ -312,6 +328,29 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         return;
       }
 
+      const boardMatch = /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/board$/.exec(path);
+      if (boardMatch && method === 'GET') {
+        await sendOwnedBoard(res, deps, session.playerId, boardMatch[1]!);
+        return;
+      }
+      const resultsMatch = /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/results$/.exec(path);
+      if (resultsMatch && method === 'GET') {
+        await sendOwnedResults(res, deps, session.playerId, resultsMatch[1]!);
+        return;
+      }
+      if (path === '/v1/tournament/leaderboards/weeks' && method === 'GET') {
+        await sendVisibleWeeks(res, deps);
+        return;
+      }
+      if (path === '/v1/tournament/leaderboards/daily' && method === 'GET') {
+        await sendLeaderboard(res, deps, session.playerId, 'daily', url);
+        return;
+      }
+      if (path === '/v1/tournament/leaderboards/weekly' && method === 'GET') {
+        await sendLeaderboard(res, deps, session.playerId, 'weekly', url);
+        return;
+      }
+
       send(res, 404, { error: 'NOT_FOUND' });
     } catch (error) {
       if (
@@ -324,6 +363,196 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       send(res, 503, { error: 'AUTH_UNAVAILABLE' });
     }
   };
+}
+
+const ORDINAL_LABEL = ['', 'E1', 'E2', 'E3', 'M1', 'M2', 'H1'] as const;
+
+function parseCategory(value: string | null): F2CCategory | null {
+  if (!value) return null;
+  return (F2C_CATEGORIES as readonly string[]).includes(value) ? (value as F2CCategory) : null;
+}
+
+function parsePageSize(value: string | null): number | null {
+  if (value === null || value === '') return 50;
+  if (!/^[1-9][0-9]{0,3}$/.test(value)) return null;
+  const size = Number(value);
+  if (size < 1 || size > F2C_PAGE_SIZE_LIMIT) return null;
+  return size;
+}
+
+async function sendOwnedBoard(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+  seriesId: string,
+): Promise<void> {
+  const claim = await deps.claims.getClaimForPlayer(playerId, seriesId);
+  if (!claim) {
+    send(res, 404, { error: 'SERIES_NOT_OWNED' });
+    return;
+  }
+  let ordinal: number;
+  try {
+    ordinal = await resolveActiveSubgameOrdinal(deps.pool, seriesId, playerId);
+  } catch (error) {
+    if (error instanceof OrdinalIntegrityError) {
+      send(res, 409, { error: 'SERIES_STATE_INCONSISTENT' });
+      return;
+    }
+    throw error;
+  }
+  const snap = await deps.pool.query(
+    `SELECT state_json, board_revision, score, status, terminal_reason, state_hash
+     FROM authoritative_game_snapshot
+     WHERE series_key = $1 AND player_id = $2 AND subgame_ordinal = $3`,
+    [seriesId, playerId, ordinal],
+  );
+  const fence = await deps.fence.get(seriesId);
+  const writer = await deps.writers.get(seriesId);
+  const now = await deps.pool.query(
+    `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
+  );
+  if (!snap.rowCount || !fence || !writer) {
+    send(res, 409, { error: 'SERIES_STATE_INCONSISTENT' });
+    return;
+  }
+  const row = snap.rows[0]!;
+  send(res, 200, {
+    seriesId,
+    ordinal,
+    ordinalLabel: ORDINAL_LABEL[ordinal] ?? String(ordinal),
+    status: claim.status,
+    fenceStatus: fence.status,
+    boardRevision: fence.boardRevision,
+    score: Number(row.score),
+    seriesScore: fence.score,
+    gameStatus: String(row.status),
+    terminalReason: row.terminal_reason === null ? null : String(row.terminal_reason),
+    stateHash: String(row.state_hash),
+    state: row.state_json,
+    writerGeneration: writer.writerGeneration,
+    idleDeadlineAtMs: fence.idleDeadlineAt.getTime(),
+    serverNowMs: Number(now.rows[0]?.ms),
+    awaitAdvance: fence.status === 'AWAIT_ADVANCE',
+    resultsPublished: fence.resultsPublished,
+  });
+}
+
+async function sendOwnedResults(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+  seriesId: string,
+): Promise<void> {
+  const claim = await deps.claims.getClaimForPlayer(playerId, seriesId);
+  if (!claim) {
+    send(res, 404, { error: 'SERIES_NOT_OWNED' });
+    return;
+  }
+  if (!deps.provenanceKey) {
+    send(res, 404, { error: 'NOT_FOUND' });
+    return;
+  }
+  const eligibility = await evaluateLeaderboardReadEligibility(deps.pool, seriesId, {
+    provenanceKey: deps.provenanceKey,
+  });
+  if (!eligibility.authorized) {
+    send(res, 409, { error: eligibility.reason });
+    return;
+  }
+  if (eligibility.playerId !== playerId) {
+    send(res, 404, { error: 'SERIES_NOT_OWNED' });
+    return;
+  }
+  const games = await deps.pool.query(
+    `SELECT subgame_ordinal, score
+     FROM tournament_verified_subgame_score
+     WHERE series_id = $1
+     ORDER BY subgame_ordinal`,
+    [seriesId],
+  );
+  send(res, 200, {
+    seriesId,
+    originalUtcDate: eligibility.originalUtcDate,
+    easy: eligibility.easy,
+    medium: eligibility.medium,
+    hard: eligibility.hard,
+    all: eligibility.all,
+    onTimeAwarded: eligibility.onTimeAwarded,
+    games: games.rows.map((row) => ({
+      ordinal: Number(row.subgame_ordinal),
+      label: ORDINAL_LABEL[Number(row.subgame_ordinal)] ?? String(row.subgame_ordinal),
+      score: Number(row.score),
+    })),
+  });
+}
+
+async function sendVisibleWeeks(res: ServerResponse, deps: TournamentHttpDeps): Promise<void> {
+  if (!deps.rankings) {
+    send(res, 404, { error: 'NOT_FOUND' });
+    return;
+  }
+  const now = await deps.pool.query(
+    `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
+  );
+  const nowMs = Number(now.rows[0]?.ms);
+  send(res, 200, { weeks: visibleWeekStarts(nowMs), serverNowMs: nowMs });
+}
+
+async function sendLeaderboard(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+  board: 'daily' | 'weekly',
+  url: URL,
+): Promise<void> {
+  if (!deps.rankings) {
+    send(res, 404, { error: 'NOT_FOUND' });
+    return;
+  }
+  const category = parseCategory(url.searchParams.get('category'));
+  const pageSize = parsePageSize(url.searchParams.get('pageSize'));
+  if (!category || pageSize === null) {
+    send(res, 400, { error: 'MALFORMED_REQUEST' });
+    return;
+  }
+  const cursor = url.searchParams.get('cursor') ?? undefined;
+  const period = board === 'daily'
+    ? url.searchParams.get('date')
+    : url.searchParams.get('weekStart');
+  if (!period || !/^\d{4}-\d{2}-\d{2}$/.test(period)) {
+    send(res, 400, { error: 'MALFORMED_REQUEST' });
+    return;
+  }
+  const result = board === 'daily'
+    ? await deps.rankings.readDaily({ date: period, category, pageSize, cursor })
+    : await deps.rankings.readWeekly({ weekStart: period, category, pageSize, cursor });
+  if (!result.ok) {
+    send(res, result.reason === 'SNAPSHOT_CHANGED' ? 409 : 400, { error: result.reason });
+    return;
+  }
+  const self = result.rows.find((row) => row.playerId === playerId) ?? null;
+  send(res, 200, {
+    board: result.board,
+    period: result.period,
+    category: result.category,
+    state: result.state,
+    revision: result.revision,
+    settlementId: result.settlementId,
+    pageSize: result.pageSize,
+    cursor: result.cursor,
+    nextCursor: result.nextCursor,
+    self: self
+      ? { score: self.score, rank: self.rank, onTimeAwarded: self.onTimeAwarded }
+      : null,
+    rows: result.rows.map((row) => ({
+      score: row.score,
+      rank: row.rank,
+      displayPosition: row.displayPosition,
+      onTimeAwarded: row.onTimeAwarded,
+      self: row.playerId === playerId,
+    })),
+  });
 }
 
 async function handleSession(
