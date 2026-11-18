@@ -116,13 +116,14 @@ jobs:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
 
-  # Run 44383306295 job 135081089978 printed 1 pass, then stayed open
-  # until GitHub's annotation "maximum execution time of 20m0s". The harness
-  # script exits with the test status once that result is known.
+  # Job 135081089978 and 135115620690 were cancelled by the annotation
+  # "maximum execution time of 20m0s" while this step was still open.
+  # Docker and pool calls in the harness are now bounded, and the script
+  # exits with the test status once that result is known.
   stage-e-failover:
     name: stage-e-failover
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -131,5 +132,5 @@ jobs:
       - name: Install exact dependencies
         run: npm ci
       - name: Stage F2 multi-host failover topology
-        timeout-minutes: 15
+        timeout-minutes: 25
         run: npm run test:stage-f2-failover
