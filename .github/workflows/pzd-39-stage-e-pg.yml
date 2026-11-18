@@ -103,6 +103,15 @@ jobs:
         run: npm run test:stage-f1-http
       - name: Stage F2 calculator, F2-A schema, F2-B publication, and F2-C rankings
         run: npm run test:stage-f2
+      - name: Stage F2 versioned migrations, privileges, and recovery
+        run: npm run test:stage-f2-migrations
+      - name: Stage F2 multi-host failover topology
+        run: |
+          if docker info >/dev/null 2>&1; then
+            npm run test:stage-f2-failover
+          else
+            echo 'FAILOVER_TOPOLOGY NOT_RUN: this job has no Docker daemon for a second PostgreSQL 18 instance, replica promotion, or a container clock step'
+          fi
       - name: Core-001.v3 replay regression (including generator vectors)
         env:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures

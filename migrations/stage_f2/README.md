@@ -34,7 +34,7 @@ DROP TABLE IF EXISTS tournament_verified_subgame_score;
 DROP TABLE IF EXISTS tournament_daily_series_completion;
 ```
 
-Production versioned migration IDs, expand/contract rollout, and backup/restore remain **NOT_RUN** until owner-approved migration acceptance (ADR-T02 still requires versioned SQL + rollback before production).
+Versioned SQL is in `sql/` and is applied by `src/tournament/migrations/f2-migrator.mts`. Acceptance, privileges, backup, and failover notes are beside this file. Production apply, ranked HTTP, and a production failover sign-off are not authorized.
 
 ## F2-B writer
 
@@ -54,7 +54,7 @@ The service is the only writer. A provenance row is authorized only when `evalua
 - `tournament_f2c_rank_snapshot` — frozen competition-rank rows
 - `BEFORE UPDATE OR DELETE` triggers that raise `F2C_FINAL_IMMUTABLE`
 
-Drop order for a disposable database is `F2C_RANKING_DROP_DDL` before the F2-A publication drop. Production versioned migration IDs remain **NOT_RUN**.
+Drop order for a disposable database is `F2C_RANKING_DROP_DDL` before the F2-A publication drop. The versioned runner refuses that drop. Restore a backup instead.
 
 ## Explicitly deferred (production)
 

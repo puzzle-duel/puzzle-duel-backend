@@ -9,12 +9,11 @@
  * apply them. Callers pass an explicit page size up to F2C_PAGE_SIZE_LIMIT,
  * which is a request-size bound, not an owner-approved page policy.
  *
- * Lock order for FINAL:
+ * Lock order for claim insert, admission, publication, H1 adjudication, and FINAL:
  *   1. weekly settlement advisory lock
  *   2. per-series advisory locks, ascending series id
- *   3. fence / writer / claim row locks already defined for those series
- * F2-B publication takes only the series lock, so it cannot deadlock with FINAL.
- * Daily claim takes the settlement lock before it samples PostgreSQL time.
+ *   3. fence / writer / claim row locks
+ * The period-closure trigger takes the same settlement lock before it reads FINAL.
  */
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
@@ -87,6 +86,8 @@ CREATE TABLE IF NOT EXISTS tournament_f2c_rank_snapshot (
 CREATE OR REPLACE FUNCTION tournament_f2c_reject_final_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog
 AS $$
 BEGIN
   RAISE EXCEPTION 'F2C_FINAL_IMMUTABLE'
@@ -125,16 +126,18 @@ END $$;
 CREATE OR REPLACE FUNCTION tournament_f2c_reject_closed_period_write()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog
 AS $$
 DECLARE
   closed_week date;
 BEGIN
   -- Same advisory keys as lockWeeklySettlement('pzd:f2c:weekly-settlement').
-  PERFORM pg_advisory_xact_lock(1973609813, 1888871555);
+  PERFORM pg_catalog.pg_advisory_xact_lock(1973609813, 1888871555);
   closed_week := NEW.original_utc_date
     - ((EXTRACT(ISODOW FROM NEW.original_utc_date)::int + 6) % 7);
   IF EXISTS (
-    SELECT 1 FROM tournament_f2c_settlement s
+    SELECT 1 FROM public.tournament_f2c_settlement s
     WHERE s.week_start = closed_week AND s.state = 'FINAL'
   ) THEN
     RAISE EXCEPTION 'F2C_PERIOD_CLOSED'

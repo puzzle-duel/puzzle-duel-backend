@@ -100,7 +100,7 @@ Production expand/contract migration IDs: **NOT_RUN / Proposed**.
 
 | ID | Topic | Status |
 | --- | --- | --- |
-| U-F2A-01 | Production versioned migration filename/ID + expand/contract order vs embedded DDL proofs | **Proposed** |
+| U-F2A-01 | Production versioned migration filename/ID + expand/contract order vs embedded DDL proofs | SQL ids `0000`–`0010` are in `migrations/stage_f2/sql/`. Production apply remains unauthorized |
 | U-F2A-02 | Whether fence `results_published` alone may gate reads, or reads must join completion+4 categories | **Proposed** (recommend join; fence flag insufficient) |
 | U-F2A-03 | Exact H1-terminal vs Advance timing for marking claim `COMPLETED` | **Resolved for F2-B** by owner Q13/Q07 and accepted TD-06/TD-12. Publication and `COMPLETED` occur on the verified terminal H1 move. Between-game Advance is only the transition to a next ordinal. Ordinal 6 returns `NO_NEXT_ORDINAL` and does not mark the fence `COMPLETED`. |
 | U-F2A-04 | Weekly aggregate / period snapshot table shapes | F2-C test DDL in `f2c-rankings.mts`. Production migration IDs remain **NOT_RUN** |

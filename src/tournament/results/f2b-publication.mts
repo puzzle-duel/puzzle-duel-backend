@@ -152,6 +152,8 @@ ALTER TABLE tournament_daily_series_completion
 CREATE OR REPLACE FUNCTION tournament_f2b_reject_publication_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog
 AS $$
 BEGIN
   RAISE EXCEPTION 'F2B_PUBLICATION_IMMUTABLE'

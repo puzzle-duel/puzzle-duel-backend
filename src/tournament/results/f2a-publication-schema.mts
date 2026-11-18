@@ -39,6 +39,8 @@ END $$;
 CREATE OR REPLACE FUNCTION tournament_daily_claim_reject_identity_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY INVOKER
+SET search_path = pg_catalog
 AS $$
 BEGIN
   IF NEW.series_id IS DISTINCT FROM OLD.series_id
