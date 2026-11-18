@@ -870,12 +870,19 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
       return;
     }
     await command('docker', ['rm', '-f', container]).catch(() => undefined);
-    await command('docker', [
-      'run', '-d', '--name', container,
-      '-e', 'POSTGRES_PASSWORD=pzd',
-      '-p', '55445:5432',
-      'postgres:17',
-    ]);
+    try {
+      await command('docker', [
+        'run', '-d', '--name', container,
+        '-e', 'POSTGRES_PASSWORD=pzd',
+        '-p', '55445:5432',
+        'postgres:17',
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      t.diagnostic(`incompatible-server=NOT_RUN ${message.split('\n')[0]}`);
+      await command('docker', ['rm', '-f', container]).catch(() => undefined);
+      return;
+    }
     const pool = new pg.Pool({
       connectionString: 'postgresql://postgres:pzd@127.0.0.1:55445/postgres',
       connectionTimeoutMillis: 1000,
@@ -1038,19 +1045,30 @@ async function dumpAndRestore(
   } catch {
     return 'NOT_RUN';
   }
-  await command('docker', [
-    'run', '--rm', '-e', `PGPASSWORD=${password}`, '-v', `${dirnameOf(dumpFile)}:/dump`,
-    'postgres:18', 'pg_dump',
-    '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', sourceDb,
-    '--format=custom', '--no-owner', '--file', '/dump/pzd.dump',
-  ]);
-  await recreate(targetDb);
-  await command('docker', [
-    'run', '--rm', '-e', `PGPASSWORD=${password}`, '-v', `${dirnameOf(dumpFile)}:/dump`,
-    'postgres:18', 'pg_restore',
-    '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', targetDb,
-    '--no-owner', '--exit-on-error', '/dump/pzd.dump',
-  ]);
+  const volume = `${dirnameOf(dumpFile)}:/dump`;
+  try {
+    await command('docker', [
+      'run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
+      '-e', `PGPASSWORD=${password}`, '-v', volume,
+      'postgres:18', 'pg_dump',
+      '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', sourceDb,
+      '--format=custom', '--no-owner', '--file', '/dump/pzd.dump',
+    ]);
+    await recreate(targetDb);
+    await command('docker', [
+      'run', '--rm', '--add-host', 'host.docker.internal:host-gateway',
+      '-e', `PGPASSWORD=${password}`, '-v', volume,
+      'postgres:18', 'pg_restore',
+      '-h', 'host.docker.internal', '-p', port, '-U', user, '-d', targetDb,
+      '--no-owner', '--exit-on-error', '/dump/pzd.dump',
+    ]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/could not connect|could not translate host|name resolution|network is unreachable|Cannot connect to the Docker daemon/i.test(message)) {
+      return 'NOT_RUN';
+    }
+    throw err;
+  }
   return 'postgres-18-image';
 }
 

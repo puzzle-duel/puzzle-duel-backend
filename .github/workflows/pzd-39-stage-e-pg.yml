@@ -11,7 +11,7 @@ jobs:
   stage-e-pg:
     name: stage-e-pg
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:18

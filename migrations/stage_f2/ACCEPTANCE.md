@@ -37,4 +37,6 @@ Disposable databases on the local PostgreSQL 18 used by `PZD_INGRESS_DATABASE_UR
 
 The PostgreSQL 17 case printed `incompatible-server=PASS`. The backup case printed `pg_dump_restore=postgres-18-image`. The template clone is a separate test and is not that backup result. A local disposable run is not production readiness.
 
+GitHub Actions for `617937535601f7f503604d952d5044f88f4646cf` completed the quality gate and generator parity. Both Stage E PostgreSQL jobs were cancelled, and the workflow limit at that commit was 20 minutes. The job limit is now 40 minutes. A cancelled job is not a Stage E pass.
+
 The runner refuses every down migration with `MIGRATION_ROLLBACK_REQUIRES_BACKUP`. Dropping publication or FINAL tables is not a rollback.
