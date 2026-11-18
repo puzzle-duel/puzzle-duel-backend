@@ -30,6 +30,7 @@ import {
   lockSeriesForTransaction,
   lockWeeklySettlement,
   SERIES_FENCE_DDL,
+  seriesAdvisoryKeys,
 } from '../../../src/tournament/ingress/series-fence.mts';
 import { F2A_PUBLICATION_DROP_DDL } from '../../../src/tournament/results/f2a-publication-schema.mts';
 import { F2BPublicationService } from '../../../src/tournament/results/f2b-publication.mts';
@@ -748,8 +749,119 @@ describe('F2-C PostgreSQL rankings and FINAL', { concurrency: false }, () => {
     await eraseUnpublished(seeded.seriesId);
   });
 
+  it('keeps a finalized week closed across connections, orphans, and settlement retries', async () => {
+    assert.deepEqual(seriesAdvisoryKeys('pzd:f2c:weekly-settlement'), [1973609813, 1888871555]);
+    const weeks = visibleWeekStarts(await dbNow());
+    const week = weeks[4]!;
+    const cutoff = weeklyFinalCutoffMs(week);
+    const primary = await pool.query(
+      `SELECT pg_is_in_recovery() AS recovery, current_setting('transaction_read_only') AS read_only`,
+    );
+    assert.equal(primary.rows[0].recovery, false);
+    assert.equal(String(primary.rows[0].read_only), 'off');
+
+    const orphanSeries = randomUUID();
+    await pool.query(
+      `INSERT INTO command_admission_journal (
+         admission_id, series_key, player_id, command_type, idempotency_key, payload_hash,
+         trusted_received_at_ms, db_trusted_received_at_ms, admission_seq, outcome
+       ) VALUES ($1,$2,$3,'move',$4,$5,$6,$7,1,'pending')`,
+      [
+        randomUUID(), orphanSeries, randomUUID(), 'orphan',
+        createHash('sha256').update(orphanSeries).digest('hex'), cutoff - 1, cutoff - 1,
+      ],
+    );
+    assert.equal(closedReason(await rankings.finalizeWeek(week)), 'ORPHAN_ADMISSION', 'orphan admission');
+    assert.equal(await settlementCount(week), 0);
+    await pool.query(`DELETE FROM command_admission_journal WHERE series_key = $1`, [orphanSeries]);
+
+    const admission = await pool.connect();
+    try {
+      await admission.query('BEGIN');
+      await lockWeeklySettlement(admission);
+      assert.equal(
+        closedReason(await rankings.finalizeWeek(week, { lockTimeoutMs: 400 })),
+        'LOCK_NOT_ACQUIRED',
+        'uncommitted admission',
+      );
+      assert.equal(await settlementCount(week), 0);
+      await admission.query('ROLLBACK');
+    } finally {
+      admission.release();
+    }
+
+    const stale = await pool.connect();
+    let settlementId = '';
+    try {
+      await stale.query('BEGIN');
+      const seen = await stale.query(
+        `SELECT 1 FROM tournament_f2c_settlement WHERE week_start = $1::date`,
+        [week],
+      );
+      assert.equal(seen.rowCount, 0);
+      const raced = await Promise.all([rankings.finalizeWeek(week), rankings.finalizeWeek(week)]);
+      assert.equal(raced[0]?.outcome, 'final');
+      assert.equal(raced[1]?.outcome, 'final');
+      if (raced[0]?.outcome === 'final' && raced[1]?.outcome === 'final') {
+        assert.equal(raced[0].settlementId, raced[1].settlementId, 'concurrent finalization');
+        settlementId = raced[0].settlementId;
+      }
+      await assert.rejects(
+        stale.query(
+          `INSERT INTO tournament_daily_claim
+             (series_id, player_id, original_utc_date, started_at_ms, manifest_digest)
+           VALUES ($1,$2,$3::date,$4,$5)`,
+          [randomUUID(), randomUUID(), week, Date.parse(`${week}T12:00:00.000Z`), mixedManifest.digest],
+        ),
+        /F2C_PERIOD_CLOSED/,
+        'stale worker claim',
+      );
+      await stale.query('ROLLBACK');
+    } finally {
+      stale.release();
+    }
+
+    const retry = await rankings.finalizeWeek(week);
+    assert.equal(retry.outcome === 'final' && retry.alreadyFinal, true, 'lost commit acknowledgement');
+    if (retry.outcome === 'final') assert.equal(retry.settlementId, settlementId);
+    const headers = await pool.query(
+      `SELECT count(*)::int AS n FROM tournament_f2c_board_header WHERE settlement_id = $1`,
+      [settlementId],
+    );
+    assert.equal(Number(headers.rows[0].n), 32, '32 board snapshots');
+    const firstRead = rowsOf(await rankings.readWeekly({ weekStart: week, category: 'ALL', pageSize: 50 }));
+    const secondRead = rowsOf(await rankings.readWeekly({ weekStart: week, category: 'ALL', pageSize: 50 }));
+    assert.deepEqual(secondRead, firstRead, 'no result loss after retry');
+
+    const seriesLock = await pool.connect();
+    const settlementLock = await pool.connect();
+    try {
+      await seriesLock.query('BEGIN');
+      await seriesLock.query(`SELECT set_config('lock_timeout', '400ms', true)`);
+      await lockWeeklySettlement(seriesLock);
+      await lockSeriesForTransaction(seriesLock, randomUUID());
+      await settlementLock.query('BEGIN');
+      await settlementLock.query(`SELECT set_config('lock_timeout', '400ms', true)`);
+      await assert.rejects(lockWeeklySettlement(settlementLock), (err: { code?: string }) => {
+        assert.equal(err.code, '55P03');
+        assert.notEqual(err.code, '40P01');
+        return true;
+      }, 'no deadlock');
+      await settlementLock.query('ROLLBACK');
+      await seriesLock.query('ROLLBACK');
+    } finally {
+      seriesLock.release();
+      settlementLock.release();
+    }
+  });
+
   it('freezes the previous week atomically and does not recompute FINAL after a later publication', async () => {
     const dates = weekDates(previousWeek);
+    const held = await seedSeries({
+      date: dates[1]!,
+      mode: 'five',
+      hardCutoffAtMs: weeklyFinalCutoffMs(previousWeek),
+    });
     const before = rowsOf(await rankings.readWeekly({ weekStart: previousWeek, category: 'ALL', pageSize: 50 }));
     const finalized = await rankings.finalizeWeek(previousWeek);
     assert.equal(finalized.outcome, 'final');
@@ -766,9 +878,26 @@ describe('F2-C PostgreSQL rankings and FINAL', { concurrency: false }, () => {
       [finalized.settlementId],
     );
     assert.equal(Number(headers.rows[0].n), 32);
-    const late = await publishCompleted(dates[6]!);
+    const latePublish = await publisher.publish({
+      seriesId: held.seriesId,
+      playerId: held.playerId,
+      writerGeneration: 1,
+      commandIdempotencyKey: `h1:${held.seriesId}`,
+      event: 'h1_terminal_move',
+    });
+    assert.equal(latePublish.outcome, 'rejected');
+    if (latePublish.outcome === 'rejected') assert.equal(latePublish.reason, 'PERIOD_CLOSED');
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO tournament_daily_claim
+           (series_id, player_id, original_utc_date, started_at_ms, manifest_digest)
+         VALUES ($1,$2,$3::date,$4,$5)`,
+        [randomUUID(), randomUUID(), dates[0], Date.parse(`${dates[0]}T12:00:00.000Z`), mixedManifest.digest],
+      ),
+      /F2C_PERIOD_CLOSED/,
+    );
     const still = rowsOf(await rankings.readWeekly({ weekStart: previousWeek, category: 'ALL', pageSize: 50 }));
-    assert.equal(still.some((row) => row.playerId === late.playerId), false);
+    assert.equal(still.some((row) => row.playerId === held.playerId), false);
     assert.deepEqual(still.map((row) => row.playerId), frozen.rows.map((row) => row.playerId));
     const daily = await rankings.readDaily({ date: dates[0]!, category: 'EASY', pageSize: 50 });
     assert.equal(daily.ok && daily.state, 'FINAL');

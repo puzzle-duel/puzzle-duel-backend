@@ -30,7 +30,7 @@ import {
   stateHashV3,
   stateToJson,
 } from '../../engine/core001v3/index.mts';
-import { lockSeriesForTransaction } from '../ingress/series-fence.mts';
+import { lockSeriesForTransaction, lockWeeklySettlement } from '../ingress/series-fence.mts';
 import type { PinnedManifestRegistry } from '../claims/pinned-manifest-registry.mts';
 import { computeFourCategoryScores } from './four-category-scores.mts';
 import {
@@ -64,6 +64,7 @@ export const F2B_REJECT_REASONS = [
   'PROGRESSION_INVALID',
   'FENCE_SCORE_MISMATCH',
   'PUBLICATION_CORRUPT',
+  'PERIOD_CLOSED',
 ] as const;
 
 export type F2BRejectReason = (typeof F2B_REJECT_REASONS)[number];
@@ -903,6 +904,7 @@ export class F2BPublicationService {
     let committed = false;
     try {
       await client.query('BEGIN');
+      await lockWeeklySettlement(client);
       const result = await this.#writeVerified(client, prepared, () => undefined);
       await this.#step('before_commit', client);
       await client.query('COMMIT');
@@ -1025,6 +1027,19 @@ export class F2BPublicationService {
     await client.query(`SELECT 1 FROM tournament_daily_claim WHERE series_id = $1 FOR UPDATE`, [
       input.seriesId,
     ]);
+    const period = await client.query(`SELECT to_regclass('public.tournament_f2c_settlement') AS rel`);
+    if (period.rows[0]?.rel) {
+      const closed = await client.query(
+        `SELECT 1
+         FROM tournament_daily_claim c
+         JOIN tournament_f2c_settlement s
+           ON s.week_start = (c.original_utc_date - ((EXTRACT(ISODOW FROM c.original_utc_date)::int + 6) % 7))
+          AND s.state = 'FINAL'
+         WHERE c.series_id = $1`,
+        [input.seriesId],
+      );
+      if ((closed.rowCount ?? 0) > 0) return { outcome: 'rejected', reason: 'PERIOD_CLOSED' };
+    }
 
     const proof = await loadProof(client, input.seriesId, this.#manifests, {
       playerId: input.playerId,

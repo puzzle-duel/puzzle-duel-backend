@@ -101,7 +101,7 @@ Node 26.13.1. PostgreSQL 18 at `127.0.0.1:55432`, database `pzd_ingress`. `SHOW 
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | PASS |
-| `npm run test:stage-f2` | 68 pass, 0 fail, 0 skip |
+| `npm run test:stage-f2` | 69 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1` | 10 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-auth` | 49 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-http` | 2 pass, 0 fail, 0 skip |

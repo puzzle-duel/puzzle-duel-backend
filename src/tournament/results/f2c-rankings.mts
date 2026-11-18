@@ -121,12 +121,70 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+CREATE OR REPLACE FUNCTION tournament_f2c_reject_closed_period_write()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  closed_week date;
+BEGIN
+  -- Same advisory keys as lockWeeklySettlement('pzd:f2c:weekly-settlement').
+  PERFORM pg_advisory_xact_lock(1973609813, 1888871555);
+  closed_week := NEW.original_utc_date
+    - ((EXTRACT(ISODOW FROM NEW.original_utc_date)::int + 6) % 7);
+  IF EXISTS (
+    SELECT 1 FROM tournament_f2c_settlement s
+    WHERE s.week_start = closed_week AND s.state = 'FINAL'
+  ) THEN
+    RAISE EXCEPTION 'F2C_PERIOD_CLOSED'
+      USING ERRCODE = 'integrity_constraint_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DO $$
+BEGIN
+  IF to_regclass('public.tournament_daily_claim') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_trigger
+       WHERE tgname = 'trg_f2c_claim_period_closed'
+         AND tgrelid = 'tournament_daily_claim'::regclass
+         AND NOT tgisinternal
+     ) THEN
+    CREATE TRIGGER trg_f2c_claim_period_closed
+      BEFORE INSERT ON tournament_daily_claim
+      FOR EACH ROW EXECUTE FUNCTION tournament_f2c_reject_closed_period_write();
+  END IF;
+  IF to_regclass('public.tournament_daily_series_completion') IS NOT NULL
+     AND NOT EXISTS (
+       SELECT 1 FROM pg_trigger
+       WHERE tgname = 'trg_f2c_publication_period_closed'
+         AND tgrelid = 'tournament_daily_series_completion'::regclass
+         AND NOT tgisinternal
+     ) THEN
+    CREATE TRIGGER trg_f2c_publication_period_closed
+      BEFORE INSERT ON tournament_daily_series_completion
+      FOR EACH ROW EXECUTE FUNCTION tournament_f2c_reject_closed_period_write();
+  END IF;
+END $$;
 `;
 
 export const F2C_RANKING_DROP_DDL = `
+DO $$
+BEGIN
+  IF to_regclass('public.tournament_daily_claim') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_f2c_claim_period_closed ON tournament_daily_claim;
+  END IF;
+  IF to_regclass('public.tournament_daily_series_completion') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_f2c_publication_period_closed ON tournament_daily_series_completion;
+  END IF;
+END $$;
 DROP TABLE IF EXISTS tournament_f2c_rank_snapshot;
 DROP TABLE IF EXISTS tournament_f2c_board_header;
 DROP TABLE IF EXISTS tournament_f2c_settlement;
+DROP FUNCTION IF EXISTS tournament_f2c_reject_closed_period_write();
 DROP FUNCTION IF EXISTS tournament_f2c_reject_final_mutation();
 `;
 
@@ -144,7 +202,9 @@ export type F2CProvisionalReason =
   | 'WEEKLY_SCORE_OVERFLOW'
   | 'DUPLICATE_DAILY_CREDIT'
   | 'INCOMPLETE_SNAPSHOT'
-  | 'PUBLICATION_UNSETTLED';
+  | 'PUBLICATION_UNSETTLED'
+  | 'ORPHAN_ADMISSION'
+  | 'NOT_WRITABLE_PRIMARY';
 
 export type F2CSettlementResult =
   | {
@@ -446,6 +506,15 @@ export class F2CRankingService {
     let committed = false;
     try {
       await client.query('BEGIN');
+      const primary = await client.query(
+        `SELECT pg_is_in_recovery() AS recovery, current_setting('transaction_read_only') AS read_only`,
+      );
+      if (
+        primary.rows[0]?.recovery === true ||
+        String(primary.rows[0]?.read_only) === 'on'
+      ) {
+        throw new SettlementClosed('NOT_WRITABLE_PRIMARY');
+      }
       if (options?.lockTimeoutMs !== undefined) {
         if (!Number.isSafeInteger(options.lockTimeoutMs) || options.lockTimeoutMs < 1) {
           throw new SettlementClosed('UNCERTAIN_TIMESTAMP');
@@ -806,6 +875,23 @@ export class F2CRankingService {
     );
     const seq = intOf(watermark.rows[0]?.seq, 'WATERMARK_UNAVAILABLE');
     if (seq < 0) throw new SettlementClosed('WATERMARK_UNAVAILABLE');
+    const orphan = await client.query(
+      `SELECT outcome
+       FROM command_admission_journal j
+       WHERE NOT EXISTS (
+         SELECT 1 FROM tournament_daily_claim c WHERE c.series_id::text = j.series_key
+       )
+         AND outcome <> 'applied'
+         AND outcome <> 'rejected'
+         AND (
+           db_trusted_received_at_ms IS NULL
+           OR db_trusted_received_at_ms < $1
+           OR trusted_received_at_ms < $1
+         )
+       LIMIT 1`,
+      [cutoffMs],
+    );
+    if (orphan.rows.length === 1) throw new SettlementClosed('ORPHAN_ADMISSION');
     if (seriesIds.length === 0) return seq;
     const blocking = await client.query(
       `SELECT outcome

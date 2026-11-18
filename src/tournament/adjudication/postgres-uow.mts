@@ -20,7 +20,7 @@ import {
   type Move,
   type MoveApplied,
 } from '../../engine/core001v3/index.mts';
-import { lockSeriesForTransaction } from '../ingress/series-fence.mts';
+import { lockSeriesForTransaction, lockWeeklySettlement } from '../ingress/series-fence.mts';
 import type {
   F2BPublishInput,
   F2BPublishResult,
@@ -165,6 +165,7 @@ export class PostgresTrustedUnitOfWork {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      await lockWeeklySettlement(client);
       await lockSeriesForTransaction(client, input.seriesKey);
       await this.#fault('after_lock');
 

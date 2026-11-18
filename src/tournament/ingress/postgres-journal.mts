@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { ImmutableAdmissionResult } from '../adjudication/admission-result.mts';
 import type { IngressClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
-import { lockSeriesForTransaction, seriesAdvisoryKeys } from './series-fence.mts';
+import { lockSeriesForTransaction, lockWeeklySettlement, seriesAdvisoryKeys } from './series-fence.mts';
 import type {
   AdmitCommandInput,
   AdmitResult,
@@ -77,6 +77,7 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
     try {
       client = await this.#pool.connect();
       await client.query('BEGIN');
+      await lockWeeklySettlement(client);
       await lockSeriesForTransaction(client, input.seriesKey);
 
       const existing = await client.query(

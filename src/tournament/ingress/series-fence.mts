@@ -40,10 +40,12 @@ export async function lockSeriesForTransaction(
 }
 
 /**
- * First lock of weekly FINAL and of daily claim bootstrap.
- * F2-B publication does not take this lock. It only takes the series lock,
- * so settlement cannot deadlock with an H1 publication:
- * settlement lock, then series locks in series-id order.
+ * First lock of claim insert, command admission, standalone publication,
+ * H1 adjudication, and weekly FINAL.
+ * Take it before any series advisory lock.
+ * Order is settlement, then series ids ascending, then fence, writer, claim.
+ * The SQL period-closure trigger takes this same lock, so a direct insert
+ * waits for an open FINAL transaction and then sees the committed period.
  */
 export async function lockWeeklySettlement(client: pg.PoolClient): Promise<void> {
   const keys = seriesAdvisoryKeys('pzd:f2c:weekly-settlement');
