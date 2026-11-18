@@ -86,6 +86,7 @@ describe('PZD-42 tournament UAT', () => {
         privateKey: pair.privateKey,
         rankedHttpGate: explicitTestRankedHttpGateConfig(),
         actualRuntimeEnv: { NODE_ENV: 'test' } as NodeJS.ProcessEnv,
+        rateLimit: { maxPerWindow: 5000, windowMs: 60_000 },
       });
       server = createServer((req, res) => {
         void uat.handler(req, res);
@@ -202,11 +203,17 @@ async function finish(
 ): Promise<{ all: number; onTime: boolean }> {
   for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
     let revision = ordinal === 1 ? 0 : Number((await api('GET', `/v1/tournament/series/${seriesId}/board`)).json?.boardRevision);
-    for (let guard = 0; guard < 12; guard += 1) {
+    const expectedSize = [5, 5, 5, 6, 6, 7][ordinal - 1];
+    const expectedLimit = [15, 15, 15, 12, 12, 10][ordinal - 1];
+    for (let guard = 0; guard < 16; guard += 1) {
       const view = await api('GET', `/v1/tournament/series/${seriesId}/board`);
       assert.equal(view.status, 200, JSON.stringify(view.json));
       if (view.json?.gameStatus === 'ended' || view.json?.awaitAdvance === true) break;
       const state = parseGameState(view.json?.state);
+      if (state.turnsUsed === 0) {
+        assert.equal(state.boardSize, expectedSize, `ordinal ${ordinal} board`);
+        assert.equal(state.moveLimit, expectedLimit, `ordinal ${ordinal} budget`);
+      }
       const choice = chooseMove(state, prefer);
       assert.ok(choice, `no legal move at ordinal ${ordinal}`);
       const key = `move-${seriesId}-${ordinal}-${revision}`;

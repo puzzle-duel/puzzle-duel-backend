@@ -4,7 +4,7 @@ This is a local playable slice. It is not production ranked HTTP, not a deployme
 
 The server listens only when `NODE_ENV` is not `production` or `prod`, `PZD_RUNTIME_PROFILE` is `development`, and `PZD_RANKED_HTTP_ENABLED` is exactly `true`. A production process environment still returns `RANKED_HTTP_DISABLED`.
 
-Daily challenges are the pinned CORE-001.v3 fixtures `V3-02`, `V3-05`, `V3-09`, `V3-03`, `V3-09`, and `V3-02` for E1 through H1. The client does not submit a score or a seal. A second device cannot take the writer; that recovery remains blocked.
+New daily claims pin six distinct `gen-001.v1` boards as `core-001.v3` content `pzd-42-v4`: E1–E3 are Easy 5×5 with 15 moves and 1 obstacle (seeds 0, 1, 2), M1–M2 are Medium 6×6 with 12 moves and 2 obstacles (seeds 0, 1), and H1 is Hard 7×7 with 10 moves and 4 obstacles (seed 5). The generator algorithm is unchanged. The offers are wrapped into v3 piece slots. A claim already stored under `pzd-42-uat` keeps those older boards. Drop and recreate only `pzd_uat` before this physical session so today's play uses the new boards. Do not touch `pzd_ingress`. The client does not submit a score or a seal. A second device cannot take the writer; that recovery remains blocked.
 
 ## 1. Isolated PostgreSQL and backend
 

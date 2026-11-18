@@ -104,6 +104,7 @@ export async function createUatHandler(pool: pg.Pool, options?: {
   readonly actualRuntimeEnv?: NodeJS.ProcessEnv;
   readonly publicKeyPem?: string;
   readonly privateKey?: KeyObject;
+  readonly rateLimit?: { maxPerWindow: number; windowMs: number };
 }) {
   const keys = options?.publicKeyPem && options.privateKey
     ? { publicKeyPem: options.publicKeyPem, privateKey: options.privateKey }
@@ -136,6 +137,7 @@ export async function createUatHandler(pool: pg.Pool, options?: {
     rankings,
     rankedHttpGate: options?.rankedHttpGate ?? rankedHttpGateConfigFromEnv(),
     actualRuntimeEnv: options?.actualRuntimeEnv,
+    rateLimit: options?.rateLimit,
     gameplayForSession: (gateway: SessionAuthorizationGateway) =>
       new TrustedGameplayService({
         journal,

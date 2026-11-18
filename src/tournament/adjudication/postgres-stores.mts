@@ -6,6 +6,7 @@
 import type pg from 'pg';
 import {
   parseInitialGameState,
+  stateToJson,
   type GameState,
 } from '../../engine/core001v3/index.mts';
 import type {
@@ -260,7 +261,8 @@ export class PostgresAuthoritativeSnapshotStore implements AuthoritativeSnapshot
         snapshot.score,
         snapshot.status,
         snapshot.terminalReason,
-        JSON.stringify(snapshot.state),
+        // Wire form keeps blocked cells as [row, column]. The live object uses {row, column}.
+        JSON.stringify(stateToJson(snapshot.state)),
         snapshot.ledgerAdmissionSeq,
         snapshot.writerGeneration,
         snapshot.producedByAdmissionId,

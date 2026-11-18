@@ -1,6 +1,6 @@
 /**
  * Pinned CORE-001.v3 challenges for the local Tournament UAT.
- * These are the versioned contract fixtures, not a client-supplied board.
+ * New claims use the V4 progression. An already stored claim keeps its digest.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -8,17 +8,18 @@ import { fileURLToPath } from 'node:url';
 import {
   digestManifestPayload,
   PinnedManifestRegistry,
+  type PinnedDailyManifest,
   type PinnedSubgameChallenge,
 } from '../claims/pinned-manifest-registry.mts';
 
-const fixtureDirectory = join(
-  dirname(fileURLToPath(import.meta.url)),
-  '../../../docs/contracts/gameplay/v3/fixtures',
-);
+const root = join(dirname(fileURLToPath(import.meta.url)), '../../..');
+const legacyDirectory = join(root, 'docs/contracts/gameplay/v3/fixtures');
+const v4Directory = join(root, 'docs/tournament/uat-challenges/v4');
 
-const CONTENT_VERSION = 'pzd-42-uat';
+const LEGACY_VERSION = 'pzd-42-uat';
+export const UAT_ACTIVE_CONTENT_VERSION = 'pzd-42-v4';
 
-const SLOTS: readonly { readonly ordinal: number; readonly file: string; readonly challengeId: string }[] = [
+const LEGACY_SLOTS: readonly { readonly ordinal: number; readonly file: string; readonly challengeId: string }[] = [
   { ordinal: 1, file: 'V3-02-single-wave.json', challengeId: 'uat-e1' },
   { ordinal: 2, file: 'V3-05-cascade-reopen.json', challengeId: 'uat-e2' },
   { ordinal: 3, file: 'V3-09-move-limit.json', challengeId: 'uat-e3' },
@@ -27,22 +28,47 @@ const SLOTS: readonly { readonly ordinal: number; readonly file: string; readonl
   { ordinal: 6, file: 'V3-02-single-wave.json', challengeId: 'uat-h1' },
 ];
 
-export function loadUatManifest(): PinnedManifestRegistry {
-  const subgames: PinnedSubgameChallenge[] = SLOTS.map((slot) => {
-    const fixture = JSON.parse(readFileSync(join(fixtureDirectory, slot.file), 'utf8')) as {
+const V4_SLOTS: readonly { readonly ordinal: number; readonly file: string; readonly challengeId: string }[] = [
+  { ordinal: 1, file: 'E1.json', challengeId: 'uat-e1' },
+  { ordinal: 2, file: 'E2.json', challengeId: 'uat-e2' },
+  { ordinal: 3, file: 'E3.json', challengeId: 'uat-e3' },
+  { ordinal: 4, file: 'M1.json', challengeId: 'uat-m1' },
+  { ordinal: 5, file: 'M2.json', challengeId: 'uat-m2' },
+  { ordinal: 6, file: 'H1.json', challengeId: 'uat-h1' },
+];
+
+function manifestFrom(
+  directory: string,
+  slots: readonly { readonly ordinal: number; readonly file: string; readonly challengeId: string }[],
+  contentVersion: string,
+  generatorVersion: string,
+): PinnedDailyManifest {
+  const subgames: PinnedSubgameChallenge[] = slots.map((slot) => {
+    const fixture = JSON.parse(readFileSync(join(directory, slot.file), 'utf8')) as {
       initialState: unknown;
     };
     return {
       ordinal: slot.ordinal,
       challengeId: slot.challengeId,
-      generatorVersion: 'pinned-core-001.v3-fixture',
-      contentVersion: CONTENT_VERSION,
+      generatorVersion,
+      contentVersion,
       initialState: fixture.initialState,
     };
   });
-  const digest = digestManifestPayload(CONTENT_VERSION, subgames);
-  return new PinnedManifestRegistry(
-    [{ digest, contentVersion: CONTENT_VERSION, subgames }],
-    digest,
+  return {
+    digest: digestManifestPayload(contentVersion, subgames),
+    contentVersion,
+    subgames,
+  };
+}
+
+export function loadUatManifest(): PinnedManifestRegistry {
+  const legacy = manifestFrom(
+    legacyDirectory,
+    LEGACY_SLOTS,
+    LEGACY_VERSION,
+    'pinned-core-001.v3-fixture',
   );
+  const active = manifestFrom(v4Directory, V4_SLOTS, UAT_ACTIVE_CONTENT_VERSION, 'gen-001.v1');
+  return new PinnedManifestRegistry([legacy, active], active.digest);
 }
