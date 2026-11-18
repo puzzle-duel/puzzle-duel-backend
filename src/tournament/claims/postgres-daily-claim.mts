@@ -4,6 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
+import { lockWeeklySettlement } from '../ingress/series-fence.mts';
 
 export const DAILY_CLAIM_DDL = [
   'CREATE TABLE IF NOT EXISTS tournament_daily_claim (',
@@ -68,6 +69,7 @@ export class PostgresDailyClaimStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await lockWeeklySettlement(client);
       const time = await client.query("SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms");
       const now = Number(time.rows[0].ms);
       const today = Math.floor(now / 86400000) * 86400000;

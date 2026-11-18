@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS command_admission_journal (
   payload_hash TEXT NOT NULL,
   -- Epoch milliseconds: preserves exclusive deadline-1ms proofs (no timestamptz truncation).
   trusted_received_at_ms BIGINT NOT NULL,
+  -- PostgreSQL clock captured under the series lock. FINAL compares this
+  -- value, not the process clock, when deciding the Monday cutoff.
+  db_trusted_received_at_ms BIGINT NULL,
   admission_seq BIGINT NOT NULL,
   outcome TEXT NOT NULL DEFAULT 'pending',
   expected_board_revision BIGINT NULL,
@@ -62,6 +65,10 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
       `ALTER TABLE command_admission_journal
        ADD COLUMN IF NOT EXISTS result_json JSONB NULL`,
     );
+    await this.#pool.query(
+      `ALTER TABLE command_admission_journal
+       ADD COLUMN IF NOT EXISTS db_trusted_received_at_ms BIGINT NULL`,
+    );
   }
 
   async admit(input: AdmitCommandInput): Promise<AdmitResult> {
@@ -97,8 +104,17 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
         };
       }
 
-      // Trusted receipt AFTER series admission lock, BEFORE insert commit.
+      // Process-clock receipt stays the idle-deadline stamp. The PostgreSQL
+      // clock is the cutoff stamp, taken under the same series lock so a
+      // settlement transaction that already holds the lock cannot miss it.
       const trustedReceivedAt = this.#clock.now();
+      const dbTime = await client.query(
+        `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
+      );
+      const dbTrustedReceivedAtMs = Number(dbTime.rows[0]?.ms);
+      if (!Number.isSafeInteger(dbTrustedReceivedAtMs)) {
+        throw new Error('UNCERTAIN_TIMESTAMP');
+      }
 
       const seqRes = await client.query(
         `SELECT COALESCE(MAX(admission_seq), 0) + 1 AS next_seq
@@ -111,9 +127,10 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
         `INSERT INTO command_admission_journal (
            admission_id, series_key, player_id, command_type,
            idempotency_key, payload_hash, trusted_received_at_ms,
-           admission_seq, outcome, expected_board_revision, writer_generation,
+           db_trusted_received_at_ms, admission_seq, outcome,
+           expected_board_revision, writer_generation,
            score_delta, completes_series
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,NULL,FALSE)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,NULL,FALSE)`,
         [
           admissionId,
           input.seriesKey,
@@ -122,6 +139,7 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
           input.idempotencyKey,
           input.payloadHash,
           trustedReceivedAt.getTime(),
+          dbTrustedReceivedAtMs,
           admissionSeq,
           input.expectedBoardRevision ?? null,
           input.writerGeneration ?? null,

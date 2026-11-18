@@ -71,6 +71,17 @@ A pre-cutoff H1 that is blocked on the series lock cannot commit its journal row
 
 `SeriesCommandArbiter.canSafelyFinalizeWeekly` only lists pending rows for a caller-supplied key list. It does not lock, authorize publications, or commit FINAL. `finalizeWeek` does not call it.
 
+## Security review correction
+
+Independent review of `32672a3` found three P1 holes in the settlement barrier. This change fixes them:
+
+- `PostgresAdmissionJournal.admit` now stores `db_trusted_received_at_ms` from PostgreSQL `clock_timestamp()` under the series lock. The process clock remains the idle-deadline stamp. A hard cutoff allows the move only when the stored process stamp, the stored database stamp, and the adjudication input all agree and are strictly before the cutoff. A missing database stamp fails closed.
+- FINAL treats a non-terminal journal row as blocking when its database stamp is missing, or when either stamp is before Monday 01:00 UTC.
+- A non-completed, non-forfeited series with an ended H1 snapshot stays `PUBLICATION_UNSETTLED`. `F2BPublicationService.publish` can still publish that series, including after the hard cutoff, so FINAL must not omit it.
+- `PostgresDailyClaimStore.claimForVerifiedPrincipal` takes the weekly settlement lock before it samples `clock_timestamp()`.
+
+A backward step of the PostgreSQL clock after FINAL commits is still unprovable. Multi-host clock and failover remain NOT_RUN. `MAX(admission_seq)` is still not a global watermark.
+
 ## What remains unproven
 
 - No global monotonic watermark table exists beyond `command_admission_journal`. A dropped or renamed journal blocks FINAL. An in-memory counter is not used.
@@ -90,7 +101,7 @@ Node 26.13.1. PostgreSQL 18 at `127.0.0.1:55432`, database `pzd_ingress`. `SHOW 
 | Suite | Result |
 | --- | --- |
 | `npm run typecheck` | PASS |
-| `npm run test:stage-f2` | 67 pass, 0 fail, 0 skip |
+| `npm run test:stage-f2` | 68 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1` | 10 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-auth` | 49 pass, 0 fail, 0 skip |
 | `npm run test:stage-f1-http` | 2 pass, 0 fail, 0 skip |

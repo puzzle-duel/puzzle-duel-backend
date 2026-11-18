@@ -143,7 +143,8 @@ export type F2CProvisionalReason =
   | 'LOCK_NOT_ACQUIRED'
   | 'WEEKLY_SCORE_OVERFLOW'
   | 'DUPLICATE_DAILY_CREDIT'
-  | 'INCOMPLETE_SNAPSHOT';
+  | 'INCOMPLETE_SNAPSHOT'
+  | 'PUBLICATION_UNSETTLED';
 
 export type F2CSettlementResult =
   | {
@@ -778,6 +779,14 @@ export class F2CRankingService {
       if (claim.status !== 'COMPLETED' && published.rows.length > 0) {
         throw new SettlementClosed('UNCERTAIN_SERIES');
       }
+      if (claim.status !== 'COMPLETED' && claim.status !== 'FORFEITED') {
+        const endedH1 = await client.query(
+          `SELECT 1 FROM authoritative_game_snapshot
+           WHERE series_key = $1 AND subgame_ordinal = 6 AND status = 'ended'`,
+          [claim.seriesId],
+        );
+        if (endedH1.rows.length > 0) throw new SettlementClosed('PUBLICATION_UNSETTLED');
+      }
       if (claim.status === 'COMPLETED' || claim.status === 'FORFEITED') continue;
       const rawCutoff = fence.rows[0]!.hard_cutoff_at_ms;
       if (rawCutoff === null || rawCutoff === undefined) throw new SettlementClosed('UNCERTAIN_SERIES');
@@ -802,9 +811,13 @@ export class F2CRankingService {
       `SELECT outcome
        FROM command_admission_journal
        WHERE series_key = ANY($1::text[])
-         AND trusted_received_at_ms < $2
          AND outcome <> 'applied'
          AND outcome <> 'rejected'
+         AND (
+           db_trusted_received_at_ms IS NULL
+           OR db_trusted_received_at_ms < $2
+           OR trusted_received_at_ms < $2
+         )
        ORDER BY admission_seq
        LIMIT 1`,
       [seriesIds, cutoffMs],

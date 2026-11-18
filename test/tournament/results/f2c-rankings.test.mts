@@ -24,6 +24,7 @@ import {
   stateToJson,
 } from '../../../src/engine/core001v3/index.mts';
 import { TRUSTED_GAMEPLAY_DDL } from '../../../src/tournament/adjudication/postgres-stores.mts';
+import { PostgresTrustedUnitOfWork } from '../../../src/tournament/adjudication/postgres-uow.mts';
 import { ADMISSION_JOURNAL_DDL } from '../../../src/tournament/ingress/postgres-journal.mts';
 import {
   lockSeriesForTransaction,
@@ -633,6 +634,52 @@ describe('F2-C PostgreSQL rankings and FINAL', { concurrency: false }, () => {
     assert.equal(closedReason(await rankings.finalizeWeek(previousWeek)), 'AUTHORIZATION_FAILED');
     await eraseUnpublished(completed);
 
+    const unpublished = await seedSeries({
+      date: monday,
+      hardCutoffAtMs: cutoff,
+    });
+    assert.equal(closedReason(await rankings.finalizeWeek(previousWeek)), 'PUBLICATION_UNSETTLED');
+    assert.equal(await settlementCount(previousWeek), 0);
+    await eraseUnpublished(unpublished.seriesId);
+
+    const lateDb = randomUUID();
+    const latePlayer = randomUUID();
+    await pool.query(
+      `INSERT INTO tournament_daily_claim
+         (series_id, player_id, original_utc_date, started_at_ms, manifest_digest, status)
+       VALUES ($1,$2,$3::date,$4,$5,'ACTIVE')`,
+      [lateDb, latePlayer, monday, Date.parse(`${monday}T12:00:00.000Z`), mixedManifest.digest],
+    );
+    await pool.query(
+      `INSERT INTO series_fence_state (
+         series_key, board_revision, writer_generation, status, idle_deadline_at_ms,
+         hard_cutoff_at_ms, score, results_published, thinking_extension_consumed
+       ) VALUES ($1,0,1,'ACTIVE',$2,$3,0,FALSE,FALSE)`,
+      [lateDb, cutoff + 86_400_000, cutoff],
+    );
+    const lateHolder = await pool.connect();
+    try {
+      await lateHolder.query('BEGIN');
+      await lockSeriesForTransaction(lateHolder, lateDb);
+      assert.equal(closedReason(await rankings.finalizeWeek(previousWeek, { lockTimeoutMs: 400 })), 'LOCK_NOT_ACQUIRED');
+      await lateHolder.query(
+        `INSERT INTO command_admission_journal (
+           admission_id, series_key, player_id, command_type, idempotency_key, payload_hash,
+           trusted_received_at_ms, db_trusted_received_at_ms, admission_seq, outcome, writer_generation
+         ) VALUES ($1,$2,$3,'move',$4,$5,$6,NULL,1,'pending',1)`,
+        [
+          randomUUID(), lateDb, latePlayer, 'late-db',
+          createHash('sha256').update('late-db').digest('hex'), cutoff + 1,
+        ],
+      );
+      await lateHolder.query('COMMIT');
+    } finally {
+      lateHolder.release();
+    }
+    assert.equal(closedReason(await rankings.finalizeWeek(previousWeek)), 'PENDING_ADMISSION');
+    assert.equal(await settlementCount(previousWeek), 0);
+    await eraseUnpublished(lateDb);
+
     for (const label of f2cSnapshotLabels(faultWeek)) {
       await assert.rejects(
         () => rankings.finalizeWeek(faultWeek, {
@@ -655,6 +702,50 @@ describe('F2-C PostgreSQL rankings and FINAL', { concurrency: false }, () => {
     assert.equal(repeat.outcome, 'final');
     if (repeat.outcome === 'final') assert.equal(repeat.alreadyFinal, true);
     assert.equal(repeat.outcome === 'final' && repeat.settlementId, recovered.settlementId);
+  });
+
+  it('does not apply an H1 when the database receipt is outside the hard cutoff', async () => {
+    const date = weekDates(previousWeek)[0]!;
+    const cutoff = weeklyFinalCutoffMs(previousWeek);
+    const seeded = await seedSeries({ date, mode: 'five', hardCutoffAtMs: cutoff });
+    await pool.query(
+      `UPDATE series_fence_state SET idle_deadline_at_ms = $2 WHERE series_key = $1`,
+      [seeded.seriesId, cutoff + 86_400_000],
+    );
+    const admissionId = randomUUID();
+    const early = cutoff - 1;
+    await pool.query(
+      `INSERT INTO command_admission_journal (
+         admission_id, series_key, player_id, command_type, idempotency_key, payload_hash,
+         trusted_received_at_ms, db_trusted_received_at_ms, admission_seq, outcome, writer_generation
+       ) VALUES ($1,$2,$3,'move',$4,$5,$6,$7,99,'pending',1)`,
+      [
+        admissionId, seeded.seriesId, seeded.playerId, 'db-late',
+        createHash('sha256').update(admissionId).digest('hex'), early, cutoff,
+      ],
+    );
+    const decision = await new PostgresTrustedUnitOfWork(pool).adjudicateAcceptedMove({
+      seriesKey: seeded.seriesId,
+      playerId: seeded.playerId,
+      subgameOrdinal: 6,
+      admissionId,
+      admissionSeq: 99,
+      trustedReceivedAt: new Date(early),
+      move: {
+        offerIndex: 0,
+        tap: [0, 0],
+        expectedBoardRevision: 5,
+        writerGeneration: 1,
+      },
+    });
+    assert.equal(decision.decision, 'reject');
+    if (decision.decision === 'reject') assert.equal(decision.reason, 'HARD_CUTOFF_EXPIRED');
+    const outcome = await pool.query(
+      `SELECT outcome FROM command_admission_journal WHERE admission_id = $1`,
+      [admissionId],
+    );
+    assert.equal(String(outcome.rows[0].outcome), 'rejected');
+    await eraseUnpublished(seeded.seriesId);
   });
 
   it('freezes the previous week atomically and does not recompute FINAL after a later publication', async () => {

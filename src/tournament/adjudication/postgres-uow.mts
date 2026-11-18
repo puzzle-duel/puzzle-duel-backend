@@ -94,6 +94,31 @@ export type SixGamePublisher = {
   ): Promise<F2BPublishResult>;
 };
 
+function epochMs(value: unknown): number | null {
+  if (typeof value === 'bigint') {
+    const asNumber = Number(value);
+    return Number.isSafeInteger(asNumber) ? asNumber : null;
+  }
+  const asNumber = typeof value === 'string' || typeof value === 'number' ? Number(value) : NaN;
+  return Number.isSafeInteger(asNumber) ? asNumber : null;
+}
+
+/**
+ * A move is inside the hard cutoff only when the stored process stamp, the
+ * stored PostgreSQL stamp, and the value passed into adjudication all agree
+ * and are strictly before the cutoff. A missing database stamp fails closed.
+ */
+function hardCutoffAllows(
+  admission: Record<string, unknown>,
+  suppliedAt: Date,
+  hardCutoffAt: Date,
+): boolean {
+  const storedMs = epochMs(admission.trusted_received_at_ms);
+  const dbMs = epochMs(admission.db_trusted_received_at_ms);
+  if (storedMs === null || dbMs === null || suppliedAt.getTime() !== storedMs) return false;
+  return isTimely(new Date(storedMs), hardCutoffAt) && isTimely(new Date(dbMs), hardCutoffAt);
+}
+
 export class PostgresTrustedUnitOfWork {
   readonly #pool: pg.Pool;
   #faults: UowFaultHooks = {};
@@ -146,7 +171,7 @@ export class PostgresTrustedUnitOfWork {
       // Load original admission under lock; verify still pending or return frozen result.
       const admRes = await client.query(
         `SELECT admission_id, series_key, player_id, outcome, result_json,
-                trusted_received_at_ms, admission_seq
+                trusted_received_at_ms, db_trusted_received_at_ms, admission_seq
          FROM command_admission_journal
          WHERE admission_id = $1 FOR UPDATE`,
         [input.admissionId],
@@ -257,7 +282,7 @@ export class PostgresTrustedUnitOfWork {
       if (!isTimely(input.trustedReceivedAt, pre.idleDeadlineAt)) {
         return this.#rejectOnly(client, input, 'IDLE_EXPIRED', pre, true);
       }
-      if (pre.hardCutoffAt && !isTimely(input.trustedReceivedAt, pre.hardCutoffAt)) {
+      if (pre.hardCutoffAt && !hardCutoffAllows(adm, input.trustedReceivedAt, pre.hardCutoffAt)) {
         return this.#rejectOnly(client, input, 'HARD_CUTOFF_EXPIRED', pre, true);
       }
       if (input.move.writerGeneration !== pre.writerGeneration) {
