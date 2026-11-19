@@ -11,8 +11,8 @@ permissions:
 # A job timeout is reported as CANCELLED, so overlapping runs must not be
 # cancelled by concurrency either.
 concurrency:
-  group: pzd-39-stage-e-${{ github.ref }}
-  cancel-in-progress: false
+  group: pzd-39-stage-e-clock-safe-v2-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   stage-e-pg:
