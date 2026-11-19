@@ -148,7 +148,9 @@ jobs:
           timeout 15s docker network rm pzd-f2-gate-net >/dev/null 2>&1 || true
           # Match the previously successful downstream cleanup while recording
           # process metadata, not command lines or environment/credentials.
-          sudo pkill -9 -f '[c]ontainerd-shim|[d]ocker-proxy' >/dev/null 2>&1 || true
+          # Do not kill host-wide Docker processes; the test owns only its
+          # disposable containers and network. This keeps runner cleanup safe.
+          echo "Runner clock after failover: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "::group::Post-cleanup process census"
           ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
           echo "::endgroup::"
