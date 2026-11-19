@@ -194,7 +194,14 @@ describe('PZD-43 GET /v1/tournament/me/badges', () => {
       headers: { authorization: bearer('badge-user-a') },
     });
     assert.equal(openA.status, 201);
-    const sessionA = (await openA.json()) as { sessionSecret: string };
+    const sessionA = (await openA.json()) as {
+      sessionSecret: string;
+      playerId: string;
+    };
+    assert.match(
+      sessionA.playerId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     const headersA = {
       authorization: bearer('badge-user-a'),
       'x-pzd-session-secret': sessionA.sessionSecret,

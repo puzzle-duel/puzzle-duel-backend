@@ -620,6 +620,8 @@ async function handleSession(
   if (method === 'POST') {
     const session = await deps.sessions.openAfterVerifiedJwt(identity);
     send(res, 201, {
+      // Caller-owned internal player id only — never another player's id.
+      playerId: session.playerId,
       sessionSecret: session.sessionSecret,
       sessionId: session.sessionId,
       deviceId: session.deviceId,
@@ -646,6 +648,7 @@ async function handleSession(
     return;
   }
   send(res, 200, {
+    playerId: verified.playerId,
     sessionId: verified.sessionId,
     deviceId: verified.deviceId,
     expiresAtMs: verified.expiresAtMs,
