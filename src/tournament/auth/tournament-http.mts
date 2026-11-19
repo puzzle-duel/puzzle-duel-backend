@@ -30,6 +30,7 @@ import {
   type F2CCategory,
   type F2CRankingService,
 } from '../results/f2c-rankings.mts';
+import { loadPlayerBadgeCollection } from '../results/player-badges.mts';
 import {
   RANKED_HTTP_DISABLED_ERROR,
   resolveRankedHttpFeatureGate,
@@ -350,6 +351,10 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         await sendLeaderboard(res, deps, session.playerId, 'weekly', url);
         return;
       }
+      if (path === '/v1/tournament/me/badges' && method === 'GET') {
+        await sendPlayerBadges(res, deps, session.playerId, url);
+        return;
+      }
 
       send(res, 404, { error: 'NOT_FOUND' });
     } catch (error) {
@@ -436,6 +441,31 @@ async function sendOwnedBoard(
     awaitAdvance: fence.status === 'AWAIT_ADVANCE',
     resultsPublished: fence.resultsPublished,
   });
+}
+
+/**
+ * PZD-43 candidate: authenticated player's badge collection.
+ * Bound to the verified session player id — query playerId is ignored.
+ */
+async function sendPlayerBadges(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+  url: URL,
+): Promise<void> {
+  const limitRaw = url.searchParams.get('grantLimit');
+  let grantLimit: number | undefined;
+  if (limitRaw !== null && limitRaw !== '') {
+    if (!/^[1-9][0-9]{0,3}$/.test(limitRaw)) {
+      send(res, 400, { error: 'MALFORMED_REQUEST' });
+      return;
+    }
+    grantLimit = Number(limitRaw);
+  }
+  const payload = await loadPlayerBadgeCollection(deps.pool, playerId, {
+    grantLimit,
+  });
+  send(res, 200, payload);
 }
 
 async function sendOwnedResults(
