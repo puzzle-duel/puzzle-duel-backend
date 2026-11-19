@@ -11,8 +11,8 @@ permissions:
 # A job timeout is reported as CANCELLED, so overlapping runs must not be
 # cancelled by concurrency either.
 concurrency:
-  group: pzd-39-stage-e-${{ github.ref }}
-  cancel-in-progress: false
+  group: pzd-39-stage-e-clock-safe-v2-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   stage-e-pg:
@@ -137,9 +137,21 @@ jobs:
           set +e
           npm run test:stage-f2-failover
           status=$?
-          docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1
-          docker network rm pzd-f2-gate-net >/dev/null 2>&1
-          # The hosted runner waits in "Cleaning up orphan processes" on
-          # container shims left by this step, then the job limit is CANCELLED.
-          sudo pkill -9 -f '[c]ontainerd-shim|[d]ocker-proxy' >/dev/null 2>&1 || true
+          echo "::group::Failover runner cleanup diagnostics (process names only)"
+          echo "test_exit_status=$status"
+          echo "Before cleanup: relevant process PID/PPID/state/comm"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "Before cleanup: disposable containers"
+          timeout 10s docker ps -a --format '{{.Names}} {{.Status}}' | grep 'pzd-f2-gate-' || true
+          echo "::endgroup::"
+          timeout 30s docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1 || true
+          timeout 15s docker network rm pzd-f2-gate-net >/dev/null 2>&1 || true
+          # Match the previously successful downstream cleanup while recording
+          # process metadata, not command lines or environment/credentials.
+          # Do not kill host-wide Docker processes; the test owns only its
+          # disposable containers and network. This keeps runner cleanup safe.
+          echo "Runner clock after failover: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "::group::Post-cleanup process census"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "::endgroup::"
           exit "$status"

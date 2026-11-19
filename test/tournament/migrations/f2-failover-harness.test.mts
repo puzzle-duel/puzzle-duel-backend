@@ -129,7 +129,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     await run(['network', 'rm', NET]).catch(() => undefined);
     await run(['network', 'create', NET]);
     await run([
-      'run', '-d', '--name', PRIMARY, '--network', NET, '--cap-add', 'SYS_TIME',
+      'run', '-d', '--name', PRIMARY, '--network', NET, 
       '-e', 'POSTGRES_PASSWORD=pzd', 'postgres:18',
       'postgres', '-c', 'wal_level=replica', '-c', 'hot_standby=on',
       '-c', 'max_wal_senders=10', '-c', 'max_replication_slots=10',
@@ -285,7 +285,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     }
 
     await run([
-      'run', '-d', '--name', REPLICA, '--network', NET, '--cap-add', 'SYS_TIME', '--entrypoint', 'bash', 'postgres:18',
+      'run', '-d', '--name', REPLICA, '--network', NET, '--entrypoint', 'bash', 'postgres:18',
       '-lc',
       `set -eu
        echo waiting-for-primary
@@ -381,32 +381,9 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
         `SELECT settlement_id::text AS settlement_id FROM tournament_f2c_settlement WHERE week_start = '2020-01-06'`,
       );
       assert.equal(unchanged.rows[0].settlement_id, settlementId);
-      let clock = 'NOT_RUN';
-      try {
-        await run(['exec', REPLICA, 'date', '-u', '-s', '2019-01-01 00:00:00']);
-        await assert.rejects(
-          promoted.query(
-            `INSERT INTO tournament_daily_claim (series_id, player_id, original_utc_date, started_at_ms, manifest_digest)
-             VALUES ($1,'clock','2020-01-08',100,$2)`,
-            [randomUUID(), DIGEST],
-          ),
-          /F2C_PERIOD_CLOSED/,
-        );
-        const afterClock = await promoted.query(
-          `SELECT settlement_id::text AS settlement_id FROM tournament_f2c_settlement WHERE week_start = '2020-01-06'`,
-        );
-        assert.equal(afterClock.rows[0].settlement_id, settlementId);
-        clock = 'PASS';
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (!message.includes('F2C_PERIOD_CLOSED') && !/date|Operation not permitted|Invalid argument|cannot set date/i.test(message)) {
-          throw err;
-        }
-        if (message.includes('F2C_PERIOD_CLOSED')) throw err;
-        clock = `NOT_RUN: ${message.split('\n')[0]}`;
-      }
-      t.diagnostic(`postgresql-clock=${clock}`);
-      assert.ok(clock === 'PASS' || clock.startsWith('NOT_RUN'), clock);
+      // Host realtime clock must not be changed by containerized CI tests.
+      // A true backwards-clock fault test requires a separately isolated VM.
+      t.diagnostic('postgresql-clock=NOT_RUN: host clock mutation forbidden on CI runner');
     } finally {
       await endPool(promoted);
     }
