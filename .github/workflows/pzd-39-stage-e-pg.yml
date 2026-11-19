@@ -2,10 +2,17 @@ name: PZD-39 Stage E PostgreSQL integration
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+
+# Queue a newer push instead of cancelling the run already in progress.
+# A job timeout is reported as CANCELLED, so overlapping runs must not be
+# cancelled by concurrency either.
+concurrency:
+  group: pzd-39-stage-e-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   stage-e-pg:
@@ -33,7 +40,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '26'
-          cache: npm
       - name: Install exact dependencies
         run: npm ci
       - name: Verify PostgreSQL 18 connectivity (no silent skip)
@@ -105,14 +111,35 @@ jobs:
         run: npm run test:stage-f2
       - name: Stage F2 versioned migrations, privileges, and recovery
         run: npm run test:stage-f2-migrations
-      - name: Stage F2 multi-host failover topology
-        run: |
-          if docker info >/dev/null 2>&1; then
-            npm run test:stage-f2-failover
-          else
-            echo 'FAILOVER_TOPOLOGY NOT_RUN: this job has no Docker daemon for a second PostgreSQL 18 instance, replica promotion, or a container clock step'
-          fi
       - name: Core-001.v3 replay regression (including generator vectors)
         env:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
+
+  # Job 135081089978 and 135115620690 were cancelled by the annotation
+  # "maximum execution time of 20m0s" while this step was still open.
+  # Docker and pool calls in the harness are now bounded, and the script
+  # exits with the test status once that result is known.
+  stage-e-failover:
+    name: stage-e-failover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26'
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Stage F2 multi-host failover topology
+        timeout-minutes: 25
+        run: |
+          set +e
+          npm run test:stage-f2-failover
+          status=$?
+          docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1
+          docker network rm pzd-f2-gate-net >/dev/null 2>&1
+          # The hosted runner waits in "Cleaning up orphan processes" on
+          # container shims left by this step, then the job limit is CANCELLED.
+          sudo pkill -9 -f '[c]ontainerd-shim|[d]ocker-proxy' >/dev/null 2>&1 || true
+          exit "$status"
