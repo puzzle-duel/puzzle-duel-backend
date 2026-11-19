@@ -72,7 +72,7 @@ function piece(rng: Pcg32): Piece {
 function hasRun(grid: readonly (readonly (Piece | null)[])[]): boolean {
   const n = grid.length;
   for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) {
-    const p = grid[r]![c]; if (p === null) continue;
+    const p = grid[r]![c]; if (p == null) continue;
     if (c + 2 < n && grid[r]![c + 1]?.shape === p.shape && grid[r]![c + 2]?.shape === p.shape) return true;
     if (r + 2 < n && grid[r + 1]![c]?.shape === p.shape && grid[r + 2]![c]?.shape === p.shape) return true;
   }

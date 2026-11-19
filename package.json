@@ -20,7 +20,13 @@
     "test:stage-f1-http": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/auth/tournament-http-e2e.test.mts",
     "test:stage-f2": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/results/**/*.test.mts'",
     "test:stage-f2-migrations": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/migrations/f2-production-gate.test.mts",
-    "test:stage-f2-failover": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/migrations/f2-failover-harness.test.mts"
+    "test:stage-f2-failover": "node --experimental-strip-types --test --test-concurrency=1 --test-force-exit test/tournament/migrations/f2-failover-harness.test.mts",
+    "test:uat": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/uat/tournament-uat-e2e.test.mts",
+    "uat:server": "node --experimental-strip-types src/tournament/uat/uat-server.mts serve",
+    "uat:issue": "node --experimental-strip-types src/tournament/uat/uat-server.mts issue",
+    "test:uat": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/uat/tournament-uat-e2e.test.mts",
+    "uat:server": "node --experimental-strip-types src/tournament/uat/uat-server.mts serve",
+    "uat:issue": "node --experimental-strip-types src/tournament/uat/uat-server.mts issue"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
