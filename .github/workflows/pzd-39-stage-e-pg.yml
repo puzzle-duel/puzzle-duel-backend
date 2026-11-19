@@ -139,4 +139,7 @@ jobs:
           status=$?
           docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1
           docker network rm pzd-f2-gate-net >/dev/null 2>&1
+          # The hosted runner waits in "Cleaning up orphan processes" on
+          # container shims left by this step, then the job limit is CANCELLED.
+          sudo pkill -9 -f '[c]ontainerd-shim|[d]ocker-proxy' >/dev/null 2>&1 || true
           exit "$status"
