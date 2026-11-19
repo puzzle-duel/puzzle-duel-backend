@@ -121,7 +121,7 @@ describe('PZD-38 Gate A — concurrency fences', () => {
     assert.equal(attempt.ok, false);
   });
 
-  it('Case D: timely H1 completes once; timeout cannot overwrite COMPLETED; no publish', async () => {
+  it('Case D: timely subgame end awaits advance; timeout cannot forfeit it; no publish', async () => {
     const { clock, arbiter, fence, idleDeadlineAt } = await setup(
       fixedMoveEffect(100, true),
     );
@@ -144,13 +144,17 @@ describe('PZD-38 Gate A — concurrency fences', () => {
     );
     assert.equal(done.decision, 'apply');
     if (done.decision === 'apply') {
-      assert.equal(done.state.status, 'COMPLETED');
+      assert.equal(done.state.status, 'AWAIT_ADVANCE');
+      assert.notEqual(done.state.status, 'COMPLETED');
       assert.equal(done.state.resultsPublished, false);
+      assert.equal(done.state.score, 100);
     }
     const forfeit = await arbiter.tryForfeitForInactivity('s1');
     assert.equal(forfeit.ok, false);
+    if (!forfeit.ok) assert.equal(forfeit.reason, 'NOT_EXPIRED');
     const state = await fence.get('s1');
-    assert.equal(state!.status, 'COMPLETED');
+    assert.equal(state!.status, 'AWAIT_ADVANCE');
+    assert.notEqual(state!.status, 'COMPLETED');
     assert.equal(state!.resultsPublished, false);
   });
 

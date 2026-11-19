@@ -23,6 +23,35 @@ export function seriesAdvisoryKeys(seriesKey: string): [number, number] {
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
+/**
+ * First lock of every series mutation, including F2-B publication.
+ * Callers that also row-lock must then take, in order:
+ * series_fence_state, tournament_series_writer, tournament_daily_claim.
+ * Never acquire the series advisory lock after one of those row locks.
+ * pg_advisory_xact_lock is re-entrant inside the same transaction.
+ */
+export async function lockSeriesForTransaction(
+  client: pg.PoolClient,
+  seriesKey: string,
+): Promise<readonly [number, number]> {
+  const keys = seriesAdvisoryKeys(seriesKey);
+  await client.query('SELECT pg_advisory_xact_lock($1, $2)', [keys[0], keys[1]]);
+  return keys;
+}
+
+/**
+ * First lock of claim insert, command admission, standalone publication,
+ * H1 adjudication, and weekly FINAL.
+ * Take it before any series advisory lock.
+ * Order is settlement, then series ids ascending, then fence, writer, claim.
+ * The SQL period-closure trigger takes this same lock, so a direct insert
+ * waits for an open FINAL transaction and then sees the committed period.
+ */
+export async function lockWeeklySettlement(client: pg.PoolClient): Promise<void> {
+  const keys = seriesAdvisoryKeys('pzd:f2c:weekly-settlement');
+  await client.query('SELECT pg_advisory_xact_lock($1, $2)', [keys[0], keys[1]]);
+}
+
 export interface SeriesFenceStore {
   get(seriesKey: string): Promise<SeriesFenceState | null>;
   put(state: SeriesFenceState): Promise<void>;
@@ -198,8 +227,7 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
     try {
       await client.query('BEGIN');
       // Same advisory key ordering as PostgresAdmissionJournal.admit (P1-03).
-      const [k1, k2] = seriesAdvisoryKeys(seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, seriesKey);
       const res = await client.query(
         `SELECT * FROM series_fence_state WHERE series_key = $1 FOR UPDATE`,
         [seriesKey],
@@ -270,8 +298,7 @@ export class PostgresSeriesFenceStore implements SeriesFenceStore {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, seriesKey);
       const res = await client.query(
         `SELECT * FROM series_fence_state WHERE series_key = $1 FOR UPDATE`,
         [seriesKey],

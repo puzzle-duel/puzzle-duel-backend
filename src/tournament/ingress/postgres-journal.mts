@@ -3,7 +3,7 @@ import type pg from 'pg';
 import type { ImmutableAdmissionResult } from '../adjudication/admission-result.mts';
 import type { IngressClock } from './clock.mts';
 import type { AdmissionJournal } from './journal.mts';
-import { seriesAdvisoryKeys } from './series-fence.mts';
+import { lockSeriesForTransaction, lockWeeklySettlement, seriesAdvisoryKeys } from './series-fence.mts';
 import type {
   AdmitCommandInput,
   AdmitResult,
@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS command_admission_journal (
   payload_hash TEXT NOT NULL,
   -- Epoch milliseconds: preserves exclusive deadline-1ms proofs (no timestamptz truncation).
   trusted_received_at_ms BIGINT NOT NULL,
+  -- PostgreSQL clock captured under the series lock. FINAL compares this
+  -- value, not the process clock, when deciding the Monday cutoff.
+  db_trusted_received_at_ms BIGINT NULL,
   admission_seq BIGINT NOT NULL,
   outcome TEXT NOT NULL DEFAULT 'pending',
   expected_board_revision BIGINT NULL,
@@ -62,6 +65,10 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
       `ALTER TABLE command_admission_journal
        ADD COLUMN IF NOT EXISTS result_json JSONB NULL`,
     );
+    await this.#pool.query(
+      `ALTER TABLE command_admission_journal
+       ADD COLUMN IF NOT EXISTS db_trusted_received_at_ms BIGINT NULL`,
+    );
   }
 
   async admit(input: AdmitCommandInput): Promise<AdmitResult> {
@@ -70,8 +77,8 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
     try {
       client = await this.#pool.connect();
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(input.seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockWeeklySettlement(client);
+      await lockSeriesForTransaction(client, input.seriesKey);
 
       const existing = await client.query(
         `SELECT * FROM command_admission_journal
@@ -98,8 +105,17 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
         };
       }
 
-      // Trusted receipt AFTER series admission lock, BEFORE insert commit.
+      // Process-clock receipt stays the idle-deadline stamp. The PostgreSQL
+      // clock is the cutoff stamp, taken under the same series lock so a
+      // settlement transaction that already holds the lock cannot miss it.
       const trustedReceivedAt = this.#clock.now();
+      const dbTime = await client.query(
+        `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
+      );
+      const dbTrustedReceivedAtMs = Number(dbTime.rows[0]?.ms);
+      if (!Number.isSafeInteger(dbTrustedReceivedAtMs)) {
+        throw new Error('UNCERTAIN_TIMESTAMP');
+      }
 
       const seqRes = await client.query(
         `SELECT COALESCE(MAX(admission_seq), 0) + 1 AS next_seq
@@ -112,9 +128,10 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
         `INSERT INTO command_admission_journal (
            admission_id, series_key, player_id, command_type,
            idempotency_key, payload_hash, trusted_received_at_ms,
-           admission_seq, outcome, expected_board_revision, writer_generation,
+           db_trusted_received_at_ms, admission_seq, outcome,
+           expected_board_revision, writer_generation,
            score_delta, completes_series
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,$10,NULL,FALSE)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,NULL,FALSE)`,
         [
           admissionId,
           input.seriesKey,
@@ -123,6 +140,7 @@ export class PostgresAdmissionJournal implements AdmissionJournal {
           input.idempotencyKey,
           input.payloadHash,
           trustedReceivedAt.getTime(),
+          dbTrustedReceivedAtMs,
           admissionSeq,
           input.expectedBoardRevision ?? null,
           input.writerGeneration ?? null,

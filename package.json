@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --test 'test/**/*.test.mts'",
-    "test:ingress": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/ingress/deadline-boundary.test.mts test/tournament/ingress/durability-fault.test.mts test/tournament/ingress/concurrency-fence.test.mts test/tournament/ingress/postgres-journal.test.mts test/tournament/ingress/p1-remediation.test.mts",
+    "test:ingress": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/ingress/deadline-boundary.test.mts test/tournament/ingress/durability-fault.test.mts test/tournament/ingress/concurrency-fence.test.mts test/tournament/ingress/postgres-journal.test.mts test/tournament/ingress/p1-remediation.test.mts test/tournament/ingress/phase-a-subgame-isolation.test.mts",
     "test:generator": "node --experimental-strip-types --test test/generator.test.mts",
     "test:core001v3": "node --experimental-strip-types --test 'test/engine/core001v3/**/*.test.mts'",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -17,7 +17,10 @@
     "test:stage-e": "node --experimental-strip-types --test 'test/tournament/adjudication/**/*.test.mts'",
     "test:stage-f1": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/claims/**/*.test.mts'",
     "test:stage-f1-auth": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/auth/**/*.test.mts'",
-    "test:stage-f1-http": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/auth/tournament-http-e2e.test.mts"
+    "test:stage-f1-http": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/auth/tournament-http-e2e.test.mts",
+    "test:stage-f2": "node --experimental-strip-types --test --test-concurrency=1 'test/tournament/results/**/*.test.mts'",
+    "test:stage-f2-migrations": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/migrations/f2-production-gate.test.mts",
+    "test:stage-f2-failover": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/migrations/f2-failover-harness.test.mts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

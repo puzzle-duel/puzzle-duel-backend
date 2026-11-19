@@ -51,7 +51,7 @@ async function setup() {
   await pool.query('DROP TABLE IF EXISTS accepted_move_ledger');
   await pool.query('DROP TABLE IF EXISTS trusted_challenge_binding');
   await pool.query('DROP TABLE IF EXISTS series_fence_state');
-  await pool.query('DROP TABLE IF EXISTS tournament_daily_claim');
+  await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
   await pool.query('DROP TABLE IF EXISTS tournament_auth_session');
   await pool.query('DROP TABLE IF EXISTS tournament_verified_identity');
 

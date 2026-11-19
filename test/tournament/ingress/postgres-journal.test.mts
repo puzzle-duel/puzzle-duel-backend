@@ -73,7 +73,8 @@ describe('PZD-38 Gate A — PostgreSQL durable journal', () => {
 
     assert.equal(result.decision, 'apply');
     if (result.decision === 'apply') {
-      assert.equal(result.state.status, 'COMPLETED');
+      assert.equal(result.state.status, 'AWAIT_ADVANCE');
+      assert.notEqual(result.state.status, 'COMPLETED');
       assert.equal(result.state.resultsPublished, false);
       assert.equal(
         result.command.trustedReceivedAt.getTime(),

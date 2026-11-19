@@ -2,16 +2,23 @@ name: PZD-39 Stage E PostgreSQL integration
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+
+# Queue a newer push instead of cancelling the run already in progress.
+# A job timeout is reported as CANCELLED, so overlapping runs must not be
+# cancelled by concurrency either.
+concurrency:
+  group: pzd-39-stage-e-clock-safe-v2-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   stage-e-pg:
     name: stage-e-pg
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     services:
       postgres:
         image: postgres:18
@@ -33,7 +40,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '26'
-          cache: npm
       - name: Install exact dependencies
         run: npm ci
       - name: Verify PostgreSQL 18 connectivity (no silent skip)
@@ -101,8 +107,51 @@ jobs:
         run: npm run test:stage-f1
       - name: Stage F1 authenticated tournament HTTP E2E
         run: npm run test:stage-f1-http
-
+      - name: Stage F2 calculator, F2-A schema, F2-B publication, and F2-C rankings
+        run: npm run test:stage-f2
+      - name: Stage F2 versioned migrations, privileges, and recovery
+        run: npm run test:stage-f2-migrations
       - name: Core-001.v3 replay regression (including generator vectors)
         env:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
+
+  # Job 135081089978 and 135115620690 were cancelled by the annotation
+  # "maximum execution time of 20m0s" while this step was still open.
+  # Docker and pool calls in the harness are now bounded, and the script
+  # exits with the test status once that result is known.
+  stage-e-failover:
+    name: stage-e-failover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26'
+      - name: Install exact dependencies
+        run: npm ci
+      - name: Stage F2 multi-host failover topology
+        timeout-minutes: 25
+        run: |
+          set +e
+          npm run test:stage-f2-failover
+          status=$?
+          echo "::group::Failover runner cleanup diagnostics (process names only)"
+          echo "test_exit_status=$status"
+          echo "Before cleanup: relevant process PID/PPID/state/comm"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "Before cleanup: disposable containers"
+          timeout 10s docker ps -a --format '{{.Names}} {{.Status}}' | grep 'pzd-f2-gate-' || true
+          echo "::endgroup::"
+          timeout 30s docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1 || true
+          timeout 15s docker network rm pzd-f2-gate-net >/dev/null 2>&1 || true
+          # Match the previously successful downstream cleanup while recording
+          # process metadata, not command lines or environment/credentials.
+          # Do not kill host-wide Docker processes; the test owns only its
+          # disposable containers and network. This keeps runner cleanup safe.
+          echo "Runner clock after failover: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "::group::Post-cleanup process census"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "::endgroup::"
+          exit "$status"

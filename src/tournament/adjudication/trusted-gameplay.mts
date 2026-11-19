@@ -100,6 +100,7 @@ export type TrustedGameplayDecision =
         | 'INGRESS_UNAVAILABLE'
         | 'IDEMPOTENCY_PAYLOAD_CONFLICT'
         | 'ADVANCE_NOT_ELIGIBLE'
+        | 'NO_NEXT_ORDINAL'
         | 'EXTENSION_UNAVAILABLE';
       fence?: SeriesFenceState;
       checkpointUnchanged?: boolean;
@@ -1041,6 +1042,19 @@ export class TrustedGameplayService {
       if (current.lastAppliedAdmissionId === admit.command.admissionId) {
         return { ok: true, next: current };
       }
+      // Fence generation is the write fence. A session authorized at an older
+      // generation must not move the series, including an ordinal-6 Advance.
+      if (current.writerGeneration !== auth.session.writerGeneration) {
+        return { ok: false, reason: 'STALE_WRITER' };
+      }
+      if (current.status === 'COMPLETED' || current.status === 'FORFEITED') {
+        return { ok: false, reason: 'SERIES_TERMINAL' };
+      }
+      // Q07 / TD-06: Advance is only the transition to a next ordinal.
+      // H1 completion is the verified terminal move, never this command.
+      if (!Number.isInteger(ordinal) || ordinal >= 6) {
+        return { ok: false, reason: 'NO_NEXT_ORDINAL' };
+      }
       if (current.status !== 'AWAIT_ADVANCE' || !snap || snap.status !== 'ended') {
         return { ok: false, reason: 'ADVANCE_NOT_ELIGIBLE' };
       }
@@ -1048,13 +1062,12 @@ export class TrustedGameplayService {
       if (!isTimely(t, current.idleDeadlineAt)) {
         return { ok: false, reason: 'IDLE_EXPIRED' };
       }
-      const completed = ordinal >= 6;
       return {
         ok: true,
         next: {
           ...current,
           idleDeadlineAt: idleDeadlineFrom(t, 300),
-          status: completed ? 'COMPLETED' : 'ACTIVE',
+          status: 'ACTIVE',
           resultsPublished: false,
           lastAppliedAdmissionId: admit.command.admissionId,
         },

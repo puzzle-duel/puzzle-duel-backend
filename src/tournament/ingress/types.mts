@@ -130,7 +130,10 @@ export interface SeriesFenceState {
 /** Test-only / internal move effect. Never sourced from client JSON. */
 export interface ServerDerivedMoveEffect {
   scoreDelta: number;
-  /** Completes the six-game series (H1). Does not publish leaderboard rows. */
+  /**
+   * The current subgame ended. Phase A records AWAIT_ADVANCE only.
+   * It does not complete the six-game series and does not publish.
+   */
   completesSubgame: boolean;
 }
 

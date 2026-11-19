@@ -175,12 +175,10 @@ export class SeriesCommandArbiter {
   }
 
   /**
-   * Weekly settlement barrier (TD-13): do not finalize while eligible
-   * pre-cutoff admissions remain pending across the settlement set.
-   *
-   * Phase A proves the pending-admission watermark check. A fully atomic
-   * multi-series weekly FINAL snapshot publish remains Phase C (NOT_RUN) —
-   * see evidence doc remaining limitations.
+   * Lists pending journal rows for a caller-supplied series set.
+   * This does not take the settlement lock, authorize F2-B publications,
+   * or commit an immutable snapshot. Weekly FINAL is
+   * F2CRankingService.finalizeWeek.
    */
   async canSafelyFinalizeWeekly(
     seriesKeys: string[],
@@ -442,21 +440,8 @@ export class SeriesCommandArbiter {
         }
         const nextRevision = current.boardRevision + 1;
         const nextIdle = idleDeadlineFrom(t, 300);
-        if (effect.completesSubgame) {
-          // COMPLETED without publishing — Phase C owns four-category publish.
-          return {
-            ok: true,
-            next: {
-              ...current,
-              boardRevision: nextRevision,
-              score: nextScore,
-              idleDeadlineAt: nextIdle,
-              status: 'COMPLETED',
-              resultsPublished: false,
-              lastAppliedAdmissionId: command.admissionId,
-            },
-          };
-        }
+        // One ended subgame is not six-game completion. AWAIT_ADVANCE is the
+        // existing nonterminal status. Publication stays with the F2-B H1 path.
         return {
           ok: true,
           next: {
@@ -464,6 +449,8 @@ export class SeriesCommandArbiter {
             boardRevision: nextRevision,
             score: nextScore,
             idleDeadlineAt: nextIdle,
+            status: effect.completesSubgame ? 'AWAIT_ADVANCE' : current.status,
+            resultsPublished: false,
             lastAppliedAdmissionId: command.admissionId,
           },
         };

@@ -18,7 +18,7 @@ import {
   PostgresSeriesWriterStore,
   SERIES_WRITER_DDL,
 } from '../auth/series-writer-binding.mts';
-import { SERIES_FENCE_DDL } from '../ingress/series-fence.mts';
+import { lockWeeklySettlement, SERIES_FENCE_DDL } from '../ingress/series-fence.mts';
 import { idleDeadlineFrom } from '../ingress/types.mts';
 import {
   DAILY_CLAIM_DDL,
@@ -63,6 +63,18 @@ function dateMs(s: string): number | null {
 
 function utcWeekStart(dayMs: number): number {
   return dayMs - ((new Date(dayMs).getUTCDay() + 6) % 7) * 86400000;
+}
+
+/**
+ * Monday 00:00 UTC closes new claims for every earlier week.
+ * The bootstrap calls this with the PostgreSQL clock sampled after the
+ * weekly settlement lock. An invalid date or timestamp fails closed.
+ */
+export function claimWindowClosed(nowMs: number, originalUtcDate: string): boolean {
+  const requested = dateMs(originalUtcDate);
+  if (requested === null || !Number.isSafeInteger(nowMs)) return true;
+  const today = Math.floor(nowMs / 86400000) * 86400000;
+  return requested < utcWeekStart(today) || requested > today;
 }
 
 function mapClaim(row: Record<string, unknown>): ImmutableDailyClaim {
@@ -112,6 +124,9 @@ export class AtomicDailyClaimBootstrap {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
+      // Before the trusted clock sample, so a claim blocked by FINAL cannot
+      // keep a pre-cutoff timestamp and appear after the week is closed.
+      await lockWeeklySettlement(client);
       // Serialize concurrent same-player/day starts before unique insert.
       const [k1, k2] = claimAdvisoryKeys(
         args.session.playerId,
@@ -123,8 +138,7 @@ export class AtomicDailyClaimBootstrap {
         `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
       );
       const now = Number(time.rows[0].ms);
-      const today = Math.floor(now / 86400000) * 86400000;
-      if (requested < utcWeekStart(today) || requested > today) {
+      if (claimWindowClosed(now, args.originalUtcDate)) {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'CLAIM_WINDOW_CLOSED' };
       }

@@ -8,7 +8,7 @@ assert.ok(url, 'PZD_INGRESS_DATABASE_URL is required for PZD-40 PostgreSQL proof
 const A = 'a'.repeat(64), B = 'b'.repeat(64);
 async function fixture() {
   const pool = new pg.Pool({ connectionString: url, max: 12 });
-  await pool.query('DROP TABLE IF EXISTS tournament_daily_claim');
+  await pool.query('DROP TABLE IF EXISTS tournament_daily_claim CASCADE');
   const store = new PostgresDailyClaimStore(pool);
   await store.migrate();
   const now = new Date();

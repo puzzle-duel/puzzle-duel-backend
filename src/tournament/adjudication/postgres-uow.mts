@@ -5,6 +5,10 @@
  * entire adjudication commit: series lock → validate → replay → ledger →
  * snapshot → fence → admission outcome + immutable result. Any failure rolls
  * back every write; admission stays pending (never rejected with fence advanced).
+ *
+ * F2-B publication is not a second authority. When a six-game publisher is
+ * attached, a verified terminal H1 move publishes inside this same transaction
+ * under the same series advisory lock. Between-game Advance is not that event.
  */
 
 import type pg from 'pg';
@@ -16,7 +20,11 @@ import {
   type Move,
   type MoveApplied,
 } from '../../engine/core001v3/index.mts';
-import { seriesAdvisoryKeys } from '../ingress/series-fence.mts';
+import { lockSeriesForTransaction, lockWeeklySettlement } from '../ingress/series-fence.mts';
+import type {
+  F2BPublishInput,
+  F2BPublishResult,
+} from '../results/f2b-publication.mts';
 import { idleDeadlineFrom, isTimely, type SeriesFenceState } from '../ingress/types.mts';
 import type { ImmutableAdmissionResult } from './admission-result.mts';
 import { freezeAdmissionResult } from './admission-result.mts';
@@ -79,12 +87,57 @@ export type AdjudicateMoveResult =
       checkpointUnchanged?: boolean;
     };
 
+export type SixGamePublisher = {
+  publishOnOpenTransaction(
+    client: pg.PoolClient,
+    input: F2BPublishInput,
+  ): Promise<F2BPublishResult>;
+};
+
+function epochMs(value: unknown): number | null {
+  if (typeof value === 'bigint') {
+    const asNumber = Number(value);
+    return Number.isSafeInteger(asNumber) ? asNumber : null;
+  }
+  const asNumber = typeof value === 'string' || typeof value === 'number' ? Number(value) : NaN;
+  return Number.isSafeInteger(asNumber) ? asNumber : null;
+}
+
+/**
+ * A move is inside the hard cutoff only when the stored process stamp, the
+ * stored PostgreSQL stamp, and the value passed into adjudication all agree
+ * and are strictly before the cutoff. A missing database stamp fails closed.
+ */
+function hardCutoffAllows(
+  admission: Record<string, unknown>,
+  suppliedAt: Date,
+  hardCutoffAt: Date,
+): boolean {
+  const storedMs = epochMs(admission.trusted_received_at_ms);
+  const dbMs = epochMs(admission.db_trusted_received_at_ms);
+  if (storedMs === null || dbMs === null || suppliedAt.getTime() !== storedMs) return false;
+  return isTimely(new Date(storedMs), hardCutoffAt) && isTimely(new Date(dbMs), hardCutoffAt);
+}
+
 export class PostgresTrustedUnitOfWork {
   readonly #pool: pg.Pool;
   #faults: UowFaultHooks = {};
+  #sixGamePublisher: SixGamePublisher | null = null;
 
   constructor(pool: pg.Pool) {
     this.#pool = pool;
+  }
+
+  /**
+   * Attach F2-B publication to the H1 terminal move commit.
+   * Null is the production-disabled setting: a terminal H1 stays
+   * AWAIT_ADVANCE with resultsPublished false and is not a ranked series.
+   * When a publisher is attached, published and verified duplicate complete
+   * the series. Any rejected publication aborts the move and leaves the
+   * admission pending.
+   */
+  setSixGamePublisher(publisher: SixGamePublisher | null): void {
+    this.#sixGamePublisher = publisher;
   }
 
   setFaultHooks(hooks: UowFaultHooks): void {
@@ -112,14 +165,14 @@ export class PostgresTrustedUnitOfWork {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(input.seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockWeeklySettlement(client);
+      await lockSeriesForTransaction(client, input.seriesKey);
       await this.#fault('after_lock');
 
       // Load original admission under lock; verify still pending or return frozen result.
       const admRes = await client.query(
         `SELECT admission_id, series_key, player_id, outcome, result_json,
-                trusted_received_at_ms, admission_seq
+                trusted_received_at_ms, db_trusted_received_at_ms, admission_seq
          FROM command_admission_journal
          WHERE admission_id = $1 FOR UPDATE`,
         [input.admissionId],
@@ -230,7 +283,7 @@ export class PostgresTrustedUnitOfWork {
       if (!isTimely(input.trustedReceivedAt, pre.idleDeadlineAt)) {
         return this.#rejectOnly(client, input, 'IDLE_EXPIRED', pre, true);
       }
-      if (pre.hardCutoffAt && !isTimely(input.trustedReceivedAt, pre.hardCutoffAt)) {
+      if (pre.hardCutoffAt && !hardCutoffAllows(adm, input.trustedReceivedAt, pre.hardCutoffAt)) {
         return this.#rejectOnly(client, input, 'HARD_CUTOFF_EXPIRED', pre, true);
       }
       if (input.move.writerGeneration !== pre.writerGeneration) {
@@ -290,7 +343,7 @@ export class PostgresTrustedUnitOfWork {
         return this.#rejectOnly(client, input, 'MOVE_UNSAFE', pre, true);
       }
 
-      const nextFence: SeriesFenceState = {
+      let nextFence: SeriesFenceState = {
         ...pre,
         boardRevision: pre.boardRevision + 1,
         score: nextScore,
@@ -370,6 +423,33 @@ export class PostgresTrustedUnitOfWork {
       );
       await this.#fault('after_fence');
 
+      if (this.#sixGamePublisher && terminal && input.subgameOrdinal === 6) {
+        const published = await this.#sixGamePublisher.publishOnOpenTransaction(
+          client,
+          {
+            seriesId: input.seriesKey,
+            playerId: input.playerId,
+            writerGeneration: nextFence.writerGeneration,
+            commandIdempotencyKey: `h1:${input.admissionId}`,
+            event: 'h1_terminal_move',
+          },
+        );
+        if (published.outcome === 'rejected') {
+          throw new Error(`F2B_PUBLICATION_REJECTED:${published.reason}`);
+        }
+        nextFence = {
+          ...nextFence,
+          status: 'COMPLETED',
+          resultsPublished: true,
+        };
+        await client.query(
+          `UPDATE series_fence_state
+           SET status = 'COMPLETED', results_published = TRUE
+           WHERE series_key = $1`,
+          [input.seriesKey],
+        );
+      }
+
       const result = freezeAdmissionResult({
         admissionId: input.admissionId,
         playerId: input.playerId,
@@ -382,7 +462,7 @@ export class PostgresTrustedUnitOfWork {
         terminalReason,
         stateHash: afterHash,
         writerGeneration: nextFence.writerGeneration,
-        awaitAdvance: terminal,
+        awaitAdvance: nextFence.status === 'AWAIT_ADVANCE',
         decision: 'apply',
       });
 
@@ -433,8 +513,7 @@ export class PostgresTrustedUnitOfWork {
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
-      const [k1, k2] = seriesAdvisoryKeys(args.seriesKey);
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [k1, k2]);
+      await lockSeriesForTransaction(client, args.seriesKey);
 
       const admRes = await client.query(
         `SELECT outcome, result_json FROM command_admission_journal

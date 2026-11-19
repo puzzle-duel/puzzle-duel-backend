@@ -74,7 +74,7 @@ async function setup() {
     'DROP TABLE IF EXISTS accepted_move_ledger',
     'DROP TABLE IF EXISTS trusted_challenge_binding',
     'DROP TABLE IF EXISTS series_fence_state',
-    'DROP TABLE IF EXISTS tournament_daily_claim',
+    'DROP TABLE IF EXISTS tournament_daily_claim CASCADE',
     'DROP TABLE IF EXISTS command_admission_journal',
     'DROP TABLE IF EXISTS tournament_auth_session',
     'DROP TABLE IF EXISTS tournament_verified_identity',
