@@ -391,4 +391,136 @@ describe('PZD-40 authenticated tournament HTTP E2E (candidate OpenAPI)', () => {
       await env.close();
     }
   });
+
+  it('PZD-45: Player B cannot POST a move onto Player A ranked series', async () => {
+    const env = await boot();
+    try {
+      const authA = env.bearer('pzd45-owner-a');
+      const openA = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST',
+        headers: { authorization: authA },
+      });
+      assert.equal(openA.status, 201);
+      const sessionA = (await openA.json()) as { sessionSecret: string };
+      const headersA = {
+        authorization: authA,
+        'x-pzd-session-secret': sessionA.sessionSecret,
+        'content-type': 'application/json',
+      };
+      const claimed = await fetch(`${env.base}/v1/tournament/claims/daily`, {
+        method: 'POST',
+        headers: headersA,
+        body: JSON.stringify({ originalUtcDate: env.today }),
+      });
+      assert.equal(claimed.status, 201);
+      const claim = (await claimed.json()) as { seriesId: string };
+
+      const authB = env.bearer('pzd45-attacker-b');
+      const openB = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST',
+        headers: { authorization: authB },
+      });
+      assert.equal(openB.status, 201);
+      const sessionB = (await openB.json()) as { sessionSecret: string };
+      const steal = await fetch(
+        `${env.base}/v1/tournament/series/${claim.seriesId}/commands`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: authB,
+            'x-pzd-session-secret': sessionB.sessionSecret,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            commandType: 'move',
+            idempotencyKey: 'cross-player-steal',
+            move: {
+              offerIndex: 0,
+              tap: [0, 0],
+              expectedBoardRevision: 0,
+              writerGeneration: 1,
+            },
+          }),
+        },
+      );
+      assert.ok(
+        [404, 409].includes(steal.status),
+        `cross-player move must fail closed, got ${steal.status}`,
+      );
+      const ledger = await env.pool.query(
+        'SELECT count(*)::int AS n FROM accepted_move_ledger',
+      );
+      assert.equal(ledger.rows[0].n, 0);
+      const fence = await env.pool.query(
+        'SELECT board_revision FROM series_fence_state WHERE series_key = $1',
+        [claim.seriesId],
+      );
+      if (fence.rows.length > 0) {
+        assert.equal(Number(fence.rows[0].board_revision), 0);
+      }
+    } finally {
+      await env.close();
+    }
+  });
+
+  it('PZD-45: expired DB session cannot submit ranked commands (writer fencing intact)', async () => {
+    const env = await boot();
+    try {
+      const auth = env.bearer('pzd45-expired');
+      const opened = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST',
+        headers: { authorization: auth },
+      });
+      assert.equal(opened.status, 201);
+      const session = (await opened.json()) as {
+        sessionSecret: string;
+        sessionId?: string;
+      };
+      const headers = {
+        authorization: auth,
+        'x-pzd-session-secret': session.sessionSecret,
+        'content-type': 'application/json',
+      };
+      const claimed = await fetch(`${env.base}/v1/tournament/claims/daily`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ originalUtcDate: env.today }),
+      });
+      assert.equal(claimed.status, 201);
+      const claim = (await claimed.json()) as { seriesId: string };
+
+      // Expire the verified session row while the JWT remains within exp.
+      // Current contract: fail-closed; no silent writer takeover/recovery.
+      await env.pool.query(
+        'UPDATE tournament_auth_session SET expires_at_ms = 1',
+      );
+
+      const afterExpiry = await fetch(
+        `${env.base}/v1/tournament/series/${claim.seriesId}/commands`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            commandType: 'move',
+            idempotencyKey: 'after-expiry',
+            move: {
+              offerIndex: 0,
+              tap: [0, 0],
+              expectedBoardRevision: 0,
+              writerGeneration: 1,
+            },
+          }),
+        },
+      );
+      assert.equal(afterExpiry.status, 401);
+      const body = (await afterExpiry.json()) as { error?: string };
+      assert.equal(body.error, 'UNAUTHENTICATED');
+      const ledger = await env.pool.query(
+        'SELECT count(*)::int AS n FROM accepted_move_ledger',
+      );
+      assert.equal(ledger.rows[0].n, 0);
+    } finally {
+      await env.close();
+    }
+  });
 });
