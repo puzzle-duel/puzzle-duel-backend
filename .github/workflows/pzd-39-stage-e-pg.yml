@@ -137,9 +137,19 @@ jobs:
           set +e
           npm run test:stage-f2-failover
           status=$?
-          docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1
-          docker network rm pzd-f2-gate-net >/dev/null 2>&1
-          # The hosted runner waits in "Cleaning up orphan processes" on
-          # container shims left by this step, then the job limit is CANCELLED.
+          echo "::group::Failover runner cleanup diagnostics (process names only)"
+          echo "test_exit_status=$status"
+          echo "Before cleanup: relevant process PID/PPID/state/comm"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "Before cleanup: disposable containers"
+          timeout 10s docker ps -a --format '{{.Names}} {{.Status}}' | grep 'pzd-f2-gate-' || true
+          echo "::endgroup::"
+          timeout 30s docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1 || true
+          timeout 15s docker network rm pzd-f2-gate-net >/dev/null 2>&1 || true
+          # Match the previously successful downstream cleanup while recording
+          # process metadata, not command lines or environment/credentials.
           sudo pkill -9 -f '[c]ontainerd-shim|[d]ocker-proxy' >/dev/null 2>&1 || true
+          echo "::group::Post-cleanup process census"
+          ps -eo pid,ppid,stat,comm | grep -E '(^ *PID|containerd-shim|docker-proxy|dockerd|node|npm)' || true
+          echo "::endgroup::"
           exit "$status"
