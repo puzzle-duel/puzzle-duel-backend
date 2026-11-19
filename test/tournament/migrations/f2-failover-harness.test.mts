@@ -14,8 +14,9 @@ import { F2CRankingService } from '../../../src/tournament/results/f2c-rankings.
 const NET = 'pzd-f2-gate-net';
 const PRIMARY = 'pzd-f2-gate-primary';
 const REPLICA = 'pzd-f2-gate-replica';
-const PRIMARY_URL = 'postgresql://postgres:pzd@127.0.0.1:55440/postgres';
-const REPLICA_URL = 'postgresql://postgres:pzd@127.0.0.1:55441/postgres';
+function databaseUrl(ip: string): string {
+  return `postgresql://postgres:pzd@${ip}:5432/postgres`;
+}
 const KEY = 'test-only-f2b-provenance-key-not-a-secret';
 const DIGEST = 'ab'.repeat(32);
 const REPL_PASSWORD = 'pzd-repl-test-only-not-a-secret';
@@ -75,6 +76,12 @@ async function endPool(pool: pg.Pool): Promise<void> {
   }
 }
 
+async function containerIp(name: string): Promise<string> {
+  const ip = await run(['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name]);
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)) throw new Error(`no address for ${name}`);
+  return ip;
+}
+
 async function dockerAvailable(): Promise<boolean> {
   try {
     await run(['info']);
@@ -123,20 +130,21 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     await run(['network', 'create', NET]);
     await run([
       'run', '-d', '--name', PRIMARY, '--network', NET, '--cap-add', 'SYS_TIME',
-      '-e', 'POSTGRES_PASSWORD=pzd', '-p', '55440:5432', 'postgres:18',
+      '-e', 'POSTGRES_PASSWORD=pzd', 'postgres:18',
       'postgres', '-c', 'wal_level=replica', '-c', 'hot_standby=on',
       '-c', 'max_wal_senders=10', '-c', 'max_replication_slots=10',
     ]);
-    await waitFor('primary', () => ready(PRIMARY_URL));
+    const primaryUrl = databaseUrl(await containerIp(PRIMARY));
+    await waitFor('primary', () => ready(primaryUrl));
     await run(['exec', PRIMARY, 'psql', '-U', 'postgres', '-c', `CREATE ROLE pzd_repl WITH REPLICATION LOGIN PASSWORD '${REPL_PASSWORD}'`]);
     await run(['exec', PRIMARY, 'bash', '-lc', `grep -q pzd_repl "$PGDATA/pg_hba.conf" || echo 'host replication pzd_repl all scram-sha-256' >> "$PGDATA/pg_hba.conf"`]);
     await run(['exec', PRIMARY, 'psql', '-U', 'postgres', '-c', 'SELECT pg_reload_conf()']);
 
-    let primary = newPool(PRIMARY_URL);
+    let primary = newPool(primaryUrl);
     const reconnect = async (): Promise<void> => {
       await endPool(primary);
-      await waitFor('primary reconnect', () => ready(PRIMARY_URL));
-      primary = newPool(PRIMARY_URL);
+      await waitFor('primary reconnect', () => ready(primaryUrl));
+      primary = newPool(primaryUrl);
     };
     try {
       const version = await primary.query('SHOW server_version_num');
@@ -277,7 +285,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     }
 
     await run([
-      'run', '-d', '--name', REPLICA, '--network', NET, '--cap-add', 'SYS_TIME', '--entrypoint', 'bash', '-p', '55441:5432', 'postgres:18',
+      'run', '-d', '--name', REPLICA, '--network', NET, '--cap-add', 'SYS_TIME', '--entrypoint', 'bash', 'postgres:18',
       '-lc',
       `set -eu
        echo waiting-for-primary
@@ -293,6 +301,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
        printf "primary_conninfo = 'host=${PRIMARY} port=5432 user=pzd_repl password=${REPL_PASSWORD}'\n" >> /var/lib/postgresql/data/postgresql.auto.conf
        exec gosu postgres env PGDATA=/var/lib/postgresql/data /usr/lib/postgresql/18/bin/postgres -c listen_addresses='*' -c hot_standby=on`,
     ]);
+    const replicaUrl = databaseUrl(await containerIp(REPLICA));
     let replicaLogs = '';
     try {
     await waitFor('replica', async () => {
@@ -301,8 +310,8 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
         replicaLogs = await run(['logs', '--tail', '80', REPLICA]).catch(() => '');
         return true;
       }
-      if (!(await ready(REPLICA_URL))) return false;
-      const pool = newPool(REPLICA_URL, 1_000);
+      if (!(await ready(replicaUrl))) return false;
+      const pool = newPool(replicaUrl, 1_000);
       try {
         const result = await pool.query('SELECT pg_is_in_recovery() AS recovery');
         return result.rows[0].recovery === true;
@@ -316,8 +325,8 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     }
     if (replicaLogs) throw new Error(replicaLogs);
 
-    const source = newPool(PRIMARY_URL);
-    const replica = newPool(REPLICA_URL);
+    const source = newPool(primaryUrl);
+    const replica = newPool(replicaUrl);
     try {
       await replica.query('SELECT pg_wal_replay_pause()');
       await source.query(`CREATE TABLE pzd_failover_witness (id integer PRIMARY KEY)`);
@@ -347,7 +356,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     }
 
     await run(['stop', PRIMARY]);
-    const promoted = newPool(REPLICA_URL);
+    const promoted = newPool(replicaUrl);
     try {
       await promoted.query(`SELECT set_config('statement_timeout', '120000', false)`);
       await promoted.query('SELECT pg_promote(wait => true)');

@@ -133,4 +133,10 @@ jobs:
         run: npm ci
       - name: Stage F2 multi-host failover topology
         timeout-minutes: 25
-        run: npm run test:stage-f2-failover
+        run: |
+          set +e
+          npm run test:stage-f2-failover
+          status=$?
+          docker rm -f pzd-f2-gate-primary pzd-f2-gate-replica >/dev/null 2>&1
+          docker network rm pzd-f2-gate-net >/dev/null 2>&1
+          exit "$status"
