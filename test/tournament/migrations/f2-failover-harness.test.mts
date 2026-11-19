@@ -14,24 +14,72 @@ import { F2CRankingService } from '../../../src/tournament/results/f2c-rankings.
 const NET = 'pzd-f2-gate-net';
 const PRIMARY = 'pzd-f2-gate-primary';
 const REPLICA = 'pzd-f2-gate-replica';
-const PRIMARY_URL = 'postgresql://postgres:pzd@127.0.0.1:55440/postgres';
-const REPLICA_URL = 'postgresql://postgres:pzd@127.0.0.1:55441/postgres';
+function databaseUrl(ip: string): string {
+  return `postgresql://postgres:pzd@${ip}:5432/postgres`;
+}
 const KEY = 'test-only-f2b-provenance-key-not-a-secret';
 const DIGEST = 'ab'.repeat(32);
 const REPL_PASSWORD = 'pzd-repl-test-only-not-a-secret';
 
 function run(args: readonly string[]): Promise<string> {
+  const limitMs = args[0] === 'run' ? 300_000 : 60_000;
   return new Promise((resolve, reject) => {
     const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(() => reject(new Error(`docker ${args[0]} timed out after ${limitMs}ms`)));
+    }, limitMs);
     child.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { err += chunk.toString(); });
+    child.on('error', (error) => finish(() => reject(error)));
     child.on('close', (code) => {
-      if (code === 0) resolve(out.trim());
-      else reject(new Error(`docker ${args.join(' ')} exited ${code}\n${err}\n${out}`));
+      finish(() => {
+        if (code === 0) resolve(out.trim());
+        else reject(new Error(`docker ${args.join(' ')} exited ${code}\n${err}\n${out}`));
+      });
     });
   });
+}
+
+function newPool(url: string, connectionTimeoutMillis = 10_000): pg.Pool {
+  const pool = new pg.Pool({
+    connectionString: url,
+    connectionTimeoutMillis,
+    allowExitOnIdle: true,
+  });
+  pool.on('error', () => undefined);
+  return pool;
+}
+
+async function endPool(pool: pg.Pool): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      pool.end(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 5_000);
+      }),
+    ]);
+  } catch {
+    // The container is disposable. A stuck disconnect must not hold the runner.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function containerIp(name: string): Promise<string> {
+  const ip = await run(['inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name]);
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(ip)) throw new Error(`no address for ${name}`);
+  return ip;
 }
 
 async function dockerAvailable(): Promise<boolean> {
@@ -56,12 +104,12 @@ async function waitFor(label: string, probe: () => Promise<boolean>): Promise<vo
 }
 
 async function ready(url: string): Promise<boolean> {
-  const pool = new pg.Pool({ connectionString: url, connectionTimeoutMillis: 1000 });
+  const pool = newPool(url, 1_000);
   try {
     const result = await pool.query('SELECT 1 AS ok');
     return result.rows[0].ok === 1;
   } finally {
-    await pool.end();
+    await endPool(pool);
   }
 }
 
@@ -82,22 +130,21 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     await run(['network', 'create', NET]);
     await run([
       'run', '-d', '--name', PRIMARY, '--network', NET, '--cap-add', 'SYS_TIME',
-      '-e', 'POSTGRES_PASSWORD=pzd', '-p', '55440:5432', 'postgres:18',
+      '-e', 'POSTGRES_PASSWORD=pzd', 'postgres:18',
       'postgres', '-c', 'wal_level=replica', '-c', 'hot_standby=on',
       '-c', 'max_wal_senders=10', '-c', 'max_replication_slots=10',
     ]);
-    await waitFor('primary', () => ready(PRIMARY_URL));
+    const primaryUrl = databaseUrl(await containerIp(PRIMARY));
+    await waitFor('primary', () => ready(primaryUrl));
     await run(['exec', PRIMARY, 'psql', '-U', 'postgres', '-c', `CREATE ROLE pzd_repl WITH REPLICATION LOGIN PASSWORD '${REPL_PASSWORD}'`]);
     await run(['exec', PRIMARY, 'bash', '-lc', `grep -q pzd_repl "$PGDATA/pg_hba.conf" || echo 'host replication pzd_repl all scram-sha-256' >> "$PGDATA/pg_hba.conf"`]);
     await run(['exec', PRIMARY, 'psql', '-U', 'postgres', '-c', 'SELECT pg_reload_conf()']);
 
-    let primary = new pg.Pool({ connectionString: PRIMARY_URL });
-    primary.on('error', () => undefined);
+    let primary = newPool(primaryUrl);
     const reconnect = async (): Promise<void> => {
-      await primary.end().catch(() => undefined);
-      await waitFor('primary reconnect', () => ready(PRIMARY_URL));
-      primary = new pg.Pool({ connectionString: PRIMARY_URL });
-      primary.on('error', () => undefined);
+      await endPool(primary);
+      await waitFor('primary reconnect', () => ready(primaryUrl));
+      primary = newPool(primaryUrl);
     };
     try {
       const version = await primary.query('SHOW server_version_num');
@@ -234,11 +281,11 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
         relock.release();
       }
     } finally {
-      await primary.end();
+      await endPool(primary);
     }
 
     await run([
-      'run', '-d', '--name', REPLICA, '--network', NET, '--cap-add', 'SYS_TIME', '--entrypoint', 'bash', '-p', '55441:5432', 'postgres:18',
+      'run', '-d', '--name', REPLICA, '--network', NET, '--cap-add', 'SYS_TIME', '--entrypoint', 'bash', 'postgres:18',
       '-lc',
       `set -eu
        echo waiting-for-primary
@@ -254,6 +301,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
        printf "primary_conninfo = 'host=${PRIMARY} port=5432 user=pzd_repl password=${REPL_PASSWORD}'\n" >> /var/lib/postgresql/data/postgresql.auto.conf
        exec gosu postgres env PGDATA=/var/lib/postgresql/data /usr/lib/postgresql/18/bin/postgres -c listen_addresses='*' -c hot_standby=on`,
     ]);
+    const replicaUrl = databaseUrl(await containerIp(REPLICA));
     let replicaLogs = '';
     try {
     await waitFor('replica', async () => {
@@ -262,13 +310,13 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
         replicaLogs = await run(['logs', '--tail', '80', REPLICA]).catch(() => '');
         return true;
       }
-      if (!(await ready(REPLICA_URL))) return false;
-      const pool = new pg.Pool({ connectionString: REPLICA_URL });
+      if (!(await ready(replicaUrl))) return false;
+      const pool = newPool(replicaUrl, 1_000);
       try {
         const result = await pool.query('SELECT pg_is_in_recovery() AS recovery');
         return result.rows[0].recovery === true;
       } finally {
-        await pool.end();
+        await endPool(pool);
       }
     });
     } catch (err) {
@@ -277,10 +325,8 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
     }
     if (replicaLogs) throw new Error(replicaLogs);
 
-    const source = new pg.Pool({ connectionString: PRIMARY_URL });
-    const replica = new pg.Pool({ connectionString: REPLICA_URL });
-    source.on('error', () => undefined);
-    replica.on('error', () => undefined);
+    const source = newPool(primaryUrl);
+    const replica = newPool(replicaUrl);
     try {
       await replica.query('SELECT pg_wal_replay_pause()');
       await source.query(`CREATE TABLE pzd_failover_witness (id integer PRIMARY KEY)`);
@@ -305,14 +351,14 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
         /read-only|recovery|cannot execute/i,
       );
     } finally {
-      await source.end();
-      await replica.end();
+      await endPool(source);
+      await endPool(replica);
     }
 
     await run(['stop', PRIMARY]);
-    const promoted = new pg.Pool({ connectionString: REPLICA_URL });
-    promoted.on('error', () => undefined);
+    const promoted = newPool(replicaUrl);
     try {
+      await promoted.query(`SELECT set_config('statement_timeout', '120000', false)`);
       await promoted.query('SELECT pg_promote(wait => true)');
       await waitFor('promoted primary', async () => {
         const result = await promoted.query('SELECT pg_is_in_recovery() AS recovery');
@@ -362,7 +408,7 @@ describe('PZD-41 disposable PostgreSQL failover harness', () => {
       t.diagnostic(`postgresql-clock=${clock}`);
       assert.ok(clock === 'PASS' || clock.startsWith('NOT_RUN'), clock);
     } finally {
-      await promoted.end();
+      await endPool(promoted);
     }
   });
 });
