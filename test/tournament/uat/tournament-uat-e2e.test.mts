@@ -144,6 +144,73 @@ describe('PZD-42 tournament UAT', () => {
   });
 });
 
+describe('PZD-48 immutable UTC daily challenge UAT (disposable test DB only)', () => {
+  it('pins one daily digest for two players, verifies six-game publication and rejects mutation', async () => {
+    await recreate(); // Only pzd_pzd42_uat is dropped, never an owner UAT database.
+    const pool = new pg.Pool({ connectionString: urlFor(DATABASE), max: 8 });
+    const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const publicKeyPem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      await applyMigrations(pool);
+      const uat = await createUatHandler(pool, {
+        provenanceKey: PROVENANCE_KEY, publicKeyPem, privateKey: pair.privateKey,
+        rankedHttpGate: explicitTestRankedHttpGateConfig(),
+        actualRuntimeEnv: { NODE_ENV: 'test' } as NodeJS.ProcessEnv,
+        enableUtcDailyManifests: true,
+        rateLimit: { maxPerWindow: 5000, windowMs: 60_000 },
+      });
+      server = createServer((req, res) => { void uat.handler(req, res); });
+      await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve));
+      const address = server.address();
+      assert.ok(address && typeof address !== 'string');
+      const base = 'http://127.0.0.1:' + address.port;
+      const utcDate = new Date().toISOString().slice(0, 10);
+      const bearerA = signUatBearer(pair.privateKey, UAT_SUBJECTS.a);
+      const bearerB = signUatBearer(pair.privateKey, UAT_SUBJECTS.b);
+
+      await playSeries(base, bearerA, utcDate, 'high');
+      await playSeries(base, bearerB, utcDate, 'low');
+
+      const claims = await pool.query(
+        'SELECT series_id, manifest_digest FROM tournament_daily_claim ORDER BY player_id',
+      );
+      assert.equal(claims.rows.length, 2);
+      assert.equal(claims.rows[0].manifest_digest, claims.rows[1].manifest_digest);
+
+      const rows = await pool.query(
+        'SELECT manifest_digest, manifest_text FROM tournament_utc_daily_manifest',
+      );
+      assert.equal(rows.rows.length, 1);
+      assert.equal(rows.rows[0].manifest_digest.trim(), claims.rows[0].manifest_digest);
+      const bindings = await pool.query(
+        `SELECT c.player_id, b.subgame_ordinal, b.initial_state_json
+         FROM trusted_challenge_binding b
+         JOIN tournament_daily_claim c ON c.series_id=b.series_key
+         ORDER BY c.player_id, b.subgame_ordinal`,
+      );
+      assert.equal(bindings.rows.length, 12);
+      for (let i = 0; i < 6; i++) {
+        assert.equal(bindings.rows[i].subgame_ordinal, bindings.rows[i + 6].subgame_ordinal);
+        assert.deepEqual(bindings.rows[i].initial_state_json, bindings.rows[i + 6].initial_state_json);
+      }
+      await assert.rejects(
+        () => pool.query(
+          `UPDATE tournament_utc_daily_manifest SET content_version='forged'
+           WHERE manifest_digest=$1`,
+          [claims.rows[0].manifest_digest],
+        ),
+        /IMMUTABLE_UTC_DAILY_MANIFEST/,
+      );
+    } finally {
+      if (server) await new Promise<void>((resolve, reject) =>
+        server!.close(error => error ? reject(error) : resolve()));
+      await pool.end();
+      await drop();
+    }
+  });
+});
+
 async function openSession(base: string, bearer: string): Promise<{ secret: string }> {
   const opened = await client(base, bearer)('POST', '/v1/tournament/session');
   assert.equal(opened.status, 201);
