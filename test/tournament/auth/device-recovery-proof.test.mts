@@ -30,7 +30,7 @@ function credentials() {
   };
 }
 function signed(input: DeviceRecoveryProofInput, privateKey: ReturnType<typeof credentials>['privateKey']) {
-  return sign('sha256', Buffer.from(canonicalDeviceRecoveryProof(input)), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url');
+  return sign('sha256', Buffer.from(canonicalDeviceRecoveryProof(input)), privateKey).toString('base64url');
 }
 
 test('registered P-256 device proves exact new session and series', () => {
