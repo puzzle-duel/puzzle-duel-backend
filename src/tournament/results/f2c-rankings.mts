@@ -959,7 +959,9 @@ function rankDaily(rows: readonly AuthorizedDaily[], date: string, category: F2C
   const seen = new Set<string>();
   const scored = [];
   for (const row of rows) {
-    if (row.originalUtcDate !== date) continue;
+    // Retrospective claims count toward weekly standings only. Daily boards
+    // are reserved for series first claimed on their original UTC date.
+    if (row.originalUtcDate !== date || !row.onTimeAwarded) continue;
     if (seen.has(row.playerId)) throw new SettlementClosed('DUPLICATE_DAILY_CREDIT');
     seen.add(row.playerId);
     scored.push({
