@@ -43,7 +43,10 @@ function toV3(challenge: Challenge): Record<string, unknown> {
 function fingerprint(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
-export function generateUtcDailyManifest(utcDate: string): PinnedDailyManifest {
+export function generateUtcDailyManifest(
+  utcDate: string,
+  pinnedNeighbors: readonly PinnedDailyManifest[] = [],
+): PinnedDailyManifest {
   if (!validUtcDate(utcDate)) throw new Error('DAILY_MANIFEST_INVALID_DATE');
   const seen = new Set<string>();
   const contentVersion = DAILY_VERSION + ':' + utcDate;
@@ -52,6 +55,13 @@ export function generateUtcDailyManifest(utcDate: string): PinnedDailyManifest {
     // Reject identical same-slot board/supply from the preceding UTC day.
     const prior = generateChallenge(profile, seed(previousDay(utcDate), ordinal, 0));
     if (prior.ok) seen.add(fingerprint(toV3(prior.challenge)));
+    for (const neighbor of pinnedNeighbors) {
+      const comparison = neighbor.subgames[index];
+      if (neighbor.subgames.length !== 6 || !comparison || comparison.ordinal !== ordinal) {
+        throw new Error('DAILY_MANIFEST_NEIGHBOR_CORRUPT');
+      }
+      seen.add(fingerprint(comparison.initialState));
+    }
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       const candidate = generateChallenge(profile, seed(utcDate, ordinal, attempt));
       if (!candidate.ok) continue;
