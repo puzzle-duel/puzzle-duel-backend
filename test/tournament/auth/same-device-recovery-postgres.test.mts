@@ -271,3 +271,50 @@ test('pre-existing claims cannot acquire a retroactive device anchor',async()=>{
     assert.deepEqual(denied,{ok:false,reason:'RECOVERY_NOT_ELIGIBLE'});
   } finally {await env.cleanup();}
 });
+
+test('forged device proof and missing active snapshot leave writer/fence unchanged',async()=>{
+  const env=await setup();
+  try {
+    const key=keypair(), original=await env.open('player-a');
+    await register(env,original,key);
+    const seriesId=await firstClaim(env,original);
+    const fresh=await env.open('player-a');
+    await register(env,fresh,key);
+    await env.pool.query(
+      'UPDATE tournament_auth_session SET expires_at_ms=1 WHERE session_id=$1',
+      [original.sessionId],
+    );
+    const request=await recoveryProof(env,fresh,seriesId,key);
+    const forged=await env.recovery.recover({
+      ...request,
+      signatureBase64Url: sign(
+        'sha256',
+        Buffer.from(canonicalDeviceRecoveryProof(request.proof)),
+        keypair().privateKey,
+      ).toString('base64url'),
+    });
+    assert.deepEqual(forged,{ok:false,reason:'RECOVERY_PROOF_INVALID'});
+    await env.pool.query(
+      'DELETE FROM authoritative_game_snapshot WHERE series_key=$1',
+      [seriesId],
+    );
+    const corrupted=await env.recovery.recover(request);
+    assert.deepEqual(corrupted,{ok:false,reason:'SERIES_STATE_INCONSISTENT'});
+    const writer=await env.pool.query(
+      'SELECT session_id,writer_generation FROM tournament_series_writer WHERE series_key=$1',
+      [seriesId],
+    );
+    assert.equal(writer.rows[0].session_id,original.sessionId);
+    assert.equal(Number(writer.rows[0].writer_generation),1);
+    const fence=await env.pool.query(
+      'SELECT writer_generation FROM series_fence_state WHERE series_key=$1',
+      [seriesId],
+    );
+    assert.equal(Number(fence.rows[0].writer_generation),1);
+    const ledger=await env.pool.query(
+      'SELECT consumed_at_ms FROM tournament_writer_recovery_challenge WHERE challenge_id=$1',
+      [request.proof.challengeId],
+    );
+    assert.equal(ledger.rows[0].consumed_at_ms,null);
+  } finally {await env.cleanup();}
+});
