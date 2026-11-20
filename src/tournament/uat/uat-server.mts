@@ -108,6 +108,7 @@ export async function createUatHandler(pool: pg.Pool, options?: {
   readonly rateLimit?: { maxPerWindow: number; windowMs: number };
   /** Experimental, production-forbidden writer recovery UAT only. */
   readonly enableSameDeviceRecovery?: boolean;
+  readonly sessionTtlMs?: number;
 }) {
   const keys = options?.publicKeyPem && options.privateKey
     ? { publicKeyPem: options.publicKeyPem, privateKey: options.privateKey }
@@ -120,10 +121,12 @@ export async function createUatHandler(pool: pg.Pool, options?: {
     keys: [{ keyId: KEY_ID, rsaPublicKeyPem: keys.publicKeyPem }],
     maxTokenAgeSeconds: 8 * 60 * 60,
   });
-  const sessions = new PostgresVerifiedIdentitySessionStore(pool);
-  await sessions.migrate();
   const recoveryEnabled = options?.enableSameDeviceRecovery === true &&
     process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'prod';
+  const sessions = new PostgresVerifiedIdentitySessionStore(pool, {
+    maximumSessionTtlMs: recoveryEnabled ? options?.sessionTtlMs : undefined,
+  });
+  await sessions.migrate();
   const sameDeviceRecovery = recoveryEnabled
     ? new PostgresSameDeviceRecovery(pool) : undefined;
   if (sameDeviceRecovery) await sameDeviceRecovery.migrate();
@@ -222,6 +225,10 @@ async function serve(): Promise<void> {
     const { handler } = await createUatHandler(pool, {
       rankedHttpGate: rankedHttpGateConfigFromEnv(),
       enableSameDeviceRecovery: process.env.PZD_SAME_DEVICE_RECOVERY_ENABLED === 'true',
+      // Explicit test-only session expiry. Does not extend JWT or series deadlines.
+      sessionTtlMs: process.env.PZD_SAME_DEVICE_RECOVERY_ENABLED === 'true'
+        ? Number(process.env.PZD_UAT_SESSION_TTL_MS ?? 1_800_000)
+        : undefined,
     });
     const host = process.env.PZD_UAT_HOST?.trim() || '0.0.0.0';
     const port = Number(process.env.PZD_UAT_PORT ?? '8787');
