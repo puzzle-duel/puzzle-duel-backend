@@ -216,7 +216,7 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       }
 
       const challengeMatch =
-        /^\\/v1\\/tournament\\/series\\/([0-9a-f-]{36})\\/recovery-challenge$/.exec(path);
+        /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/recovery-challenge$/.exec(path);
       if (challengeMatch && method === 'POST') {
         if (!recovery) {
           send(res, 404, { error: 'NOT_FOUND' });
@@ -237,7 +237,7 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       }
 
       const recoveryMatch =
-        /^\\/v1\\/tournament\\/series\\/([0-9a-f-]{36})\\/recover-writer$/.exec(path);
+        /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/recover-writer$/.exec(path);
       if (recoveryMatch && method === 'POST') {
         if (!recovery) {
           send(res, 404, { error: 'NOT_FOUND' });
