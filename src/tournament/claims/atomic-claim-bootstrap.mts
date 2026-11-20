@@ -92,8 +92,14 @@ export class AtomicDailyClaimBootstrap {
   readonly #pool: pg.Pool;
   readonly #manifests: PinnedManifestRegistry;
   readonly #writers: PostgresSeriesWriterStore;
+  readonly #anchorOriginalDevice: boolean;
 
-  constructor(pool: pg.Pool, manifests: PinnedManifestRegistry) {
+  constructor(
+    pool: pg.Pool,
+    manifests: PinnedManifestRegistry,
+    options: { anchorOriginalDevice?: boolean } = {},
+  ) {
+    this.#anchorOriginalDevice = options.anchorOriginalDevice === true;
     this.#pool = pool;
     this.#manifests = manifests;
     this.#writers = new PostgresSeriesWriterStore(pool);
@@ -268,6 +274,19 @@ export class AtomicDailyClaimBootstrap {
         deviceId: args.session.deviceId,
         nowMs: now,
       });
+      if (this.#anchorOriginalDevice) {
+        // Only the ORIGINAL immutable claim may pin its registered device key.
+        // Existing claims never backfill an anchor on a later login.
+        await client.query(
+          `UPDATE tournament_series_writer w SET original_device_credential_id=s.device_credential_id
+           FROM tournament_auth_session s
+           WHERE w.series_key=$1 AND w.player_id=$2 AND w.session_id=$3
+             AND s.session_id=$3 AND s.player_id=$2
+             AND s.device_credential_id IS NOT NULL
+             AND w.original_device_credential_id IS NULL`,
+          [claim.seriesId, args.session.playerId, args.session.sessionId],
+        );
+      }
 
       await client.query('COMMIT');
       return {
