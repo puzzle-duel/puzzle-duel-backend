@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { computeSeriesHardCutoffMs, isBeforeHardCutoff } from '../../../src/tournament/claims/hard-cutoff.mts';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -324,5 +325,42 @@ describe('PZD-40 atomic claim + Stage E bootstrap (PostgreSQL)', () => {
     } finally {
       await env.pool.end();
     }
+  });
+});
+
+describe('PZD-41 active-week continuation cutoff', () => {
+  const nextMondayGrace = Date.parse('2026-11-23T01:00:00.000Z');
+  it('allows a Monday-started series to resume on Thursday and Sunday', () => {
+    const cutoff = computeSeriesHardCutoffMs({
+      originalUtcDate: '2026-11-16',
+      startedAtMs: Date.parse('2026-11-16T12:00:00.000Z'),
+    });
+    assert.equal(cutoff, nextMondayGrace);
+    assert.equal(isBeforeHardCutoff(Date.parse('2026-11-19T12:00:00.000Z'), cutoff!), true);
+    assert.equal(isBeforeHardCutoff(Date.parse('2026-11-22T23:59:59.999Z'), cutoff!), true);
+  });
+  it('gives retrospective and same-day claims the same weekly cutoff', () => {
+    assert.equal(computeSeriesHardCutoffMs({
+      originalUtcDate: '2026-11-16',
+      startedAtMs: Date.parse('2026-11-19T12:00:00.000Z'),
+    }), nextMondayGrace);
+    assert.equal(computeSeriesHardCutoffMs({
+      originalUtcDate: '2026-11-22',
+      startedAtMs: Date.parse('2026-11-22T22:00:00.000Z'),
+    }), nextMondayGrace);
+  });
+  it('preserves the exclusive Monday 01:00 settlement deadline', () => {
+    assert.equal(isBeforeHardCutoff(nextMondayGrace - 1, nextMondayGrace), true);
+    assert.equal(isBeforeHardCutoff(nextMondayGrace, nextMondayGrace), false);
+  });
+  it('rejects invalid or outside-week claim timestamps', () => {
+    assert.equal(computeSeriesHardCutoffMs({
+      originalUtcDate: '2026-11-16',
+      startedAtMs: Date.parse('2026-11-23T00:00:00.000Z'),
+    }), null);
+    assert.equal(computeSeriesHardCutoffMs({
+      originalUtcDate: '2026-11-19',
+      startedAtMs: Date.parse('2026-11-18T23:59:59.000Z'),
+    }), null);
   });
 });

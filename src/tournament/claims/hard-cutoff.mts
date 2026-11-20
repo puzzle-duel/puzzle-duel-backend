@@ -1,10 +1,11 @@
 /**
  * R-01 trusted hard-cutoff calculation for an immutable daily claim.
  *
- * - Same-calendar-day claim: min(originalDate+1 00:15 UTC, weekMonday+7d 01:00 UTC)
- * - Same-week retrospective claim (started after original date): week Monday+7d 01:00 only
- *   (do NOT apply the original-date+1 00:15 boundary)
- * - Fail closed (null) when inputs are not authoritative calendar/timestamps.
+ * All series started during their original active UTC week retain the same
+ * absolute completion deadline: next Monday 01:00 UTC. Monday 00:00 UTC
+ * still closes NEW claims for the previous week (claimWindowClosed).
+ * The final hour is only for already-started in-flight settlement.
+ * Fail closed (null) for invalid dates, timestamps or cross-week claims.
  */
 export function utcWeekMondayMs(dayMs: number): number {
   return dayMs - ((new Date(dayMs).getUTCDay() + 6) % 7) * 86400000;
@@ -18,9 +19,7 @@ export function parseUtcDateMs(utcDate: string): number | null {
   return n;
 }
 
-/**
- * Absolute series hard cutoff in epoch ms, or null if not calculable.
- */
+/** Absolute series hard cutoff in epoch ms, or null if not calculable. */
 export function computeSeriesHardCutoffMs(args: {
   originalUtcDate: string;
   startedAtMs: number;
@@ -30,21 +29,11 @@ export function computeSeriesHardCutoffMs(args: {
   if (!Number.isSafeInteger(args.startedAtMs) || args.startedAtMs < 1) return null;
 
   const weekMonday = utcWeekMondayMs(originalMs);
-  // Prior-week in-flight completion window ends Monday 01:00 UTC of the next week.
-  const weekHardCutoff = weekMonday + 7 * 86400000 + 60 * 60 * 1000;
-
-  const startedDay = Math.floor(args.startedAtMs / 86400000) * 86400000;
-  const originalDay = originalMs;
-  const isRetrospectiveSameWeek = startedDay > originalDay;
-
-  if (isRetrospectiveSameWeek) {
-    // R-01: retrospective same-week play is not bound by original-date+1 00:15.
-    return weekHardCutoff;
-  }
-
-  // Ordinary / same-day claim: prior-day in-flight grace ends at next midnight + 15m.
-  const nextDayGrace = originalDay + 86400000 + 15 * 60 * 1000;
-  return Math.min(nextDayGrace, weekHardCutoff);
+  const nextMonday = weekMonday + 7 * 86400000;
+  // The claim must have started within the requested date's UTC week.
+  if (args.startedAtMs < originalMs || args.startedAtMs >= nextMonday) return null;
+  // Prior-week in-flight completion grace ends Monday 01:00 UTC.
+  return nextMonday + 60 * 60 * 1000;
 }
 
 /** Exclusive deadline: eligible iff trustedNow < hardCutoff. */
