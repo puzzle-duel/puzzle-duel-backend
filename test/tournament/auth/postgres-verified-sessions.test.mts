@@ -84,6 +84,35 @@ describe('PZD-40 verified issuer/subject mapped internal player and opaque sessi
       assert.equal(await store.authenticateVerifiedSession(signed,session.sessionSecret),null);
     } finally {await pool.end();}
   });
+  it('renewing a live session preserves identity and writer-related IDs, rejects another subject',async()=>{
+    const {pool,store}=await setup();
+    try {
+      const a=authorizedIdentity('renew-owner'), b=authorizedIdentity('renew-other');
+      const opened=await store.openAfterVerifiedJwt(a);
+      const before=opened.expiresAtMs;
+      const renewed=await store.renewActiveSession(a,opened.sessionSecret);
+      assert.ok(renewed);
+      assert.equal(renewed.playerId,opened.playerId);
+      assert.equal(renewed.sessionId,opened.sessionId);
+      assert.equal(renewed.deviceId,opened.deviceId);
+      assert.ok(renewed.expiresAtMs>=before);
+      assert.ok(renewed.expiresAtMs<=a.expiresAt*1000);
+      assert.equal(await store.renewActiveSession(b,opened.sessionSecret),null);
+      assert.deepEqual(await store.authenticateVerifiedSession(a,opened.sessionSecret),renewed);
+    } finally {await pool.end();}
+  });
+  it('renewal cannot resurrect expired or revoked sessions',async()=>{
+    const {pool,store}=await setup();
+    try {
+      const a=authorizedIdentity('renew-revoked');
+      const expired=await store.openAfterVerifiedJwt(a);
+      await pool.query('UPDATE tournament_auth_session SET expires_at_ms=1 WHERE session_id=$1',[expired.sessionId]);
+      assert.equal(await store.renewActiveSession(a,expired.sessionSecret),null);
+      const revoked=await store.openAfterVerifiedJwt(a);
+      assert.equal(await store.revokeSession(a,revoked.sessionSecret),true);
+      assert.equal(await store.renewActiveSession(a,revoked.sessionSecret),null);
+    } finally {await pool.end();}
+  });
   it('invalid issuer/audience/bearer cannot yield a verified identity',async()=>{
     for(const bad of [{aud:'untrusted-api'},{iss:'https://attacker.test'},{exp:1}]) {
       assert.throws(()=>authorizedIdentity('subject-x',bad),/UNAUTHENTICATED/);
