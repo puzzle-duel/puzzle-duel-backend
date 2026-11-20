@@ -181,6 +181,35 @@ async function boot() {
 }
 
 describe('PZD-40 authenticated tournament HTTP E2E (candidate OpenAPI)', () => {
+  it('same-device recovery routes are unavailable unless server explicitly opts in', async () => {
+    const env = await boot();
+    try {
+      const auth = env.bearer('recovery-disabled');
+      const opened = await fetch(env.base + '/v1/tournament/session', {
+        method: 'POST', headers: { authorization: auth },
+      });
+      assert.equal(opened.status, 201);
+      const session = await opened.json() as {sessionSecret:string};
+      const headers = {
+        authorization: auth,
+        'x-pzd-session-secret': session.sessionSecret,
+        'content-type': 'application/json',
+      };
+      const register = await fetch(env.base + '/v1/tournament/devices/register', {
+        method: 'POST', headers, body: JSON.stringify({
+          spkiBase64Url:'not-authorized',
+          signatureBase64Url:'not-authorized',
+        }),
+      });
+      assert.equal(register.status, 404);
+      const recover = await fetch(
+        env.base + '/v1/tournament/series/11111111-1111-4111-8111-111111111111/recover-writer',
+        {method:'POST',headers,body:JSON.stringify({proof:{},signatureBase64Url:'x'})},
+      );
+      assert.equal(recover.status, 404);
+    } finally { await env.close(); }
+  });
+
   it('session → daily claim → series GET; forged token and cross-player denied', async () => {
     const env = await boot();
     try {
