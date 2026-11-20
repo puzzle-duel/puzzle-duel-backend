@@ -112,6 +112,38 @@ export class PostgresVerifiedIdentitySessionStore {
     });
   }
 
+  /**
+   * Extend only the SAME live verified session. This does not change session,
+   * device or writer identity and cannot revive an expired/revoked session.
+   * All deadlines use the database clock; JWT expiration remains the ceiling.
+   */
+  async renewActiveSession(identity: VerifiedJwtIdentity, sessionSecret: string): Promise<VerifiedSession | null> {
+    if (!isTrustedJwtObject(identity) || typeof sessionSecret !== 'string' ||
+        !/^[A-Za-z0-9_-]{43}$/.test(sessionSecret)) return null;
+    const result = await this.#pool.query(
+      `UPDATE tournament_auth_session AS s
+       SET expires_at_ms = LEAST(
+         $4::bigint,
+         floor(extract(epoch from clock_timestamp()) * 1000)::bigint + $5::bigint
+       )
+       WHERE s.secret_digest=$1 AND s.issuer=$2 AND s.subject=$3
+         AND s.revoked_at_ms IS NULL
+         AND s.expires_at_ms > floor(extract(epoch from clock_timestamp()) * 1000)::bigint
+         AND $4::bigint > floor(extract(epoch from clock_timestamp()) * 1000)::bigint
+       RETURNING s.session_id, s.player_id, s.device_id, s.expires_at_ms`,
+      [digest(sessionSecret), identity.issuer, identity.subject,
+       identity.expiresAt * 1000, this.#maximumSessionTtlMs],
+    );
+    if (!result.rowCount) return null;
+    const row = result.rows[0];
+    return Object.freeze({
+      sessionId: String(row.session_id),
+      playerId: String(row.player_id),
+      deviceId: String(row.device_id),
+      expiresAtMs: Number(row.expires_at_ms),
+    });
+  }
+
   async revokeSession(identity: VerifiedJwtIdentity, sessionSecret: string): Promise<boolean> {
     if (!isTrustedJwtObject(identity) || typeof sessionSecret !== 'string' ||
         !/^[A-Za-z0-9_-]{43}$/.test(sessionSecret)) return false;
