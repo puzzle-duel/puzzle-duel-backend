@@ -63,7 +63,9 @@ export interface RecoveryReceipt {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = (b: Buffer | string) => createHash('sha256').update(b).digest('hex');
-const fail = <T>(reason: RecoveryStatus): RecoveryResult<T> => ({ ok: false, reason });
+function fail<T>(reason: RecoveryStatus): RecoveryResult<T> {
+  return { ok: false, reason };
+}
 
 function validKey(key: Buffer): boolean {
   if (key.length < 80 || key.length > 128) return false;
