@@ -688,7 +688,7 @@ async function handleSession(
   method: string,
   deps: TournamentHttpDeps,
 ): Promise<void> {
-  if (!['POST', 'GET', 'DELETE'].includes(method)) {
+  if (!['POST', 'GET', 'DELETE', 'PATCH'].includes(method)) {
     send(res, 404, { error: 'NOT_FOUND' });
     return;
   }
@@ -742,6 +742,22 @@ async function handleSession(
   if (method === 'DELETE') {
     await deps.sessions.revokeSession(identity, secret);
     send(res, 204, null);
+    return;
+  }
+  if (method === 'PATCH') {
+    // No new writer binding or device handoff: only the same active session
+    // is extended, subject to the existing verified JWT expiration ceiling.
+    const renewed = await deps.sessions.renewActiveSession(identity, secret);
+    if (!renewed) {
+      send(res, 401, { error: 'UNAUTHENTICATED' });
+      return;
+    }
+    send(res, 200, {
+      playerId: renewed.playerId,
+      sessionId: renewed.sessionId,
+      deviceId: renewed.deviceId,
+      expiresAtMs: renewed.expiresAtMs,
+    });
     return;
   }
   send(res, 200, {
