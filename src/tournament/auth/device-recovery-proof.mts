@@ -67,15 +67,15 @@ export function verifyDeviceRecoveryProof(args: {
       input.expiresAtMs <= serverNowMs ||
       input.expiresAtMs - serverNowMs > ttl ||
       !B64URL.test(signatureBase64Url) ||
-      signatureBase64Url.length !== 86 ||
+      signatureBase64Url.length < 88 || signatureBase64Url.length > 100 ||
       registeredPublicKeySpkiDer.length > 128) return false;
   try {
     const key = createPublicKey({ key: registeredPublicKeySpkiDer, format: 'der', type: 'spki' });
     if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') return false;
     const signature = Buffer.from(signatureBase64Url, 'base64url');
-    if (signature.length !== 64 ||
+    if (signature.length < 68 || signature.length > 73 ||
         signature.toString('base64url') !== signatureBase64Url) return false;
-    return verify('sha256', Buffer.from(canonicalDeviceRecoveryProof(input), 'utf8'), { key, dsaEncoding: 'ieee-p1363' }, signature);
+    return verify('sha256', Buffer.from(canonicalDeviceRecoveryProof(input), 'utf8'), key, signature);
   } catch {
     return false;
   }
