@@ -13,6 +13,8 @@ import {
   type PinnedRs256JwtVerifier,
 } from './pinned-jwt-verifier.mts';
 import type { PostgresVerifiedIdentitySessionStore } from './postgres-verified-sessions.mts';
+import type { PostgresSameDeviceRecovery } from './postgres-same-device-recovery.mts';
+import type { DeviceRecoveryProofInput } from './device-recovery-proof.mts';
 import type { AtomicDailyClaimBootstrap } from '../claims/atomic-claim-bootstrap.mts';
 import { resolveActiveSubgameOrdinal } from '../claims/active-ordinal.mts';
 import type { PostgresSeriesWriterStore } from './series-writer-binding.mts';
@@ -74,6 +76,8 @@ export interface TournamentHttpDeps {
   sessions: PostgresVerifiedIdentitySessionStore;
   claims: AtomicDailyClaimBootstrap;
   writers: PostgresSeriesWriterStore;
+  /** Optional, server-controlled candidate; absent means all recovery routes deny. */
+  sameDeviceRecovery?: PostgresSameDeviceRecovery;
   fence: SeriesFenceStore;
   /** Pool used for canonical ordinal resolution (P1-F14). */
   pool: pg.Pool;
@@ -172,6 +176,99 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       }
       if (!checkRate(session.playerId)) {
         send(res, 429, { error: 'RATE_LIMITED' });
+        return;
+      }
+
+      // Candidate only: UAT server opts in explicitly after schema migration.
+      // Existing ranked gate and verified JWT/session checks run before this.
+      const recovery = deps.sameDeviceRecovery;
+      if (path === '/v1/tournament/devices/register' && method === 'POST') {
+        if (!recovery) {
+          send(res, 404, { error: 'NOT_FOUND' });
+          return;
+        }
+        const raw = await readBody(req);
+        if (!raw) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        let payload: unknown;
+        try { payload = JSON.parse(raw.toString('utf8')); }
+        catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        const args = payload as Record<string, unknown>;
+        if (typeof args.spkiBase64Url !== 'string' ||
+            typeof args.signatureBase64Url !== 'string') {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        const outcome = await recovery.registerKey({
+          session,
+          spkiBase64Url: args.spkiBase64Url,
+          signatureBase64Url: args.signatureBase64Url,
+        });
+        send(res, outcome.ok ? 200 : 409,
+          outcome.ok ? outcome.data : { error: outcome.reason });
+        return;
+      }
+
+      const challengeMatch =
+        /^\\/v1\\/tournament\\/series\\/([0-9a-f-]{36})\\/recovery-challenge$/.exec(path);
+      if (challengeMatch && method === 'POST') {
+        if (!recovery) {
+          send(res, 404, { error: 'NOT_FOUND' });
+          return;
+        }
+        if (req.headers['transfer-encoding'] !== undefined ||
+            (req.headers['content-length'] !== undefined &&
+             req.headers['content-length'] !== '0')) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        const outcome = await recovery.issueChallenge({
+          session, seriesId: challengeMatch[1]!,
+        });
+        send(res, outcome.ok ? 200 : 409,
+          outcome.ok ? outcome.data : { error: outcome.reason });
+        return;
+      }
+
+      const recoveryMatch =
+        /^\\/v1\\/tournament\\/series\\/([0-9a-f-]{36})\\/recover-writer$/.exec(path);
+      if (recoveryMatch && method === 'POST') {
+        if (!recovery) {
+          send(res, 404, { error: 'NOT_FOUND' });
+          return;
+        }
+        const raw = await readBody(req);
+        if (!raw) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        let payload: unknown;
+        try { payload = JSON.parse(raw.toString('utf8')); }
+        catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        const data = payload as Record<string, unknown>;
+        if (!data.proof || typeof data.proof !== 'object' ||
+            Array.isArray(data.proof) ||
+            typeof data.signatureBase64Url !== 'string') {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        const outcome = await recovery.recover({
+          session, seriesId: recoveryMatch[1]!,
+          proof: data.proof as DeviceRecoveryProofInput,
+          signatureBase64Url: data.signatureBase64Url,
+        });
+        send(res, outcome.ok ? 200 : 409,
+          outcome.ok ? outcome.data : { error: outcome.reason });
         return;
       }
 
