@@ -115,6 +115,10 @@ jobs:
         env:
           PZD_GENERATOR_FIXTURES: ${{ github.workspace }}/puzzle-duel-client/docs/contracts/generator/gen-001.v1/fixtures
         run: npm run test:core001v3
+      - name: PZD-48 deterministic UTC daily manifest and A/B tournament UAT
+        run: |
+          node --experimental-strip-types --test test/tournament/uat/utc-daily-manifest.test.mts
+          npm run test:uat
 
   # Job 135081089978 and 135115620690 were cancelled by the annotation
   # "maximum execution time of 20m0s" while this step was still open.
