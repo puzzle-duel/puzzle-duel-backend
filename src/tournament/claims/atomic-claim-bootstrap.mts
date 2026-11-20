@@ -28,8 +28,10 @@ import { computeSeriesHardCutoffMs } from './hard-cutoff.mts';
 import type { PinnedDailyManifest, PinnedManifestRegistry } from './pinned-manifest-registry.mts';
 import { selectOrCreateUtcDailyManifest } from '../uat/postgres-utc-daily-manifests.mts';
 
-function dayManifestAdvisoryKeys(utcDate: string): [number, number] {
-  const digest = createHash('sha256').update('manifest:' + utcDate).digest();
+function dayManifestAdvisoryKeys(_utcDate: string): [number, number] {
+  // One global lock serializes adjacent-day manifest creation as well:
+  // a backfilled old date cannot race with tomorrow's first claim.
+  const digest = createHash('sha256').update('manifest:all-utc-dates:v1').digest();
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
