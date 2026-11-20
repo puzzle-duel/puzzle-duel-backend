@@ -11,6 +11,7 @@ import {
 import type pg from 'pg';
 import type { VerifiedSession } from './postgres-verified-sessions.mts';
 import { seriesAdvisoryKeys } from '../ingress/series-fence.mts';
+import { resolveActiveSubgameOrdinal } from '../claims/active-ordinal.mts';
 import {
   canonicalDeviceRecoveryProof, verifyDeviceRecoveryProof,
   type DeviceRecoveryProofInput,
@@ -378,7 +379,8 @@ export class PostgresSameDeviceRecovery {
         `SELECT status FROM tournament_daily_claim
          WHERE series_id=$1 AND player_id=$2`, [seriesId,session.playerId],
       );
-      if (claim.rowCount !== 1 || claim.rows[0].status === 'COMPLETED') {
+      if (claim.rowCount !== 1 ||
+          !['ACTIVE', 'AWAIT_ADVANCE'].includes(String(claim.rows[0].status))) {
         await client.query('ROLLBACK');
         return fail('SERIES_NOT_OWNED');
       }
@@ -407,18 +409,15 @@ export class PostgresSameDeviceRecovery {
         await client.query('ROLLBACK');
         return fail('STALE_WRITER');
       }
-      const snapshots = await client.query(
-        `SELECT subgame_ordinal FROM authoritative_game_snapshot
-         WHERE series_key=$1 AND player_id=$2 ORDER BY subgame_ordinal DESC`,
-        [seriesId,session.playerId],
-      );
-      if (!snapshots.rowCount || snapshots.rowCount > 6) {
-        await client.query('ROLLBACK');
-        return fail('SERIES_STATE_INCONSISTENT');
-      }
-      const ordinal = Number(snapshots.rows[0].subgame_ordinal);
-      if (snapshots.rows.some((row: Record<string, unknown>, i: number) =>
-        Number(row.subgame_ordinal) !== ordinal - i)) {
+      // Reuse the Accepted P1-R03 ordinal verifier on this SAME TX client.
+      // Missing bindings, challenge mismatches, gaps and invalid fence state
+      // must fail closed before changing writer/fence/snapshot.
+      let ordinal: number;
+      try {
+        ordinal = await resolveActiveSubgameOrdinal(
+          client, seriesId, session.playerId,
+        );
+      } catch {
         await client.query('ROLLBACK');
         return fail('SERIES_STATE_INCONSISTENT');
       }
