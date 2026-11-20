@@ -201,7 +201,7 @@ export class PostgresSameDeviceRecovery {
          LEFT JOIN tournament_device_credential d ON
            d.credential_id=w.original_device_credential_id
          JOIN tournament_auth_session snew ON snew.session_id=$3
-         WHERE w.series_key=$1 AND w.player_id=$2 AND c.player_id=$2
+         WHERE w.series_key=$1 AND w.player_id=$2 AND c.player_id=$2::text
            AND snew.player_id=$2`,
         [args.seriesId, args.session.playerId, args.session.sessionId],
       );
