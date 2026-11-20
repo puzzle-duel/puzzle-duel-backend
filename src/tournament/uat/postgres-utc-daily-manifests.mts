@@ -1,7 +1,7 @@
 /**
  * PZD-48 candidate immutable day->six-challenge storage.
- * Explicit migrate() is intentionally NOT wired into UAT/production startup
- * until the versioned PostgreSQL migration and privilege review are complete.
+ * Versioned PostgreSQL migration 0012 installs the table/immutable trigger.
+ * Only feature-gated UAT claim/publication paths use this store.
  */
 import type pg from 'pg';
 import {
@@ -29,8 +29,21 @@ export async function selectOrCreateUtcDailyManifest(
   client: pg.PoolClient,
   utcDate: string,
 ): Promise<PinnedDailyManifest> {
-  // Fail-closed validation before any SQL.
-  const proposed = generateUtcDailyManifest(utcDate);
+  // Validate the caller's exact UTC date before database access.
+  generateUtcDailyManifest(utcDate);
+  const adjacent = await client.query<{
+    manifest_digest: string; content_version: string; manifest_text: string;
+  }>(
+    `SELECT manifest_digest, content_version, manifest_text
+     FROM tournament_utc_daily_manifest
+     WHERE utc_date = ($1::date - 1) OR utc_date = ($1::date + 1)
+     FOR SHARE`,
+    [utcDate],
+  );
+  const pinnedNeighbors = adjacent.rows.map(row => parseStored(
+    row.manifest_text, row.manifest_digest.trim(), row.content_version,
+  ));
+  const proposed = generateUtcDailyManifest(utcDate, pinnedNeighbors);
   await client.query(
     `INSERT INTO tournament_utc_daily_manifest
       (utc_date, manifest_digest, content_version, manifest_text)
