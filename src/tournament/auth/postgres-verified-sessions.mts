@@ -44,7 +44,14 @@ function isTrustedJwtObject(value: VerifiedJwtIdentity): boolean {
 /** Open only after successful signature/issuer/audience verification. */
 export class PostgresVerifiedIdentitySessionStore {
   readonly #pool: pg.Pool;
-  constructor(pool: pg.Pool) { this.#pool = pool; }
+  readonly #maximumSessionTtlMs: number;
+  constructor(pool: pg.Pool, options: { maximumSessionTtlMs?: number } = {}) {
+    this.#pool = pool;
+    // Test-only configuration may SHORTEN sessions. Never lengthen production TTL.
+    const ttl = options.maximumSessionTtlMs ?? 1_800_000;
+    this.#maximumSessionTtlMs = Number.isSafeInteger(ttl) && ttl >= 5_000 && ttl <= 1_800_000
+      ? ttl : 1_800_000;
+  }
   async migrate(): Promise<void> { await this.#pool.query(VERIFIED_IDENTITY_DDL); }
 
   async openAfterVerifiedJwt(identity: VerifiedJwtIdentity): Promise<OpenedVerifiedSession> {
@@ -54,7 +61,7 @@ export class PostgresVerifiedIdentitySessionStore {
       await client.query('BEGIN');
       const time = await client.query("SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms");
       const nowMs = Number(time.rows[0].ms);
-      const expiresAtMs = Math.min(identity.expiresAt * 1000, nowMs + 1_800_000);
+      const expiresAtMs = Math.min(identity.expiresAt * 1000, nowMs + this.#maximumSessionTtlMs);
       if (expiresAtMs <= nowMs) { await client.query('ROLLBACK'); throw new Error('UNAUTHENTICATED'); }
       const candidate = randomUUID();
       const inserted = await client.query(
