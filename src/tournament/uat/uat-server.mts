@@ -108,6 +108,8 @@ export async function createUatHandler(pool: pg.Pool, options?: {
   readonly rateLimit?: { maxPerWindow: number; windowMs: number };
   /** Experimental, production-forbidden writer recovery UAT only. */
   readonly enableSameDeviceRecovery?: boolean;
+  /** PZD-48 UAT-only switch; requires versioned migration 0012. */
+  readonly enableUtcDailyManifests?: boolean;
   readonly sessionTtlMs?: number;
 }) {
   const keys = options?.publicKeyPem && options.privateKey
@@ -115,6 +117,8 @@ export async function createUatHandler(pool: pg.Pool, options?: {
     : loadOrCreateUatKeyPair();
   const provenanceKey = options?.provenanceKey ?? requireProvenanceKey();
   const manifests = loadUatManifest();
+  const dailyEnabled = options?.enableUtcDailyManifests === true &&
+    process.env.NODE_ENV !== 'production' && process.env.NODE_ENV !== 'prod';
   const verifier = new PinnedRs256JwtVerifier({
     issuer: UAT_ISSUER,
     audience: UAT_AUDIENCE,
@@ -132,12 +136,15 @@ export async function createUatHandler(pool: pg.Pool, options?: {
   if (sameDeviceRecovery) await sameDeviceRecovery.migrate();
   const claims = new AtomicDailyClaimBootstrap(pool, manifests, {
     anchorOriginalDevice: recoveryEnabled,
+    enableUtcDailyManifests: dailyEnabled,
   });
   const writers = new PostgresSeriesWriterStore(pool);
   const fence = new PostgresSeriesFenceStore(pool);
   const journal = new PostgresAdmissionJournal(pool, new SystemUtcClock());
   const uow = new PostgresTrustedUnitOfWork(pool);
-  uow.setSixGamePublisher(new F2BPublicationService(pool, { provenanceKey, manifests }));
+  uow.setSixGamePublisher(new F2BPublicationService(pool, {
+    provenanceKey, manifests, enableUtcDailyManifests: dailyEnabled,
+  }));
   const rankings = new F2CRankingService(pool, { provenanceKey });
   const handler = createTournamentHttpHandler({
     verifier,
@@ -225,6 +232,7 @@ async function serve(): Promise<void> {
     const { handler } = await createUatHandler(pool, {
       rankedHttpGate: rankedHttpGateConfigFromEnv(),
       enableSameDeviceRecovery: process.env.PZD_SAME_DEVICE_RECOVERY_ENABLED === 'true',
+      enableUtcDailyManifests: process.env.PZD_UAT_DAILY_MANIFESTS_ENABLED === 'true',
       // Explicit test-only session expiry. Does not extend JWT or series deadlines.
       sessionTtlMs: process.env.PZD_SAME_DEVICE_RECOVERY_ENABLED === 'true'
         ? Number(process.env.PZD_UAT_SESSION_TTL_MS ?? 1_800_000)
