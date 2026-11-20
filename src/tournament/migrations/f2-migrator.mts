@@ -241,6 +241,7 @@ export const REQUIRED_SECURITY_TRIGGERS = [
   'trg_f2c_publication_period_closed',
   'trg_pzd_schema_migration_immutable',
   'trg_admission_receipt_immutable',
+  'trg_pzd_utc_daily_manifest_immutable',
 ] as const;
 
 /**

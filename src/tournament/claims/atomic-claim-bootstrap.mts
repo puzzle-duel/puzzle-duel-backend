@@ -25,7 +25,15 @@ import {
   type ImmutableDailyClaim,
 } from './postgres-daily-claim.mts';
 import { computeSeriesHardCutoffMs } from './hard-cutoff.mts';
-import type { PinnedManifestRegistry } from './pinned-manifest-registry.mts';
+import type { PinnedDailyManifest, PinnedManifestRegistry } from './pinned-manifest-registry.mts';
+import { selectOrCreateUtcDailyManifest } from '../uat/postgres-utc-daily-manifests.mts';
+
+function dayManifestAdvisoryKeys(_utcDate: string): [number, number] {
+  // One global lock serializes adjacent-day manifest creation as well:
+  // a backfilled old date cannot race with tomorrow's first claim.
+  const digest = createHash('sha256').update('manifest:all-utc-dates:v1').digest();
+  return [digest.readInt32BE(0), digest.readInt32BE(4)];
+}
 
 function claimAdvisoryKeys(playerId: string, utcDate: string): [number, number] {
   const digest = createHash('sha256')
@@ -93,13 +101,15 @@ export class AtomicDailyClaimBootstrap {
   readonly #manifests: PinnedManifestRegistry;
   readonly #writers: PostgresSeriesWriterStore;
   readonly #anchorOriginalDevice: boolean;
+  readonly #enableUtcDailyManifests: boolean;
 
   constructor(
     pool: pg.Pool,
     manifests: PinnedManifestRegistry,
-    options: { anchorOriginalDevice?: boolean } = {},
+    options: { anchorOriginalDevice?: boolean; enableUtcDailyManifests?: boolean } = {},
   ) {
     this.#anchorOriginalDevice = options.anchorOriginalDevice === true;
+    this.#enableUtcDailyManifests = options.enableUtcDailyManifests === true;
     this.#pool = pool;
     this.#manifests = manifests;
     this.#writers = new PostgresSeriesWriterStore(pool);
@@ -126,7 +136,6 @@ export class AtomicDailyClaimBootstrap {
   }): Promise<AtomicClaimResult> {
     const requested = dateMs(args.originalUtcDate);
     if (requested === null) return { ok: false, reason: 'INVALID_DATE' };
-    const manifest = this.#manifests.requireActive();
     const client = await this.#pool.connect();
     try {
       await client.query('BEGIN');
@@ -147,6 +156,33 @@ export class AtomicDailyClaimBootstrap {
       if (claimWindowClosed(now, args.originalUtcDate)) {
         await client.query('ROLLBACK');
         return { ok: false, reason: 'CLAIM_WINDOW_CLOSED' };
+      }
+
+      let manifest: PinnedDailyManifest = this.#manifests.requireActive();
+      if (this.#enableUtcDailyManifests) {
+        // Serialize ALL players' first claim for a UTC day, independently
+        // of the existing per-player/day claim lock.
+        const [dayKey1, dayKey2] = dayManifestAdvisoryKeys(args.originalUtcDate);
+        await client.query('SELECT pg_advisory_xact_lock($1, $2)', [dayKey1, dayKey2]);
+        const historical = await client.query(
+          `SELECT DISTINCT manifest_digest FROM tournament_daily_claim
+           WHERE original_utc_date=$1::date`,
+          [args.originalUtcDate],
+        );
+        if (historical.rows.length > 1) throw new Error('MIXED_DAILY_MANIFEST_DIGEST');
+        const previousDigest = historical.rows.length === 1
+          ? String(historical.rows[0].manifest_digest) : null;
+        const pinnedLegacy = previousDigest ? this.#manifests.get(previousDigest) : null;
+        if (pinnedLegacy) {
+          // On a mid-day opt-in, preserve every existing player's challenge
+          // instead of silently giving later arrivals a different set.
+          manifest = pinnedLegacy;
+        } else {
+          manifest = await selectOrCreateUtcDailyManifest(client, args.originalUtcDate);
+          if (previousDigest !== null && previousDigest !== manifest.digest) {
+            throw new Error('DAILY_MANIFEST_CUTOVER_CONFLICT');
+          }
+        }
       }
 
       const seriesId = randomUUID();

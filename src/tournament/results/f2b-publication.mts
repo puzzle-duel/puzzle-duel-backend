@@ -32,6 +32,8 @@ import {
 } from '../../engine/core001v3/index.mts';
 import { lockSeriesForTransaction, lockWeeklySettlement } from '../ingress/series-fence.mts';
 import type { PinnedManifestRegistry } from '../claims/pinned-manifest-registry.mts';
+import type { PinnedDailyManifest } from '../claims/pinned-manifest-registry.mts';
+import { findUtcDailyManifestByDigest } from '../uat/postgres-utc-daily-manifests.mts';
 import { computeFourCategoryScores } from './four-category-scores.mts';
 import {
   migrateF2APublicationSchema,
@@ -338,6 +340,7 @@ async function loadProof(
   seriesId: string,
   manifests: PinnedManifestRegistry | null,
   expectations?: { readonly playerId: string; readonly writerGeneration: number },
+  enableUtcDailyManifests = false,
 ): Promise<SeriesProof> {
   const claimRes = await db.query(
     `SELECT player_id,
@@ -396,10 +399,13 @@ async function loadProof(
     }
   }
 
+  let verifiedPinned: PinnedDailyManifest | null = null;
   if (manifests) {
-    const pinned = manifests.get(manifestDigest);
-    if (!pinned) fail('MANIFEST_UNPINNED');
-    if (pinned.subgames.length !== 6) fail('MANIFEST_UNPINNED');
+    verifiedPinned = manifests.get(manifestDigest);
+    if (!verifiedPinned && enableUtcDailyManifests) {
+      verifiedPinned = await findUtcDailyManifestByDigest(db as pg.PoolClient, manifestDigest);
+    }
+    if (!verifiedPinned || verifiedPinned.subgames.length !== 6) fail('MANIFEST_UNPINNED');
   }
 
   const bindingRes = await db.query(
@@ -486,7 +492,7 @@ async function loadProof(
       fail('CHALLENGE_DIGEST_MISMATCH');
     }
     if (manifests) {
-      const pinned = manifests.get(manifestDigest);
+      const pinned = verifiedPinned;
       const pinnedGame = pinned?.subgames[index];
       if (!pinned || !pinnedGame || pinnedGame.ordinal !== ordinal) fail('MANIFEST_UNPINNED');
       if (
@@ -713,8 +719,9 @@ async function readCommittedBody(
   seriesId: string,
   key: string,
   manifests: PinnedManifestRegistry | null,
+  enableUtcDailyManifests = false,
 ): Promise<F2BPublishedBody> {
-  const proof = await loadProof(db, seriesId, manifests);
+  const proof = await loadProof(db, seriesId, manifests, undefined, enableUtcDailyManifests);
   const completionRes = await db.query(
     `SELECT player_id,
             to_char(original_utc_date, 'YYYY-MM-DD') AS original_utc_date,
@@ -872,6 +879,7 @@ export class F2BPublicationService {
   readonly #pool: pg.Pool;
   readonly #key: string;
   readonly #manifests: PinnedManifestRegistry;
+  readonly #enableUtcDailyManifests: boolean;
   readonly #hooks: F2BHooks;
 
   constructor(
@@ -879,6 +887,7 @@ export class F2BPublicationService {
     options: {
       readonly provenanceKey: string;
       readonly manifests: PinnedManifestRegistry;
+      readonly enableUtcDailyManifests?: boolean;
       readonly hooks?: F2BHooks;
     },
   ) {
@@ -891,6 +900,7 @@ export class F2BPublicationService {
     this.#pool = pool;
     this.#key = options.provenanceKey;
     this.#manifests = options.manifests;
+    this.#enableUtcDailyManifests = options.enableUtcDailyManifests === true;
     this.#hooks = options.hooks ?? {};
   }
 
@@ -928,6 +938,7 @@ export class F2BPublicationService {
             prepared.seriesId,
             this.#key,
             this.#manifests,
+            this.#enableUtcDailyManifests,
           );
           return { outcome: 'duplicate', ...body };
         } catch (readErr) {
@@ -1015,7 +1026,7 @@ export class F2BPublicationService {
       [input.seriesId],
     );
     if ((existing.rowCount ?? 0) > 0) {
-      const body = await readCommittedBody(client, input.seriesId, this.#key, this.#manifests);
+      const body = await readCommittedBody(client, input.seriesId, this.#key, this.#manifests, this.#enableUtcDailyManifests);
       return { outcome: 'duplicate', ...body };
     }
 
@@ -1046,7 +1057,7 @@ export class F2BPublicationService {
     const proof = await loadProof(client, input.seriesId, this.#manifests, {
       playerId: input.playerId,
       writerGeneration: input.writerGeneration,
-    });
+    }, this.#enableUtcDailyManifests);
     const seal = sealProof(this.#key, proof, 1, input.commandIdempotencyKey);
     const idempotencyKey = publicationIdempotencyKey(input.seriesId);
     onBeforeWrite();
