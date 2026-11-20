@@ -355,15 +355,14 @@ describe('PZD-40 P0-F12 / P1-F15 — atomic handoff + idempotency', () => {
 });
 
 describe('PZD-40 P1-F13 — trusted hard cutoff R-01', () => {
-  it('same-day claim uses min(next-day 00:15, week Monday+7d 01:00)', () => {
+  it('same-day claim remains active until next Monday 01:00', () => {
     const originalUtcDate = '2026-11-17'; // Tuesday
     const startedAtMs = Date.parse('2026-11-17T15:00:00.000Z');
     const cutoff = computeSeriesHardCutoffMs({ originalUtcDate, startedAtMs });
     assert.ok(cutoff !== null);
-    const nextDay0015 = Date.parse('2026-11-18T00:15:00.000Z');
     const weekMon = utcWeekMondayMs(parseUtcDateMs(originalUtcDate)!);
     const weekEnd = weekMon + 7 * 86400000 + 3600000;
-    assert.equal(cutoff, Math.min(nextDay0015, weekEnd));
+    assert.equal(cutoff, weekEnd);
     assert.equal(isTimely(new Date(cutoff! - 1), new Date(cutoff!)), true);
     assert.equal(isTimely(new Date(cutoff!), new Date(cutoff!)), false);
     assert.equal(isTimely(new Date(cutoff! + 1), new Date(cutoff!)), false);
