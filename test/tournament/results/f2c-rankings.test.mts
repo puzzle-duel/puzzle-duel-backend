@@ -168,6 +168,7 @@ async function seedSeries(args: {
   claimStatus?: 'ACTIVE' | 'FORFEITED';
   hardCutoffAtMs?: number | null;
   playerId?: string;
+  startedAtMs?: number;
 }): Promise<{ seriesId: string; playerId: string }> {
   const manifest = args.manifest ?? mixedManifest;
   const plan = plans.get(manifest.digest);
@@ -175,7 +176,7 @@ async function seedSeries(args: {
   const mode = args.mode ?? 'complete';
   const seriesId = randomUUID();
   const playerId = args.playerId ?? randomUUID();
-  const startedAtMs = Date.parse(`${args.date}T12:00:00.000Z`);
+  const startedAtMs = args.startedAtMs ?? Date.parse(`${args.date}T12:00:00.000Z`);
   const h1ReceivedAtMs = startedAtMs + 60_000;
   await pool.query(
     `INSERT INTO tournament_daily_claim
@@ -274,8 +275,9 @@ async function publishCompleted(
   date: string,
   manifest = mixedManifest,
   playerId?: string,
+  startedAtMs?: number,
 ): Promise<{ seriesId: string; playerId: string }> {
-  const seeded = await seedSeries({ date, manifest, playerId });
+  const seeded = await seedSeries({ date, manifest, playerId, startedAtMs });
   const published = await publisher.publish({
     seriesId: seeded.seriesId,
     playerId: seeded.playerId,
@@ -337,6 +339,18 @@ describe('F2-C ranking math and Monday window', () => {
 });
 
 describe('F2-C PostgreSQL rankings and FINAL', { concurrency: false }, () => {
+  it('credits retrospective completed series to weekly only, never the original daily board', async () => {
+    const monday = currentWeek;
+    const thursdayClaimMs = Date.parse(`${currentWeek}T00:00:00.000Z`) + 3 * 86_400_000 + 12 * 3_600_000;
+    const late = await publishCompleted(monday, mixedManifest, undefined, thursdayClaimMs);
+    const mondayDaily = rowsOf(await rankings.readDaily({ date: monday, category: 'ALL', pageSize: 50 }));
+    assert.equal(mondayDaily.some((row) => row.playerId === late.playerId), false);
+    const weekly = rowsOf(await rankings.readWeekly({ weekStart: currentWeek, category: 'ALL', pageSize: 50 }));
+    assert.equal(weekly.find((row) => row.playerId === late.playerId)?.score, 900);
+    const badge = await pool.query('SELECT awarded FROM tournament_on_time_badge WHERE series_id = $1', [late.seriesId]);
+    assert.equal(badge.rows[0]?.awarded, false);
+  });
+
   it('ranks authorized daily categories, ties, zero scores, and excludes partial or forfeited series', async () => {
     const tuesday = formatUtcDate(Date.parse(`${currentWeek}T00:00:00.000Z`) + 86_400_000);
     const highA = await publishCompleted(tuesday);
