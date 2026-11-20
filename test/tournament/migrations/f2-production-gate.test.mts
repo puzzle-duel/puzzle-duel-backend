@@ -558,7 +558,7 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
         (err: { code?: string }) => err.code === '42501',
       );
       const auditRows = await audit.query(`SELECT count(*)::int AS n FROM pzd_schema_migration`);
-      assert.equal(Number(auditRows.rows[0].n), 12);
+      assert.equal(Number(auditRows.rows[0].n), 13);
       await assert.rejects(
         audit.query(`DELETE FROM tournament_f2c_rank_snapshot`),
         (err: { code?: string }) => err.code === '42501',
