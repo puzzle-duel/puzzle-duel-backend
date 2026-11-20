@@ -1,6 +1,6 @@
 # PZD — Same-device writer recovery candidate (NOT ACCEPTED)
 
-Status: implementation in progress, **not callable**, **not release approved**.
+Status: feature-flagged candidate backend routes implemented, **not deployed or release approved**.
 Baseline: PZD-40 P0-F11/F12/P1-F15; never relax existing `device_handoff`.
 
 ## Proven failure chain
@@ -39,7 +39,7 @@ same-device continuity. New JWT + same playerId alone are insufficient.
 8. Old generation must fail all further commands. Repeated idempotency key
    returns the committed result; conflicting payload fails closed.
 
-## Suggested candidate endpoints (NOT WIRED)
+## Candidate backend endpoints (server-only flag, not deployed)
 
 - `POST /v1/tournament/devices/registration-challenge`
 - `POST /v1/tournament/devices/register`
