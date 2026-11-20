@@ -186,7 +186,7 @@ describe('PZD-48 immutable UTC daily challenge UAT (disposable test DB only)', (
       const bindings = await pool.query(
         `SELECT c.player_id, b.subgame_ordinal, b.initial_state_json
          FROM trusted_challenge_binding b
-         JOIN tournament_daily_claim c ON c.series_id=b.series_key
+         JOIN tournament_daily_claim c ON c.series_id::text=b.series_key
          ORDER BY c.player_id, b.subgame_ordinal`,
       );
       assert.equal(bindings.rows.length, 12);
