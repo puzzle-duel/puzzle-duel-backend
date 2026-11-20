@@ -49,7 +49,7 @@ export function canonicalDeviceRecoveryProof(input: DeviceRecoveryProofInput): s
 }
 
 /**
- * Validates a registered Ed25519 SPKI key against a short-lived challenge.
+ * Validates a registered P-256 SPKI key against a short-lived challenge.
  * Reuse prevention (challenge CAS), writer generation and original-device
  * binding MUST be enforced in the same PostgreSQL recovery transaction.
  */
@@ -71,11 +71,11 @@ export function verifyDeviceRecoveryProof(args: {
       registeredPublicKeySpkiDer.length > 128) return false;
   try {
     const key = createPublicKey({ key: registeredPublicKeySpkiDer, format: 'der', type: 'spki' });
-    if (key.asymmetricKeyType !== 'ed25519') return false;
+    if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') return false;
     const signature = Buffer.from(signatureBase64Url, 'base64url');
     if (signature.length !== 64 ||
         signature.toString('base64url') !== signatureBase64Url) return false;
-    return verify(null, Buffer.from(canonicalDeviceRecoveryProof(input), 'utf8'), key, signature);
+    return verify('sha256', Buffer.from(canonicalDeviceRecoveryProof(input), 'utf8'), { key, dsaEncoding: 'ieee-p1363' }, signature);
   } catch {
     return false;
   }
