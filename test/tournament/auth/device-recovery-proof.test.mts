@@ -23,17 +23,17 @@ function fixture(nowMs: number): DeviceRecoveryProofInput {
   };
 }
 function credentials() {
-  const pair = generateKeyPairSync('ed25519');
+  const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   return {
     privateKey: pair.privateKey,
     publicKeySpki: pair.publicKey.export({ type: 'spki', format: 'der' }),
   };
 }
 function signed(input: DeviceRecoveryProofInput, privateKey: ReturnType<typeof credentials>['privateKey']) {
-  return sign(null, Buffer.from(canonicalDeviceRecoveryProof(input)), privateKey).toString('base64url');
+  return sign('sha256', Buffer.from(canonicalDeviceRecoveryProof(input)), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url');
 }
 
-test('registered Ed25519 device proves exact new session and series', () => {
+test('registered P-256 device proves exact new session and series', () => {
   const now = 1_800_000_000_000;
   const keys = credentials();
   const input = fixture(now);
@@ -91,7 +91,7 @@ test('wrong key algorithm, malformed input and noncanonical signature fail close
   const keys = credentials();
   const input = fixture(now);
   const signature = signed(input, keys.privateKey);
-  const ec = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const ec = generateKeyPairSync('ed25519');
   assert.equal(verifyDeviceRecoveryProof({
     input,
     registeredPublicKeySpkiDer: ec.publicKey.export({ type: 'spki', format: 'der' }),
