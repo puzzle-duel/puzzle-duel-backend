@@ -10,26 +10,7 @@ import {
 } from '../claims/pinned-manifest-registry.mts';
 import { generateUtcDailyManifest } from './utc-daily-manifest.mts';
 
-export const UTC_DAILY_MANIFEST_DDL = `
-CREATE TABLE IF NOT EXISTS tournament_utc_daily_manifest (
-  utc_date DATE PRIMARY KEY,
-  manifest_digest CHAR(64) NOT NULL UNIQUE,
-  content_version TEXT NOT NULL,
-  manifest_text TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-  CONSTRAINT utc_daily_digest_hex CHECK (manifest_digest ~ '^[a-f0-9]{64}$')
-);
-CREATE OR REPLACE FUNCTION pzd_reject_utc_daily_manifest_mutation()
-RETURNS trigger LANGUAGE plpgsql AS $pzd$
-BEGIN
-  RAISE EXCEPTION 'IMMUTABLE_UTC_DAILY_MANIFEST' USING ERRCODE = '23514';
-END
-$pzd$;
-DROP TRIGGER IF EXISTS pzd_utc_daily_manifest_immutable ON tournament_utc_daily_manifest;
-CREATE TRIGGER pzd_utc_daily_manifest_immutable
-  BEFORE UPDATE OR DELETE ON tournament_utc_daily_manifest
-  FOR EACH ROW EXECUTE FUNCTION pzd_reject_utc_daily_manifest_mutation();
-`;
+// Table and immutable trigger are installed by versioned migration 0012.
 
 function parseStored(text: string, digest: string, version: string): PinnedDailyManifest {
   const payload: unknown = JSON.parse(text);
