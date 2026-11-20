@@ -82,6 +82,6 @@ Track B same-device recovery must have backend PostgreSQL concurrency tests,
 client key storage implementation, independent PZD-40 security re-review
 and owner approval. Only then combine them in one physical iPhone test session.
 
-Current scope contains **only the stand-alone Ed25519 proof verifier and tests**.
+Current scope contains **only the stand-alone P-256 ECDSA proof verifier and tests**. The verifier uses SHA-256 and fixed-length IEEE-P1363 signatures, compatible with Secure-Enclave-backed P-256 keys on iOS.
 No device key registration, no backend recovery route, no DB migration, no
 client implementation. Do not claim the A→B→A scenario is fixed.
