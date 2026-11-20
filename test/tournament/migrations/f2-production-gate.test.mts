@@ -121,6 +121,7 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
       '0009_f2c_final',
       '0010_f2_privileges',
       '0011_journal_receipt_immutable',
+      '0012_utc_daily_manifest',
     ]);
     for (const file of files) {
       assert.equal(file.reversible, false, file.id);
@@ -151,11 +152,11 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
       const version = await pool.query('SHOW server_version_num');
       assert.ok(Number(version.rows[0].server_version_num) >= 180000);
       const first = await applyMigrations(pool);
-      assert.equal(first.applied.length, 12);
+      assert.equal(first.applied.length, 13);
       assert.equal(first.skipped.length, 0);
       const second = await applyMigrations(pool);
       assert.deepEqual(second.applied, []);
-      assert.equal(second.skipped.length, 12);
+      assert.equal(second.skipped.length, 13);
       await verifyMigrations(pool);
       const settlements = await pool.query(`SELECT count(*)::int AS n FROM tournament_f2c_settlement`);
       assert.equal(Number(settlements.rows[0].n), 0, 'migration does not publish FINAL');
