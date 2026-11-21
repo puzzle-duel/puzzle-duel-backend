@@ -92,7 +92,6 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         server.listen(config.port, config.host, resolve);
       });
     } catch (error) {
-      await pool.end();
       throw error;
     }
     const shutdown = () => {
