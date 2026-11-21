@@ -15,7 +15,10 @@ import pg from 'pg';
 
 export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
   if (env.PZD_RUNTIME_PROFILE !== 'staging') throw new Error('PZD_RUNTIME_PROFILE must be staging');
-  if (env.PZD_RANKED_HTTP_ENABLED === 'true') throw new Error('Ranked HTTP is not approved for staging bootstrap');
+  if (env.PZD_RANKED_HTTP_ENABLED === 'true') throw new Error('Global ranked HTTP flag is forbidden in staging');
+  if (env.PZD_STAGING_TOURNAMENT_ENABLED === 'true' && env.PZD_STAGING_GUEST_AUTH_ENABLED !== 'true') {
+    throw new Error('Staging tournament requires guest authentication');
+  }
   if (env.PZD_UAT_APPLY_MIGRATIONS === '1') throw new Error('Automatic migrations are forbidden');
   const host = env.PZD_STAGING_HOST ?? '127.0.0.1';
   if (host !== '127.0.0.1') throw new Error('Staging must bind to loopback only');
@@ -132,7 +135,8 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
     const server = createServer((req, res) => {
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
-      if (tournamentHandler && req.url?.startsWith('/v1/tournament/')) {
+      // Session lifecycle is handled separately; tournament HTTP must not shadow it.
+      if (tournamentHandler && req.url?.startsWith('/v1/tournament/') && req.url !== '/v1/tournament/session') {
         void tournamentHandler(req, res).catch(() => {
           if (!res.headersSent) {
             res.writeHead(503); res.end(JSON.stringify({ error: 'TOURNAMENT_UNAVAILABLE' }));
