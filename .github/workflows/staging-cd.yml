@@ -2,12 +2,12 @@ name: PZD-49 Backend staging CD
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "version/0.0.1"]
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
   push:
-    branches: [main]
+    branches: [main, "version/0.0.1"]
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
@@ -36,6 +36,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - name: Verify staging guest-auth and route safety
+        run: |
+          npm run test:staging
+          node --experimental-strip-types --test 'test/staging/*.test.mts'
       # PostgreSQL-backed F1/F2 suites run in the existing Stage E PostgreSQL CI.
       # Do not run them here without a provisioned PG18 service and URL.
       - name: Verify deploy scripts
@@ -48,8 +52,9 @@ jobs:
   deploy:
     name: Deploy to isolated Puzzle Duel staging
     needs: verify
-    # Never deploy on PR, manual dispatch or an unapproved staging gate.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PZD_STAGING_CD_ENABLED == 'true'
+    # Immutable version branch only; require two independently provisioned gates.
+    # A green verification job alone must never authorize a live host mutation.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/version/0.0.1' && vars.PZD_STAGING_CD_ENABLED == 'true' && vars.PZD_STAGING_RELEASE_001_APPROVED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pzd-staging
