@@ -197,6 +197,14 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         try { payload = JSON.parse(raw.toString('utf8')); }
         catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
         const result = diagnosticReports.submit(session.playerId, payload);
+        if (result.ok) {
+          // Lite: validated, allowlisted reports are visible in server stdout.
+          // No player identity, tokens, raw request data or persistence.
+          console.log(JSON.stringify({
+            type: 'diagnostic_report', reportId: result.reportId,
+            events: (payload as { events: unknown[] }).events,
+          }));
+        }
         send(res, result.ok ? 201 : result.status,
           result.ok ? { reportId: result.reportId } : { error: result.error });
         return;
