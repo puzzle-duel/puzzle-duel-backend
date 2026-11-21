@@ -7,7 +7,7 @@ staging.puzzle-duel.app {
   @auth path /v1/auth/guest /v1/auth/refresh /v1/auth/logout /v1/tournament/session
   @health path /healthz
   @allowed {
-    path /healthz /v1/auth/guest /v1/auth/refresh /v1/auth/logout /v1/tournament/session
+    path /healthz /v1/auth/guest /v1/auth/refresh /v1/auth/logout /v1/tournament/* /v1/diagnostics/reports
   }
   handle @allowed {
     reverse_proxy 127.0.0.1:8787 {
