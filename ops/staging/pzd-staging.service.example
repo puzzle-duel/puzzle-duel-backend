@@ -1,0 +1,16 @@
+[Unit]
+Description=Puzzle Duel isolated staging bootstrap
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pzd-staging/current
+EnvironmentFile=%h/pzd-staging/staging.env
+ExecStart=/opt/pzd-node26/bin/node --experimental-strip-types src/staging/staging-server.mts
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
