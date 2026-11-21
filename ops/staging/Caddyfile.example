@@ -4,10 +4,10 @@
 # Caddy obtains and renews TLS certificates automatically when DNS/ports are configured.
 staging.puzzle-duel.app {
   encode zstd gzip
-  @auth path /v1/auth/guest /v1/auth/refresh /v1/auth/logout
+  @auth path /v1/auth/guest /v1/auth/refresh /v1/auth/logout /v1/tournament/session
   @health path /healthz
   @allowed {
-    path /healthz /v1/auth/guest /v1/auth/refresh /v1/auth/logout
+    path /healthz /v1/auth/guest /v1/auth/refresh /v1/auth/logout /v1/tournament/session
   }
   handle @allowed {
     reverse_proxy 127.0.0.1:8787 {
