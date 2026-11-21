@@ -7,6 +7,7 @@
  */
 import { createPrivateKey, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
 import { createServer } from 'node:http';
+import { buildHttpDiagnostic, emitHttpDiagnostic, resolveRequestId } from '../../diagnostics/http-correlation.mts';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -244,7 +245,28 @@ async function serve(): Promise<void> {
       throw new Error('PZD_UAT_PORT is not a valid port');
     }
     const server = createServer((req, res) => {
-      void handler(req, res);
+      const requestId = resolveRequestId(req.headers['x-request-id']);
+      const started = process.hrtime.bigint();
+      res.setHeader('x-request-id', requestId);
+      res.once('finish', () => {
+        try {
+          const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+          emitHttpDiagnostic(buildHttpDiagnostic({
+            requestId, operation: 'tournament_http',
+            method: req.method ?? 'GET', status: res.statusCode, durationMs,
+          }), (line) => console.log(line));
+        } catch {
+          // Observability cannot change gameplay or HTTP responses.
+        }
+      });
+      void handler(req, res).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
+        } else {
+          res.destroy();
+        }
+      });
     });
     await new Promise<void>((resolve) => server.listen(port, host, resolve));
     console.log(`Puzzle Duel Tournament UAT listening on http://${host}:${port}`);
