@@ -8,6 +8,7 @@
  * MemoryVerifiedAuthorizationGateway is never used on these routes.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { DiagnosticReportStore } from '../../diagnostics/report-store.mts';
 import {
   JwtVerificationError,
   type PinnedRs256JwtVerifier,
@@ -119,6 +120,7 @@ type RateBucket = { count: number; resetAt: number };
 
 export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
   const buckets = new Map<string, RateBucket>();
+  const diagnosticReports = new DiagnosticReportStore();
   const rate = deps.rateLimit ?? { maxPerWindow: 120, windowMs: 60_000 };
 
   function checkRate(playerId: string): boolean {
@@ -176,6 +178,35 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       }
       if (!checkRate(session.playerId)) {
         send(res, 429, { error: 'RATE_LIMITED' });
+        return;
+      }
+
+      // Diagnostic reports are strictly staging/UAT only, behind the same
+      // verified JWT, active session, and player rate-limit as gameplay.
+      if (path === '/v1/diagnostics/reports' && method === 'POST') {
+        if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod') {
+          send(res, 404, { error: 'NOT_FOUND' });
+          return;
+        }
+        const raw = await readBody(req);
+        if (!raw) {
+          send(res, 400, { error: 'MALFORMED_REQUEST' });
+          return;
+        }
+        let payload: unknown;
+        try { payload = JSON.parse(raw.toString('utf8')); }
+        catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
+        const result = diagnosticReports.submit(session.playerId, payload);
+        if (result.ok) {
+          // Lite: validated, allowlisted reports are visible in server stdout.
+          // No player identity, tokens, raw request data or persistence.
+          console.log(JSON.stringify({
+            type: 'diagnostic_report', reportId: result.reportId,
+            events: (payload as { events: unknown[] }).events,
+          }));
+        }
+        send(res, result.ok ? 201 : result.status,
+          result.ok ? { reportId: result.reportId } : { error: result.error });
         return;
       }
 
