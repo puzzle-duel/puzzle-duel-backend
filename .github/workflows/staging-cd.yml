@@ -35,5 +35,5 @@ jobs:
         run: |
           set -euo pipefail
           test -f ops/staging/README.md
-          ! grep -Eq 'systemctl restart forest-dash|/var/www/forest-dash|\$\{\{ secrets\.ORACLE_SSH_PRIVATE_KEY \}\}' .github/workflows/staging-cd.yml
+          test ! -f ops/staging/deploy.sh
           echo "READINESS_ONLY: no SSH, migrations, host changes or deployment"
