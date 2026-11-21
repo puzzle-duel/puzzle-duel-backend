@@ -11,17 +11,18 @@ export async function applyGuestSchema(env: NodeJS.ProcessEnv = process.env): Pr
   const config = stagingConfig(env);
   const sql = readFileSync(fileURLToPath(new URL('../../docs/staging/PZD-49-GUEST-SCHEMA-CANDIDATE.sql', import.meta.url)), 'utf8');
   const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 1, connectionTimeoutMillis: 3000 });
-  const client = await pool.connect();
+  let client: pg.PoolClient | undefined;
   try {
+    client = await pool.connect();
     await client.query('BEGIN');
     await client.query("SELECT pg_advisory_xact_lock(hashtext('pzd_staging_guest_schema_v1'))");
     await client.query(sql);
     await client.query('COMMIT');
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (client) await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release();
+    client?.release();
     await pool.end();
   }
 }
