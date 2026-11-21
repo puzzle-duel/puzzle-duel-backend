@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stagingConfig } from '../../src/staging/staging-server.mts';
+import { stagingConfig, isStagingRankedRoute } from '../../src/staging/staging-server.mts';
 
 const base = {
   PZD_RUNTIME_PROFILE: 'staging',
@@ -41,4 +41,14 @@ test('guest auth requires explicit private key path and key ID', () => {
     PZD_STAGING_GUEST_SIGNING_KID: 'staging-1',
   });
   assert.equal(config.guestAuthEnabled, true);
+});
+
+
+test('staging diagnostic report POST reaches authenticated ranked handler', () => {
+  assert.equal(isStagingRankedRoute('/v1/diagnostics/reports', 'POST'), true);
+  assert.equal(isStagingRankedRoute('/v1/diagnostics/reports', 'GET'), false);
+  assert.equal(isStagingRankedRoute('/v1/diagnostics/reports-extra', 'POST'), false);
+  assert.equal(isStagingRankedRoute('/v1/tournament/series/abc/commands', 'POST'), true);
+  assert.equal(isStagingRankedRoute('/v1/tournament/session', 'POST'), false);
+  assert.equal(isStagingRankedRoute('/v1/auth/guest', 'POST'), false);
 });
