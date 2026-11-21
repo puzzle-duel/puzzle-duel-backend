@@ -36,8 +36,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run test:stage-f1-auth
-      - run: npm run test:stage-f2
+      # PostgreSQL-backed F1/F2 suites run in the existing Stage E PostgreSQL CI.
+      # Do not run them here without a provisioned PG18 service and URL.
       - name: Verify deploy scripts
         run: |
           set -euo pipefail
