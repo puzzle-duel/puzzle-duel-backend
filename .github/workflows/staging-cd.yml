@@ -36,6 +36,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run test:stage-f1-auth
+      - run: npm run test:stage-f2
       - name: Verify deploy scripts
         run: |
           set -euo pipefail
@@ -47,7 +49,7 @@ jobs:
     name: Deploy to isolated Puzzle Duel staging
     needs: verify
     # Never deploy on PR, manual dispatch or an unapproved staging gate.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PZD_STAGING_CD_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pzd-staging
