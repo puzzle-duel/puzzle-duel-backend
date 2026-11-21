@@ -249,6 +249,7 @@ async function serve(): Promise<void> {
       const started = process.hrtime.bigint();
       res.setHeader('x-request-id', requestId);
       res.once('finish', () => {
+        if (res.statusCode < 400) return; // Lite: record failed HTTP requests only.
         try {
           const durationMs = Number(process.hrtime.bigint() - started) / 1_000_000;
           emitHttpDiagnostic(buildHttpDiagnostic({
