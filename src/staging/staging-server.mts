@@ -3,10 +3,12 @@
  * DB migrations are an explicit separate operator action.
  */
 import { createServer } from 'node:http';
-import { createPrivateKey } from 'node:crypto';
+import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { createGuestAuthHttpHandler } from './guest-auth-http.mts';
-import { PostgresStagingGuestAuth } from './guest-auth-service.mts';
+import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
+import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
+import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 
@@ -39,6 +41,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
   try {
     await pool.query('SELECT 1');
     let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
+    let sessionHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     if (config.guestAuthEnabled) {
       // Fail closed if the migration has not been explicitly applied.
       for (const table of ['pzd_guest_accounts', 'pzd_guest_families', 'pzd_guest_refresh']) {
@@ -55,10 +58,69 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       guestHandler = createGuestAuthHttpHandler(
         new PostgresStagingGuestAuth(pool, privateKey, config.keyId!),
       );
+      const verifier = new PinnedRs256JwtVerifier({
+        issuer: GUEST_ISSUER, audience: GUEST_AUDIENCE,
+        keys: [{ keyId: config.keyId!, rsaPublicKeyPem: createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString() }],
+        maxTokenAgeSeconds: 900, allowStagingGuestClaims: true,
+      });
+      const sessions = new PostgresVerifiedIdentitySessionStore(pool);
+      for (const table of ['tournament_verified_identity', 'tournament_auth_session']) {
+        const result = await pool.query<{ exists: string | null }>('SELECT to_regclass($1) AS exists', [table]);
+        if (!result.rows[0]?.exists) throw new Error('Tournament session schema is not ready');
+      }
+      sessionHandler = async (req, res) => {
+        const method = req.method ?? 'GET';
+        if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) {
+          res.writeHead(404); res.end(JSON.stringify({ error: 'NOT_FOUND' })); return;
+        }
+        if (req.headers['transfer-encoding'] !== undefined ||
+            (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0')) {
+          res.writeHead(400); res.end(JSON.stringify({ error: 'MALFORMED_REQUEST' })); return;
+        }
+        let identity;
+        try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
+        catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
+        const active = await pool.query(
+          'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
+          [identity.subject],
+        );
+        if (!active.rowCount) {
+          res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
+        }
+        if (method === 'POST') {
+          const opened = await sessions.openAfterVerifiedJwt(identity);
+          res.writeHead(201); res.end(JSON.stringify(opened)); return;
+        }
+        const secret = req.headers['x-pzd-session-secret'];
+        if (typeof secret !== 'string') {
+          res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
+        }
+        if (method === 'DELETE') {
+          const revoked = await sessions.revokeSession(identity, secret);
+          res.writeHead(revoked ? 204 : 401);
+          res.end(revoked ? '' : JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
+        }
+        const verified = method === 'PATCH'
+          ? await sessions.renewActiveSession(identity, secret)
+          : await sessions.authenticateVerifiedSession(identity, secret);
+        if (!verified) {
+          res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
+        }
+        res.writeHead(200); res.end(JSON.stringify(verified));
+      };
+
     }
     const server = createServer((req, res) => {
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
+      if (sessionHandler && req.url === '/v1/tournament/session') {
+        void sessionHandler(req, res).catch(() => {
+          if (!res.headersSent) {
+            res.writeHead(503); res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
+          } else { res.destroy(); }
+        });
+        return;
+      }
       if (guestHandler && req.url?.startsWith('/v1/auth/')) {
         void guestHandler(req, res).then(handled => {
           if (!handled && !res.headersSent) {
