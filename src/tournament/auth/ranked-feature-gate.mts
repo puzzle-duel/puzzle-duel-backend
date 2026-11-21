@@ -116,7 +116,12 @@ export function resolveRankedHttpFeatureGate(
           : 'production_runtime_denied',
     };
   }
-  if (!ALLOWLISTED_ENABLE_PROFILES.has(profile)) {
+  // Isolated staging opt-in; never enabled by the ordinary ranked flag alone.
+  // The real process NODE_ENV production veto above remains non-overridable.
+  const stagingAllowed = profile === 'staging' &&
+    process.env.PZD_RUNTIME_PROFILE === 'staging' &&
+    process.env.PZD_STAGING_TOURNAMENT_ENABLED === 'true';
+  if (!ALLOWLISTED_ENABLE_PROFILES.has(profile) && !stagingAllowed) {
     return { enabled: false, denyReason: 'unknown_runtime_profile' };
   }
   if (flag !== 'true') {
