@@ -16,7 +16,7 @@ import pg from 'pg';
 /** Route diagnostic reports through the same verified guest/session handler as ranked moves. */
 export function isStagingRankedRoute(url: string | undefined, method: string | undefined): boolean {
   if (!url) return false;
-  const path = url.split('?', 1)[0];
+  const path = url.split('?', 1)[0] ?? '';
   return (path.startsWith('/v1/tournament/') && path !== '/v1/tournament/session') ||
     (path === '/v1/diagnostics/reports' && method === 'POST');
 }
