@@ -1,4 +1,4 @@
-name: PZD-49 Backend staging CD readiness
+name: PZD-49 Backend staging CD
 
 on:
   pull_request:
@@ -6,34 +6,84 @@ on:
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/staging-cd.yml"
+      - "ops/staging/**"
+      - "src/**"
+      - "package*.json"
+      - "tsconfig.json"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: pzd-staging-readiness-${{ github.ref }}
+  group: pzd-staging-cd
   cancel-in-progress: false
 
 jobs:
-  readiness:
-    name: Validate isolated staging deployment plan
+  verify:
+    name: Verify staging candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@v4
         with:
           node-version: '26'
-      - name: Check Node and TypeScript
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Verify deploy scripts
         run: |
           set -euo pipefail
-          node --version
-          npm ci
-          npm run typecheck
-      - name: Verify deployment isolation and fail-closed gate
-        run: |
-          set -euo pipefail
+          bash -n ops/staging/deploy-remote.sh
           test -f ops/staging/README.md
-          test ! -f ops/staging/deploy.sh
-          echo "READINESS_ONLY: no SSH, migrations, host changes or deployment"
+          ! grep -Eq 'systemctl restart forest-dash|/var/www/forest-dash' ops/staging/deploy-remote.sh
+
+  deploy:
+    name: Deploy to isolated Puzzle Duel staging
+    needs: verify
+    # Never deploy on PR, manual dispatch or an unapproved staging gate.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: pzd-staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Package immutable source
+        run: |
+          set -euo pipefail
+          tar -czf /tmp/pzd-staging-release.tgz --exclude=.git --exclude=.github --exclude=node_modules --exclude=ops/staging/deploy-remote.sh src migrations package.json package-lock.json tsconfig.json
+      - name: Install pinned SSH host identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Deploy preprovisioned isolated service and smoke test
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
+          scp $SSH_OPTS /tmp/pzd-staging-release.tgz "$USER@$HOST:pzd-staging-release.tgz"
+          ssh $SSH_OPTS "$USER@$HOST" "bash -s -- '$COMMIT_SHA'" < ops/staging/deploy-remote.sh
