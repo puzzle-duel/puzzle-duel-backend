@@ -96,7 +96,8 @@ export class PostgresStagingGuestAuth {
       );
       const familyId = found.rows[0]?.family_id;
       if (!familyId) throw new GuestCredentialError('INVALID_REFRESH');
-      await client.query('SELECT family_id FROM pzd_guest_families WHERE family_id = $1 FOR UPDATE', [familyId]);
+      const familyLock = await client.query('SELECT family_id FROM pzd_guest_families WHERE family_id = $1 FOR UPDATE', [familyId]);
+      if (familyLock.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
       const current = await client.query<{
         player_id: string; used_at: Date | null; revoked_at: Date | null; expires_at: Date;
       }>(
