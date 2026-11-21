@@ -24,3 +24,21 @@ test('rejects ranked gate and automatic migrations', () => {
 test('rejects missing runtime profile', () => {
   assert.throws(() => stagingConfig({ ...base, PZD_RUNTIME_PROFILE: undefined }));
 });
+
+test('guest auth remains disabled by default', () => {
+  assert.equal(stagingConfig(base).guestAuthEnabled, false);
+});
+test('guest auth requires explicit private key path and key ID', () => {
+  assert.throws(() => stagingConfig({ ...base, PZD_STAGING_GUEST_AUTH_ENABLED: 'true' }));
+  assert.throws(() => stagingConfig({
+    ...base, PZD_STAGING_GUEST_AUTH_ENABLED: 'true',
+    PZD_STAGING_GUEST_SIGNING_KEY_FILE: 'relative.pem',
+    PZD_STAGING_GUEST_SIGNING_KID: 'staging-1',
+  }));
+  const config = stagingConfig({
+    ...base, PZD_STAGING_GUEST_AUTH_ENABLED: 'true',
+    PZD_STAGING_GUEST_SIGNING_KEY_FILE: '/etc/pzd/guest-private.pem',
+    PZD_STAGING_GUEST_SIGNING_KID: 'staging-1',
+  });
+  assert.equal(config.guestAuthEnabled, true);
+});
