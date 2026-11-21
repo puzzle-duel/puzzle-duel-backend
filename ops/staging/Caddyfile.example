@@ -1,0 +1,24 @@
+# PZD-49 — HTTPS ingress for isolated staging guest auth
+# Replace staging.puzzle-duel.app with the DNS name actually controlled by the operator.
+# Caddy must be the only public listener; Node stays on 127.0.0.1:8787.
+# Caddy obtains and renews TLS certificates automatically when DNS/ports are configured.
+staging.puzzle-duel.app {
+  encode zstd gzip
+  @auth path /v1/auth/guest /v1/auth/refresh /v1/auth/logout
+  @health path /healthz
+  @allowed {
+    path /healthz /v1/auth/guest /v1/auth/refresh /v1/auth/logout
+  }
+  handle @allowed {
+    reverse_proxy 127.0.0.1:8787 {
+      # Overwrite untrusted client headers. Only this proxy may access Node.
+      header_up -X-Forwarded-Proto
+      header_up X-Forwarded-Proto https
+      header_up -X-Forwarded-For
+      header_up -X-Real-IP
+    }
+  }
+  handle {
+    respond "Not found" 404
+  }
+}
