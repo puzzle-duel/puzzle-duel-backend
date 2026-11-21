@@ -2,19 +2,12 @@ name: PZD-49 Backend staging CD
 
 on:
   pull_request:
-    branches: [main]
+    branches: ['version/**']
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
   push:
-    branches: [main]
-    paths:
-      - ".github/workflows/staging-cd.yml"
-      - "ops/staging/**"
-      - "src/**"
-      - "package*.json"
-      - "tsconfig.json"
-  workflow_dispatch:
+    branches: ['version/**']
 
 permissions:
   contents: read
@@ -38,6 +31,13 @@ jobs:
       - run: npm run typecheck
       # PostgreSQL-backed F1/F2 suites run in the existing Stage E PostgreSQL CI.
       # Do not run them here without a provisioned PG18 service and URL.
+      - name: Verify release branch and scripts
+        run: |
+          set -euo pipefail
+          [[ '${{ github.base_ref || github.ref_name }}' == version/* ]]
+          bash -n ops/staging/deploy-remote.sh
+          test -f ops/staging/README.md
+          ! grep -Eq 'systemctl restart forest-dash|/var/www/forest-dash' ops/staging/deploy-remote.sh
       - name: Verify deploy scripts
         run: |
           set -euo pipefail
@@ -48,8 +48,8 @@ jobs:
   deploy:
     name: Deploy to isolated Puzzle Duel staging
     needs: verify
-    # Never deploy on PR, manual dispatch or an unapproved staging gate.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PZD_STAGING_CD_ENABLED == 'true'
+    # Only version branch pushes with explicit staging gate may deploy; PRs only verify.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/version/') && vars.PZD_STAGING_CD_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pzd-staging
