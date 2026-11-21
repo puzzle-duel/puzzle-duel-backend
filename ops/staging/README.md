@@ -1,28 +1,16 @@
-# PZD-49 — Isolated staging CD (Forest Dash shared host)
+# PZD-49 staging CD — version branch gate
 
-## Status
-Pipeline code prepared on PZD-49 branch. **Not deployed or end-to-end validated.** The existing Forest Dash service is not a deployment target. Production will use a separate server and remains subject to PZD-45.
+## Implementation status
+Code prepared on feature branch; NOT deployed or end-to-end verified. Production ranked HTTP remains disabled. Only pushes to version/* (after merge) may deploy when PZD_STAGING_CD_ENABLED=true and protected pzd-staging environment permits it. PRs verify only. No staging deployment from development/main/master.
 
-## GitHub Actions
-`.github/workflows/staging-cd.yml` verifies Node 26 typecheck, Stage F1 auth tests, Stage F2 tests and shell syntax on PR. On main push, deploy is additionally gated by repository variable `PZD_STAGING_CD_ENABLED=true`, the protected `pzd-staging` GitHub environment and successful verification. Keep the variable **unset/false** until initial host setup and owner approval.
+## Existing Oracle staging host requirements
+The deployed pzd-staging.service is a **system-level** service, not a systemd user unit. Dedicated SSH account must own /home/pzd-staging/pzd-staging/releases, current symlink, and staging release archive; no unrelated app access. Pre-provision a narrow sudoers rule for **only** /usr/bin/systemctl restart pzd-staging.service and /usr/bin/systemctl stop pzd-staging.service. Confirm the exact binary path and account before enabling CD. Do not grant generic systemctl or unrestricted sudo. Existing staging service configuration, runtime env, and loopback port 8787 must remain unchanged.
 
-The `pzd-staging` environment must be created with restricted deployment branches, required reviewers and these dedicated secrets:
-- `PZD_STAGING_HOST` — Oracle VM host (not a URL).
-- `PZD_STAGING_USER` — dedicated unprivileged Puzzle Duel deploy account.
-- `PZD_STAGING_SSH_PRIVATE_KEY` — dedicated SSH private key, **not** the Forest Dash production deploy key.
-- `PZD_STAGING_SSH_KNOWN_HOSTS` — verified pinned SSH host key.
+## Database gate (fail closed)
+Apply versioned migrations through a separately authorized migration owner on the isolated pzd_staging database; verify schema migration ledger through 0012 and ensure rollback/backup plan. Apply ops/staging/staging-runtime-grants.sql with migration-owner privileges to fix PostgreSQL FOR SHARE UPDATE requirement and grant migration-ledger SELECT to app role. The SQL refuses any database other than pzd_staging. Only after these checks, an authorized operator/provisioner creates /home/pzd-staging/pzd-staging/SCHEMA_READY_FOR_CD. This sentinel is a *provisioning gate*, NOT proof that later schema changes are compatible. Any new migration must invalidate and revalidate the gate; add automated per-release migration orchestration before claiming hands-free CD.
 
-Never copy Forest Dash secret values to source, PR text, or logs. Repository secrets are not shared automatically.
+## GitHub configuration
+Protected environment pzd-staging, restricted to version/*, plus repository variable PZD_STAGING_CD_ENABLED=true only after host provisioning and a dry run. Required environment secrets: PZD_STAGING_HOST, PZD_STAGING_USER, PZD_STAGING_SSH_PRIVATE_KEY, PZD_STAGING_SSH_KNOWN_HOSTS (pinned, independently verified). No credentials in source or logs.
 
-## Host provisioning prerequisites — explicit owner approval required
-1. Inspect VM memory/disk/CPU, PostgreSQL 18 support, firewall, DNS/TLS and existing Forest Dash/Caddy/service resources **read-only**.
-2. Provision isolated `pzd-staging` Linux user, HOME-owned `~/pzd-staging/releases` and `~/pzd-staging/APPROVED_FOR_CD` approval sentinel. Use separate DB `pzd_staging`, roles, backup/restore and secrets. Do not use `pzd_ingress`, Forest Dash DB or production DB.
-3. Install Node 26, npm, curl, systemd user-service with lingering as approved. Create a dedicated `pzd-staging.service` that runs the **approved non-production** server from `~/pzd-staging/current`. Keep it loopback-only on 127.0.0.1:8787 with a safe `GET /healthz` returning 2xx without auth; validate health route does not bypass ranked feature gates.
-4. Explicitly approve migrations and initial DB provisioning separately; **deployment script never runs migrations**. Run verified migrations and `pg_dump/pg_restore` checks using least-privilege role, with a recovery plan.
-5. Test a manual staging rollout, confirm Forest Dash service unaffected, test rollback and log correlation, then set GitHub environment/reviewers and enable variable `PZD_STAGING_CD_ENABLED=true`.
-
-## Deploy semantics
-The workflow archives source at the triggering SHA, copies it by pinned-host SSH, and invokes `ops/staging/deploy-remote.sh` as dedicated account. The remote script rejects unprovisioned hosts and absent approval sentinel, extracts into a new SHA-named release, installs production dependencies, switches the `current` symlink, restarts **only** the `pzd-staging.service` user unit, and probes `http://127.0.0.1:8787/healthz`. On restart/health failure it restores the previous release symlink and restarts that service (or stops on first install). **No database rollback.** No privileged sudo commands or Caddy/Forest Dash modifications are performed.
-
-## Outstanding hard gates
-The current backend UAT entrypoint is explicitly test-only and not proven suitable for remote staging. A secure staging runtime, verified health endpoint, environment secrets, isolated DB provisioning, VM access and live smoke test are **NOT_RUN**. Do not enable CD variable or create approval sentinel before these are reviewed. No production ranked HTTP, production migration, production provisioning or production deploy is authorized.
+## Deploy behavior and remaining blockers
+Deploy script creates immutable SHA release, installs Node 26 production deps, checks schema gate, atomically swaps current, restarts only the staging system service, checks /healthz, and restores prior application symlink on failed restart/health. Database rollback is NOT attempted. Must still add authenticated guest/session/claim smoke tests, safe migration automation per release, deployment audit correlation, and backend-client SHA manifest/Firebase distribution dependency. Existing workflow does not yet provide full hands-free CD. Never enable production ranked HTTP or modify game mechanics/animations.
