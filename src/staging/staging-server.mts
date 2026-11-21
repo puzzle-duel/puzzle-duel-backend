@@ -3,6 +3,10 @@
  * DB migrations are an explicit separate operator action.
  */
 import { createServer } from 'node:http';
+import { createPrivateKey } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { createGuestAuthHttpHandler } from './guest-auth-http.mts';
+import { PostgresStagingGuestAuth } from './guest-auth-service.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 
@@ -20,7 +24,13 @@ export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!['127.0.0.1', 'localhost'].includes(url.hostname) || url.pathname !== '/pzd_staging') {
     throw new Error('Staging DB must be the isolated local pzd_staging database');
   }
-  return { host, port, databaseUrl };
+  const guestAuthEnabled = env.PZD_STAGING_GUEST_AUTH_ENABLED === 'true';
+  const keyPath = env.PZD_STAGING_GUEST_SIGNING_KEY_FILE;
+  const keyId = env.PZD_STAGING_GUEST_SIGNING_KID;
+  if (guestAuthEnabled && (!keyPath || !keyPath.startsWith('/') || !keyId || !/^[A-Za-z0-9_-]{1,128}$/.test(keyId))) {
+    throw new Error('Staging guest auth requires absolute private key path and pinned kid');
+  }
+  return { host, port, databaseUrl, guestAuthEnabled, keyPath, keyId };
 }
 
 export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
@@ -28,9 +38,41 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
   const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 3, connectionTimeoutMillis: 3000 });
   try {
     await pool.query('SELECT 1');
+    let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
+    if (config.guestAuthEnabled) {
+      // Fail closed if the migration has not been explicitly applied.
+      for (const table of ['pzd_guest_accounts', 'pzd_guest_families', 'pzd_guest_refresh']) {
+        const result = await pool.query<{ exists: string | null }>('SELECT to_regclass($1) AS exists', [table]);
+        if (!result.rows[0]?.exists) throw new Error('Guest auth schema is not ready');
+      }
+      const keyFile = config.keyPath!;
+      if ((statSync(keyFile).mode & 0o077) !== 0) throw new Error('Guest signing key permissions are too broad');
+      const privateKey = createPrivateKey(readFileSync(keyFile));
+      if (privateKey.asymmetricKeyType !== 'rsa' ||
+          (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) {
+        throw new Error('Guest signing key must be RSA 2048 or stronger');
+      }
+      guestHandler = createGuestAuthHttpHandler(
+        new PostgresStagingGuestAuth(pool, privateKey, config.keyId!),
+      );
+    }
     const server = createServer((req, res) => {
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
+      if (guestHandler && req.url?.startsWith('/v1/auth/')) {
+        void guestHandler(req, res).then(handled => {
+          if (!handled && !res.headersSent) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'NOT_FOUND' }));
+          }
+        }).catch(() => {
+          if (!res.headersSent) {
+            res.writeHead(503);
+            res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
+          }
+        });
+        return;
+      }
       if (req.method !== 'GET' || req.url !== '/healthz') {
         res.writeHead(404);
         res.end(JSON.stringify({ error: 'NOT_FOUND' }));
