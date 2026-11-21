@@ -11,8 +11,10 @@ const ACCESS_SECONDS = 15 * 60;
 const REFRESH_DAYS = 30;
 
 export class GuestCredentialError extends Error {
-  constructor(readonly code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED') {
+  readonly code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED';
+  constructor(code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED') {
     super(code);
+    this.code = code;
   }
 }
 
@@ -35,12 +37,14 @@ function accessJwt(privateKey: KeyObject, kid: string, playerId: string, now: Da
 }
 
 export class PostgresStagingGuestAuth {
-  constructor(
-    private readonly pool: pg.Pool,
-    private readonly privateKey: KeyObject,
-    private readonly keyId: string,
-  ) {
+  private readonly pool: pg.Pool;
+  private readonly privateKey: KeyObject;
+  private readonly keyId: string;
+  constructor(pool: pg.Pool, privateKey: KeyObject, keyId: string) {
     if (!keyId || keyId.length > 128) throw new Error('Invalid signing key ID');
+    this.pool = pool;
+    this.privateKey = privateKey;
+    this.keyId = keyId;
   }
 
   async create(now = new Date()) {
