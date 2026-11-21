@@ -13,6 +13,14 @@ import { createStagingTournamentHandler } from './staging-tournament.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 
+/** Route diagnostic reports through the same verified guest/session handler as ranked moves. */
+export function isStagingRankedRoute(url: string | undefined, method: string | undefined): boolean {
+  if (!url) return false;
+  const path = url.split('?', 1)[0];
+  return (path.startsWith('/v1/tournament/') && path !== '/v1/tournament/session') ||
+    (path === '/v1/diagnostics/reports' && method === 'POST');
+}
+
 export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
   if (env.PZD_RUNTIME_PROFILE !== 'staging') throw new Error('PZD_RUNTIME_PROFILE must be staging');
   if (env.PZD_RANKED_HTTP_ENABLED === 'true') throw new Error('Global ranked HTTP flag is forbidden in staging');
@@ -136,7 +144,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
       // Session lifecycle is handled separately; tournament HTTP must not shadow it.
-      if (tournamentHandler && req.url?.startsWith('/v1/tournament/') && req.url !== '/v1/tournament/session') {
+      if (tournamentHandler && isStagingRankedRoute(req.url, req.method)) {
         void tournamentHandler(req, res).catch(() => {
           if (!res.headersSent) {
             res.writeHead(503); res.end(JSON.stringify({ error: 'TOURNAMENT_UNAVAILABLE' }));
