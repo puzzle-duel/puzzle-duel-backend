@@ -14,6 +14,8 @@
   "include": [
     "src/engine/core001v3/**/*.mts",
     "src/tournament/**/*.mts",
+    "src/staging/**/*.mts",
+    "test/staging/**/*.mts",
     "test/engine/core001v3/**/*.mts",
     "test/tournament/**/*.mts"
   ]
