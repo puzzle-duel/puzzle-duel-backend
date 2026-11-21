@@ -1,22 +1,28 @@
-# PZD-49 — Puzzle Duel staging deployment boundary
+# PZD-49 — Isolated staging CD (Forest Dash shared host)
 
-Status: READINESS ONLY — no server mutation, secrets provisioning, migration, or deployment authorized.
+## Status
+Pipeline code prepared on PZD-49 branch. **Not deployed or end-to-end validated.** The existing Forest Dash service is not a deployment target. Production will use a separate server and remains subject to PZD-45.
 
-## Environments
-- STAGING: existing Forest Dash Oracle VM, but Puzzle Duel must have its own unprivileged deployment identity, working directory, systemd service/container, PostgreSQL 18 database and least-privilege roles, persistent data, logs, network binding, and secrets. Do not restart or modify Forest Dash.
-- PRODUCTION: a newly provisioned independent host in a later task. Never use the Forest Dash VM for Puzzle Duel production.
+## GitHub Actions
+`.github/workflows/staging-cd.yml` verifies Node 26 typecheck, Stage F1 auth tests, Stage F2 tests and shell syntax on PR. On main push, deploy is additionally gated by repository variable `PZD_STAGING_CD_ENABLED=true`, the protected `pzd-staging` GitHub environment and successful verification. Keep the variable **unset/false** until initial host setup and owner approval.
 
-## Before enabling a real deployment job
-1. Read AGENTS.md, BLUEPRINT.md, applicable Accepted ADRs, and docs/process/PZD-OPS-001-continuous-review.md. Confirm infrastructure ADR approval where required.
-2. Read-only audit VM architecture, free disk/RAM, firewall, Caddy config, service ownership, DNS/TLS, PostgreSQL compatibility, and backup/restore policy.
-3. Define a dedicated staging runtime entrypoint and explicit /healthz + smoke contract. Do not infer production readiness from the UAT server.
-4. Create GitHub **staging** environment and dedicated scoped secrets for host, user, pinned SSH known_hosts, and private key. Never copy secret values into source or logs. A Forest Dash repo secret is not shared across repositories.
-5. Confirm migration/rollback plan with backup and pg_dump/pg_restore evidence. Application rollback does not imply database rollback.
-6. Require CI PASS, immutable commit/artifact identity, concurrency lock, health check, audit log and manual approval for initial host changes.
-7. Verify Forest Dash remains operational before/after the isolated staging deployment.
+The `pzd-staging` environment must be created with restricted deployment branches, required reviewers and these dedicated secrets:
+- `PZD_STAGING_HOST` — Oracle VM host (not a URL).
+- `PZD_STAGING_USER` — dedicated unprivileged Puzzle Duel deploy account.
+- `PZD_STAGING_SSH_PRIVATE_KEY` — dedicated SSH private key, **not** the Forest Dash production deploy key.
+- `PZD_STAGING_SSH_KNOWN_HOSTS` — verified pinned SSH host key.
 
-## Current workflow
-`.github/workflows/staging-cd.yml` intentionally performs **readiness validation only** on PR or manual dispatch. It does not connect to SSH, read deployment secrets, run migrations, or deploy. This is not a completed CD pipeline.
+Never copy Forest Dash secret values to source, PR text, or logs. Repository secrets are not shared automatically.
 
-## Explicit prohibitions
-No production deploy, production ranked HTTP, production database changes, automatic DB rollback, or host provisioning. PZD-45 remains the independent production release gate.
+## Host provisioning prerequisites — explicit owner approval required
+1. Inspect VM memory/disk/CPU, PostgreSQL 18 support, firewall, DNS/TLS and existing Forest Dash/Caddy/service resources **read-only**.
+2. Provision isolated `pzd-staging` Linux user, HOME-owned `~/pzd-staging/releases` and `~/pzd-staging/APPROVED_FOR_CD` approval sentinel. Use separate DB `pzd_staging`, roles, backup/restore and secrets. Do not use `pzd_ingress`, Forest Dash DB or production DB.
+3. Install Node 26, npm, curl, systemd user-service with lingering as approved. Create a dedicated `pzd-staging.service` that runs the **approved non-production** server from `~/pzd-staging/current`. Keep it loopback-only on 127.0.0.1:8787 with a safe `GET /healthz` returning 2xx without auth; validate health route does not bypass ranked feature gates.
+4. Explicitly approve migrations and initial DB provisioning separately; **deployment script never runs migrations**. Run verified migrations and `pg_dump/pg_restore` checks using least-privilege role, with a recovery plan.
+5. Test a manual staging rollout, confirm Forest Dash service unaffected, test rollback and log correlation, then set GitHub environment/reviewers and enable variable `PZD_STAGING_CD_ENABLED=true`.
+
+## Deploy semantics
+The workflow archives source at the triggering SHA, copies it by pinned-host SSH, and invokes `ops/staging/deploy-remote.sh` as dedicated account. The remote script rejects unprovisioned hosts and absent approval sentinel, extracts into a new SHA-named release, installs production dependencies, switches the `current` symlink, restarts **only** the `pzd-staging.service` user unit, and probes `http://127.0.0.1:8787/healthz`. On restart/health failure it restores the previous release symlink and restarts that service (or stops on first install). **No database rollback.** No privileged sudo commands or Caddy/Forest Dash modifications are performed.
+
+## Outstanding hard gates
+The current backend UAT entrypoint is explicitly test-only and not proven suitable for remote staging. A secure staging runtime, verified health endpoint, environment secrets, isolated DB provisioning, VM access and live smoke test are **NOT_RUN**. Do not enable CD variable or create approval sentinel before these are reviewed. No production ranked HTTP, production migration, production provisioning or production deploy is authorized.
