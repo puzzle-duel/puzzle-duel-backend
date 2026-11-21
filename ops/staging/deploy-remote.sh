@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs on pre-provisioned Puzzle Duel staging deploy account; no sudo or DB changes.
+# Runs as the isolated pzd-staging deploy account. Requires narrowly scoped passwordless sudo ONLY for pzd-staging.service restart/stop; never touches other services.
 set -euo pipefail
 sha="${1:?commit sha required}"
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid commit SHA" >&2; exit 2; }
@@ -21,18 +21,18 @@ cleanup() { rm -f "$archive"; }
 trap cleanup EXIT
 tar -xzf "$archive" -C "$release" --no-same-owner --no-same-permissions
 cd "$release"
-command -v node >/dev/null
-node -e 'if (Number(process.versions.node.split(".")[0]) < 26) process.exit(1)'
-npm ci --omit=dev --ignore-scripts
+test -x /opt/pzd-node26/bin/node
+/opt/pzd-node26/bin/node -e 'if (Number(process.versions.node.split(".")[0]) < 26) process.exit(1)'
+/opt/pzd-node26/bin/node /opt/pzd-node26/lib/node_modules/npm/bin/npm-cli.js ci --omit=dev --ignore-scripts
 ln -sfn "$release" "$base/current.next"
 mv -Tf "$base/current.next" "$current"
 # Dedicated pre-provisioned user service. No privileged systemctl, Forest Dash or Caddy mutations.
-if ! systemctl --user restart pzd-staging.service; then
+if ! sudo -n /usr/bin/systemctl restart pzd-staging.service; then
   echo "staging service restart failed" >&2
   if [[ -n "$previous" && "$previous" == "$releases/"* ]]; then
     ln -sfn "$previous" "$base/current.next"
     mv -Tf "$base/current.next" "$current"
-    systemctl --user restart pzd-staging.service || true
+    sudo -n /usr/bin/systemctl restart pzd-staging.service || true
   fi
   exit 5
 fi
@@ -42,9 +42,9 @@ if ! curl --fail --silent --show-error --max-time 5 --retry 5 --retry-delay 2 ht
   if [[ -n "$previous" && "$previous" == "$releases/"* ]]; then
     ln -sfn "$previous" "$base/current.next"
     mv -Tf "$base/current.next" "$current"
-    systemctl --user restart pzd-staging.service || true
+    sudo -n /usr/bin/systemctl restart pzd-staging.service || true
   else
-    systemctl --user stop pzd-staging.service || true
+    sudo -n /usr/bin/systemctl stop pzd-staging.service || true
   fi
   exit 6
 fi
