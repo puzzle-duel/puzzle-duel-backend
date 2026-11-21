@@ -9,6 +9,7 @@ import { createGuestAuthHttpHandler } from './guest-auth-http.mts';
 import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
+import { createStagingTournamentHandler } from './staging-tournament.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 
@@ -41,6 +42,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
   try {
     await pool.query('SELECT 1');
     let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
+    let tournamentHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     let sessionHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     if (config.guestAuthEnabled) {
       // Fail closed if the migration has not been explicitly applied.
@@ -67,6 +69,23 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       for (const table of ['tournament_verified_identity', 'tournament_auth_session']) {
         const result = await pool.query<{ exists: string | null }>('SELECT to_regclass($1) AS exists', [table]);
         if (!result.rows[0]?.exists) throw new Error('Tournament session schema is not ready');
+      }
+      if (env.PZD_STAGING_TOURNAMENT_ENABLED === 'true') {
+        const provenanceKey = env.PZD_F2B_PROVENANCE_KEY ?? '';
+        const rankedHandler = await createStagingTournamentHandler(pool, privateKey, config.keyId!, provenanceKey);
+        tournamentHandler = async (req, res) => {
+          let identity;
+          try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
+          catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
+          const active = await pool.query(
+            'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
+            [identity.subject],
+          );
+          if (!active.rowCount) {
+            res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
+          }
+          await rankedHandler(req, res);
+        };
       }
       sessionHandler = async (req, res) => {
         const method = req.method ?? 'GET';
@@ -113,6 +132,14 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
     const server = createServer((req, res) => {
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
+      if (tournamentHandler && req.url?.startsWith('/v1/tournament/')) {
+        void tournamentHandler(req, res).catch(() => {
+          if (!res.headersSent) {
+            res.writeHead(503); res.end(JSON.stringify({ error: 'TOURNAMENT_UNAVAILABLE' }));
+          } else { res.destroy(); }
+        });
+        return;
+      }
       if (sessionHandler && req.url === '/v1/tournament/session') {
         void sessionHandler(req, res).catch(() => {
           if (!res.headersSent) {
