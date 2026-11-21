@@ -21,6 +21,8 @@ export interface PinnedJwtIssuerConfig {
   /** One or more deployment-controlled RSA public keys (rotation). */
   readonly keys: readonly PinnedJwtKey[];
   readonly maxTokenAgeSeconds: number;
+  /** Only for isolated staging guest verifier; default remains reject. */
+  readonly allowStagingGuestClaims?: boolean;
 }
 
 export interface VerifiedJwtIdentity {
@@ -84,6 +86,7 @@ export class PinnedRs256JwtVerifier {
   readonly #issuer: string;
   readonly #audience: string;
   readonly #maxAge: number;
+  readonly #allowStagingGuestClaims: boolean;
 
   constructor(config: PinnedJwtIssuerConfig) {
     if (
@@ -119,6 +122,10 @@ export class PinnedRs256JwtVerifier {
     this.#issuer = config.issuer;
     this.#audience = config.audience;
     this.#maxAge = config.maxTokenAgeSeconds;
+    this.#allowStagingGuestClaims = config.allowStagingGuestClaims === true &&
+      config.issuer === 'https://staging.puzzle-duel.app' &&
+      config.audience === 'puzzle-duel-api';
+    if (config.allowStagingGuestClaims && !this.#allowStagingGuestClaims) throw new JwtVerificationError();
   }
 
   verifyAuthorizationHeader(
@@ -183,7 +190,7 @@ export class PinnedRs256JwtVerifier {
       claims.sub.length < 1 ||
       claims.sub.length > 255 ||
       /^\s*$/.test(claims.sub) ||
-      isGuestClaims(claims) ||
+      (this.#allowStagingGuestClaims ? claims.account_type !== 'guest' : isGuestClaims(claims)) ||
       !positiveInt(claims.exp) ||
       !positiveInt(claims.iat) ||
       claims.exp <= nowSeconds ||
