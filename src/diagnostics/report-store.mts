@@ -52,6 +52,15 @@ export class DiagnosticReportStore {
       events.push(Object.freeze({ ...e }));
     }
     const now = this.now();
+    // Bound the lightweight per-player rate limiter as well as report storage.
+    for (const [id, last] of this.lastByPlayer) {
+      if (now - last >= 60_000) this.lastByPlayer.delete(id);
+    }
+    while (this.lastByPlayer.size >= 1000 && !this.lastByPlayer.has(playerId)) {
+      const oldest = this.lastByPlayer.keys().next().value;
+      if (oldest === undefined) break;
+      this.lastByPlayer.delete(oldest);
+    }
     const previous = this.lastByPlayer.get(playerId);
     if (previous !== undefined && now - previous < 60_000) {
       return { ok: false, status: 429, error: 'RATE_LIMITED' };
