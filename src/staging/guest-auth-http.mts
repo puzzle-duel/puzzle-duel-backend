@@ -8,6 +8,9 @@ export interface GuestAuthGateway {
 }
 
 export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
+  // Defense in depth; production deployment also requires a shared proxy
+  // limiter because this in-memory limit is per process.
+  const attempts = new Map<string, { count: number; resetAt: number }>();
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const path = req.url?.split('?')[0];
     if (!['/v1/auth/guest', '/v1/auth/refresh', '/v1/auth/logout'].includes(path ?? '')) return false;
@@ -28,6 +31,22 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
       return true;
     }
     try {
+      const peer = req.socket.remoteAddress ?? 'unknown';
+      const now = Date.now();
+      if (attempts.size > 10000) {
+        for (const [key, entry] of attempts) {
+          if (entry.resetAt <= now) attempts.delete(key);
+        }
+      }
+      const prior = attempts.get(peer);
+      const entry = prior && prior.resetAt > now
+        ? prior : { count: 0, resetAt: now + 60000 };
+      entry.count++;
+      attempts.set(peer, entry);
+      if (entry.count > 30 || attempts.size > 10000) {
+        reply(429, { error: 'RATE_LIMITED' });
+        return true;
+      }
       if (!req.headers['content-type']?.startsWith('application/json')) {
         reply(415, { error: 'UNSUPPORTED_MEDIA_TYPE' });
         return true;
