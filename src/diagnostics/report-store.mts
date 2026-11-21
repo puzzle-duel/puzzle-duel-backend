@@ -4,7 +4,10 @@ import { randomUUID } from 'node:crypto';
 export class DiagnosticReportStore {
   private readonly reports = new Map<string, { expiresAt: number; events: readonly unknown[] }>();
   private readonly lastByPlayer = new Map<string, number>();
-  constructor(private readonly now: () => number = Date.now) {}
+  private readonly now: () => number;
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
 
   submit(playerId: string, payload: unknown):
     | { ok: true; reportId: string }
