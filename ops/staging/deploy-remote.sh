@@ -3,14 +3,14 @@
 set -euo pipefail
 sha="${1:?commit sha required}"
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid commit SHA" >&2; exit 2; }
-base="$HOME/pzd-staging"
+base="/home/pzd-staging/pzd-staging"
 releases="$base/releases"
 current="$base/current"
-archive="$HOME/pzd-staging-release.tgz"
+archive="/home/pzd-staging/pzd-staging-release.tgz"
 [[ -d "$base" && -d "$releases" && -f "$archive" ]] || { echo "PZD staging host not provisioned" >&2; exit 3; }
 [[ ! -L "$base" ]] || { echo "staging base must not be symlink" >&2; exit 3; }
 [[ -f "$base/APPROVED_FOR_CD" ]] || { echo "owner staging CD gate missing" >&2; exit 3; }
-previous="$(readlink "$current" || true)"
+previous="$(readlink -f "$current" || true)"
 release="$releases/$sha"
 if [[ -e "$release" ]]; then
   echo "release already exists; refusing to overwrite" >&2
@@ -29,7 +29,7 @@ mv -Tf "$base/current.next" "$current"
 # Dedicated pre-provisioned user service. No privileged systemctl, Forest Dash or Caddy mutations.
 if ! sudo -n /usr/bin/systemctl restart pzd-staging.service; then
   echo "staging service restart failed" >&2
-  if [[ -n "$previous" && "$previous" == "$releases/"* ]]; then
+  if [[ -n "$previous" && -d "$previous" && "$previous" == "$releases/"* ]]; then
     ln -sfn "$previous" "$base/current.next"
     mv -Tf "$base/current.next" "$current"
     sudo -n /usr/bin/systemctl restart pzd-staging.service || true
