@@ -63,7 +63,7 @@ jobs:
       - name: Package immutable source
         run: |
           set -euo pipefail
-          tar -czf /tmp/pzd-staging-release.tgz --exclude=.git --exclude=.github --exclude=node_modules --exclude=ops/staging/deploy-remote.sh src migrations package.json package-lock.json tsconfig.json
+          tar -czf /tmp/pzd-staging-release.tgz --exclude=.git --exclude=.github --exclude=node_modules --exclude=ops/staging/deploy-remote.sh src docs/contracts/gameplay/v3/fixtures docs/tournament/uat-challenges/v4 migrations package.json package-lock.json tsconfig.json
       - name: Install pinned SSH host identity
         env:
           SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
