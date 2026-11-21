@@ -70,6 +70,20 @@ export class PostgresStagingGuestAuth {
     }
   }
 
+  async logout(refreshToken: string, now = new Date()): Promise<void> {
+    if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) {
+      throw new GuestCredentialError('INVALID_REFRESH');
+    }
+    const result = await this.pool.query(
+      `UPDATE pzd_guest_families SET revoked_at = $2
+       WHERE family_id = (
+         SELECT family_id FROM pzd_guest_refresh WHERE token_digest = $1
+       ) AND revoked_at IS NULL`,
+      [digest(refreshToken), now],
+    );
+    if (result.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
+  }
+
   async refresh(refreshToken: string, now = new Date()) {
     if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) throw new GuestCredentialError('INVALID_REFRESH');
     const tokenDigest = digest(refreshToken);
