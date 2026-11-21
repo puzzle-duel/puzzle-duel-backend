@@ -51,6 +51,7 @@ export class PostgresStagingGuestAuth {
     try {
       await client.query('BEGIN');
       await client.query('INSERT INTO pzd_guest_accounts (player_id) VALUES ($1)', [playerId]);
+      await client.query('INSERT INTO pzd_guest_families (family_id, player_id) VALUES ($1, $2)', [familyId, playerId]);
       await client.query(
         `INSERT INTO pzd_guest_refresh (family_id, player_id, token_digest, expires_at)
          VALUES ($1, $2, $3, $4)`,
