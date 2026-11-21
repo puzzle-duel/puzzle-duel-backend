@@ -1,0 +1,39 @@
+name: PZD-49 Backend staging CD readiness
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/staging-cd.yml"
+      - "ops/staging/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pzd-staging-readiness-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  readiness:
+    name: Validate isolated staging deployment plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Check Node and TypeScript
+        run: |
+          set -euo pipefail
+          node --version
+          npm ci
+          npm run typecheck
+      - name: Verify deployment isolation and fail-closed gate
+        run: |
+          set -euo pipefail
+          test -f ops/staging/README.md
+          ! grep -Eq 'systemctl restart forest-dash|/var/www/forest-dash|\$\{\{ secrets\.ORACLE_SSH_PRIVATE_KEY \}\}' .github/workflows/staging-cd.yml
+          echo "READINESS_ONLY: no SSH, migrations, host changes or deployment"
