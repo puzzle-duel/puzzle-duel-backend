@@ -99,7 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           opts=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=10)
-          dest="/home/pzd-staging/pzd-staging/migration-runs/$GITHUB_RUN_ID"
+          attempt_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          dest="/home/pzd-staging/pzd-staging/migration-runs/$attempt_id"
           # Unique immutable workspace; refuses retry of same run ID.
           ssh "${opts[@]}" "$USER@$HOST" \
             "umask 077; mkdir -p /home/pzd-staging/pzd-staging/migration-runs; mkdir '$dest'; chmod 700 '$dest'"
@@ -108,5 +109,5 @@ jobs:
           scp "${opts[@]}" "migrations/staging/$MIGRATION.verify.sql" \
             "$USER@$HOST:$dest/$MIGRATION.verify.sql"
           ssh "${opts[@]}" "$USER@$HOST" \
-            "bash '$dest/runner.sh' '$MODE' '$MIGRATION' '$SHA' '$GITHUB_RUN_ID'" \
+            "bash '$dest/runner.sh' '$MODE' '$MIGRATION' '$SHA' '$attempt_id'" \
             | tee -a "$GITHUB_STEP_SUMMARY"
