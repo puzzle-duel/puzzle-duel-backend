@@ -17,10 +17,15 @@ const MAX_FILES = 100;
 const MAX_FILE_BYTES = 20 * 1024;
 
 export class StagingDiagnosticReportFiles {
+  private readonly directory: string;
+  private readonly now: () => number;
   constructor(
-    private readonly directory = STAGING_DIAGNOSTIC_REPORT_DIR,
-    private readonly now: () => number = Date.now,
-  ) {}
+    directory = STAGING_DIAGNOSTIC_REPORT_DIR,
+    now: () => number = Date.now,
+  ) {
+    this.directory = directory;
+    this.now = now;
+  }
 
   save(reportId: string, events: readonly unknown[]): void {
     if (!UUID.test(reportId) || !Array.isArray(events) || events.length > 64) {
