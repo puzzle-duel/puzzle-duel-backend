@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createGuestAuthHttpHandler } from '../../src/staging/guest-auth-http.mts';
+import { createGuestAuthHttpHandler, guestRefreshDiagnosticReason } from '../../src/staging/guest-auth-http.mts';
 import { GuestCredentialError } from '../../src/staging/guest-auth-service.mts';
 
 test('guest auth HTTP contract: HTTPS, no client player identity, refresh and logout', async () => {
@@ -41,7 +41,11 @@ for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as c
       async refresh() { throw new GuestCredentialError(code); },
       async logout() { throw new GuestCredentialError(code); },
     });
-    const server = createServer((req, res) => { void handler(req, res); });
+    const observedReasons: (string | undefined)[] = [];
+    const server = createServer((req, res) => {
+      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      void handler(req, res);
+    });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
       const address = server.address();
@@ -52,7 +56,7 @@ for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as c
       });
       const refresh = await request('/v1/auth/refresh');
       assert.equal(refresh.status, 401);
-      assert.equal(refresh.headers.get('x-pzd-error-code'), code);
+      assert.equal(refresh.headers.get('x-pzd-error-code'), null);
       assert.deepEqual(await refresh.json(), { error: code });
       const logout = await request('/v1/auth/logout');
       assert.equal(logout.status, 401);
@@ -75,7 +79,11 @@ for (const [reason, code] of [
       async refresh() { throw new GuestCredentialError(code, reason); },
       async logout() { throw new GuestCredentialError(code, reason); },
     });
-    const server = createServer((req, res) => { void handler(req, res); });
+    const observedReasons: (string | undefined)[] = [];
+    const server = createServer((req, res) => {
+      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      void handler(req, res);
+    });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     try {
       const address = server.address();
@@ -86,8 +94,9 @@ for (const [reason, code] of [
       });
       const refresh = await post('/v1/auth/refresh');
       assert.equal(refresh.status, 401);
-      assert.equal(refresh.headers.get('x-pzd-error-code'), reason);
+      assert.equal(refresh.headers.get('x-pzd-error-code'), null);
       assert.deepEqual(await refresh.json(), { error: 'INVALID_REFRESH' });
+      assert.equal(observedReasons[0], reason);
       const logout = await post('/v1/auth/logout');
       assert.equal(logout.headers.get('x-pzd-error-code'), null);
     } finally {
