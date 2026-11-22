@@ -151,6 +151,12 @@ export class PostgresStagingGuestAuth {
               expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
             };
           }
+          // The exact previous request already succeeded, but its successor
+          // has since been spent. A delayed duplicate is stale, not new proof
+          // of theft. Reject without revealing successor or revoking family.
+          if (successor.rowCount === 1 && successor.rows[0]?.used_at !== null) {
+            throw new GuestCredentialError('INVALID_REFRESH');
+          }
         }
         await client.query('UPDATE pzd_guest_families SET revoked_at = $2 WHERE family_id = $1', [familyId, now]);
         await client.query('COMMIT');
