@@ -411,7 +411,8 @@ jobs:
             ]) console.log('| ' + label + ' | ' + (ok ? 'PRESENT' : 'MISSING') + ' |');
             if (Object.values(ready).every(v => v === true)) {
               const summary = await db.query(
-                "SELECT COUNT(*)::int AS revoked_families, " +
+                // Correct mapping is verified_identity.subject -> guest_families.player_id.
+              "SELECT COUNT(*)::int AS revoked_families, " +
                 "COUNT(*) FILTER (WHERE EXISTS (" +
                 " SELECT 1 FROM public.tournament_verified_identity i " +
                 " JOIN public.tournament_daily_claim c ON c.player_id=i.player_id::text " +
