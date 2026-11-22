@@ -15,7 +15,7 @@ FORBIDDEN = re.compile(
     re.I,
 )
 DOLLAR = re.compile(r"\$[A-Za-z_][A-Za-z_0-9]*\$|\$\$")
- 
+
 def validate(sql: str) -> None:
     # Blanking quoted text preserves newlines for psql command detection.
     output = []
