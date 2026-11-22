@@ -21,6 +21,12 @@ test('rejects ranked gate and automatic migrations', () => {
   assert.throws(() => stagingConfig({ ...base, PZD_RANKED_HTTP_ENABLED: 'true' }));
   assert.throws(() => stagingConfig({ ...base, PZD_UAT_APPLY_MIGRATIONS: '1' }));
 });
+test('recovery cannot opt in without authenticated staging tournament', () => {
+  assert.throws(() => stagingConfig({
+    ...base, PZD_STAGING_SAME_DEVICE_RECOVERY_ENABLED: 'true',
+  }), /Staging recovery requires staging tournament/);
+});
+
 test('rejects missing runtime profile', () => {
   assert.throws(() => stagingConfig({ ...base, PZD_RUNTIME_PROFILE: undefined }));
 });
