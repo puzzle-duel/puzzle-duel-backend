@@ -9,6 +9,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DiagnosticReportStore } from '../../diagnostics/report-store.mts';
+import { safeDiagnosticErrorCode } from '../../diagnostics/http-correlation.mts';
 import {
   JwtVerificationError,
   type PinnedRs256JwtVerifier,
@@ -44,10 +45,18 @@ const MAX_BODY = 16_384;
 
 function send(res: ServerResponse, status: number, data: unknown): void {
   const body = status === 204 ? '' : JSON.stringify(data);
+  // The response already contains this protocol error in JSON. Mirror only
+  // known safe codes into a staging-only header for request-id correlation.
+  // Never log or expose raw response data, tokens, or arbitrary errors.
+  const code = process.env.PZD_RUNTIME_PROFILE === 'staging' && status >= 400 &&
+    data !== null && typeof data === 'object' && !Array.isArray(data)
+    ? safeDiagnosticErrorCode((data as { error?: unknown }).error)
+    : undefined;
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
+    ...(code ? { 'x-pzd-error-code': code } : {}),
   });
   res.end(body);
 }
