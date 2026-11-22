@@ -174,8 +174,8 @@ jobs:
       - name: Inspect staging guest credential health (read-only, privacy-thresholded)
         shell: bash
         env:
-          HOST: \${{ secrets.PZD_STAGING_HOST }}
-          USER: \${{ secrets.PZD_STAGING_USER }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
         run: |
           set -euo pipefail
           # Queries run on Oracle, not the public GitHub runner. Only coarse
