@@ -104,7 +104,7 @@ export class PostgresStagingGuestAuth {
     if (result.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
   }
 
-  async refresh(refreshToken: string, now = new Date(), rotationId?: string) {
+  async refresh(refreshToken: string, rotationId?: string, now = new Date()) {
     if (rotationId !== undefined && !ROTATION_ID.test(rotationId)) {
       throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_FORMAT_INVALID');
     }
