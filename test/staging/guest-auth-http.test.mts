@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createGuestAuthHttpHandler } from '../../src/staging/guest-auth-http.mts';
+import { GuestCredentialError } from '../../src/staging/guest-auth-service.mts';
 
 test('guest auth HTTP contract: HTTPS, no client player identity, refresh and logout', async () => {
   const calls: string[] = [];
@@ -32,3 +33,32 @@ test('guest auth HTTP contract: HTTPS, no client player identity, refresh and lo
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 });
+
+for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as const) {
+  test(`guest refresh ${code} exposes only fixed diagnostic header`, async () => {
+    const handler = createGuestAuthHttpHandler({
+      async create() { throw new Error('unexpected create'); },
+      async refresh() { throw new GuestCredentialError(code); },
+      async logout() { throw new GuestCredentialError(code); },
+    });
+    const server = createServer((req, res) => { void handler(req, res); });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const request = (path: string) => fetch(`http://127.0.0.1:${address.port}${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+        body: JSON.stringify({ refreshToken: 'secret-not-for-logs' }),
+      });
+      const refresh = await request('/v1/auth/refresh');
+      assert.equal(refresh.status, 401);
+      assert.equal(refresh.headers.get('x-pzd-error-code'), code);
+      assert.deepEqual(await refresh.json(), { error: code });
+      const logout = await request('/v1/auth/logout');
+      assert.equal(logout.status, 401);
+      assert.equal(logout.headers.get('x-pzd-error-code'), null);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+}
