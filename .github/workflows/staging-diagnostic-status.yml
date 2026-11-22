@@ -168,10 +168,10 @@ jobs:
           print()
           audit = [r[3] for r in records if r[2] == 'guest_auth' and
                    r[3] in ('REFRESH_REPLAY', 'GUEST_LOGOUT_REVOKED')]
-          print('| Fixed origin | Count |')
+          print('| Fixed origin | Coarse count |')
           print('| --- | ---: |')
           for key, count in sorted(collections.Counter(audit).items()):
-              print('| %s | %d |' % (key, count))
+              print('| %s | %s |' % (key, 'suppressed (1–4)' if count < 5 else '5–19' if count < 20 else '20+'))
           if not audit:
               print('No classified revocation origin events in retained metadata.')
           if target:
