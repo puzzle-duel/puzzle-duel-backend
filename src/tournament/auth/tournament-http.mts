@@ -458,7 +458,7 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         let authoritativeBoard: Record<string, unknown> | null = null;
         if (validated.command.commandType === 'move') {
           try {
-            const latest = await loadOwnedBoard(deps, session.playerId, seriesId);
+            const latest = await loadOwnedBoard(deps, session.playerId, seriesId, session.sessionId);
             if (latest.status === 200 &&
                 latest.body.boardRevision === decision.boardRevision &&
                 latest.body.stateHash === decision.stateHash) {
@@ -486,7 +486,7 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
 
       const boardMatch = /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/board$/.exec(path);
       if (boardMatch && method === 'GET') {
-        await sendOwnedBoard(res, deps, session.playerId, boardMatch[1]!);
+        await sendOwnedBoard(res, deps, session.playerId, boardMatch[1]!, session.sessionId);
         return;
       }
       const resultsMatch = /^\/v1\/tournament\/series\/([0-9a-f-]{36})\/results$/.exec(path);
@@ -545,6 +545,7 @@ async function loadOwnedBoard(
   deps: TournamentHttpDeps,
   playerId: string,
   seriesId: string,
+  sessionId: string,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const claim = await deps.claims.getClaimForPlayer(playerId, seriesId);
   if (!claim) {
@@ -588,6 +589,7 @@ async function loadOwnedBoard(
     stateHash: String(row.state_hash),
     state: row.state_json,
     writerGeneration: writer.writerGeneration,
+    writerSessionMatches: writer.sessionId === sessionId && writer.playerId === playerId,
     idleDeadlineAtMs: fence.idleDeadlineAt.getTime(),
     serverNowMs: Number(now.rows[0]?.ms),
     awaitAdvance: fence.status === 'AWAIT_ADVANCE',
@@ -600,8 +602,9 @@ async function sendOwnedBoard(
   deps: TournamentHttpDeps,
   playerId: string,
   seriesId: string,
+  sessionId: string,
 ): Promise<void> {
-  const result = await loadOwnedBoard(deps, playerId, seriesId);
+  const result = await loadOwnedBoard(deps, playerId, seriesId, sessionId);
   send(res, result.status, result.body);
 }
 
