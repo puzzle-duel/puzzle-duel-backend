@@ -63,14 +63,14 @@ class FakePool {
   }
 }
 
-test('same rotation ID retries lost response without revoking family or changing successor', async () => {
+test('same rotation ID survives 02:59 to 03:02 Istanbul UTC cutover without revocation', async () => {
   const pool = new FakePool();
   const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test', true);
-  const t = new Date('2026-11-22T00:02:00.000Z');
+  const t = new Date('2026-11-21T23:59:30.000Z');
   const initial = await guest.create(t);
   const rotationId = '0123456789abcdef0123456789abcdef';
   const first = await guest.refresh(initial.refreshToken, rotationId, t);
-  const again = await guest.refresh(initial.refreshToken, rotationId, new Date(t.getTime() + 30_000));
+  const again = await guest.refresh(initial.refreshToken, rotationId, new Date(t.getTime() + 3 * 60_000));
   assert.equal(again.refreshToken, first.refreshToken);
   assert.equal(pool.families.size, 1);
   assert.equal([...pool.families.values()][0]!.revoked_at, null);
