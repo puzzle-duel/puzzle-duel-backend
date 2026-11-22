@@ -552,4 +552,71 @@ describe('PZD-40 authenticated tournament HTTP E2E (candidate OpenAPI)', () => {
       await env.close();
     }
   });
+  it('accepted move includes owned post-admission board matching GET /board', async () => {
+    const env = await boot();
+    try {
+      const auth = env.bearer('pzd50-latency-authorized');
+      const open = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST', headers: { authorization: auth },
+      });
+      assert.equal(open.status, 201);
+      const session = (await open.json()) as { sessionSecret: string };
+      const headers = {
+        authorization: auth,
+        'x-pzd-session-secret': session.sessionSecret,
+        'content-type': 'application/json',
+      };
+      const claimResult = await fetch(`${env.base}/v1/tournament/claims/daily`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ originalUtcDate: env.today }),
+      });
+      assert.equal(claimResult.status, 201);
+      const claim = (await claimResult.json()) as { seriesId: string };
+      const boardBeforeResponse = await fetch(
+        `${env.base}/v1/tournament/series/${claim.seriesId}/board`, { headers });
+      assert.equal(boardBeforeResponse.status, 200);
+      const before = (await boardBeforeResponse.json()) as {
+        boardRevision: number; writerGeneration: number;
+      };
+      const accepted = await fetch(
+        `${env.base}/v1/tournament/series/${claim.seriesId}/commands`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            commandType: 'move',
+            idempotencyKey: 'pzd50-embedded-board',
+            move: {
+              offerIndex: 0,
+              tap: [0, 0],
+              expectedBoardRevision: before.boardRevision,
+              writerGeneration: before.writerGeneration,
+            },
+          }),
+        },
+      );
+      assert.equal(accepted.status, 200);
+      const response = (await accepted.json()) as {
+        boardRevision: number; stateHash: string;
+        authoritativeBoard?: {
+          seriesId: string; boardRevision: number; stateHash: string;
+          state: unknown;
+        };
+      };
+      assert.ok(response.authoritativeBoard, 'server should include a verified, owned post-move board');
+      assert.equal(response.authoritativeBoard.seriesId, claim.seriesId);
+      assert.equal(response.authoritativeBoard.boardRevision, response.boardRevision);
+      assert.equal(response.authoritativeBoard.stateHash, response.stateHash);
+      assert.deepEqual(response.authoritativeBoard.state, fixture.expected.finalState);
+      const fetched = await fetch(
+        `${env.base}/v1/tournament/series/${claim.seriesId}/board`, { headers });
+      assert.equal(fetched.status, 200);
+      const after = (await fetched.json()) as { stateHash: string; boardRevision: number };
+      assert.equal(response.authoritativeBoard.stateHash, after.stateHash);
+      assert.equal(response.authoritativeBoard.boardRevision, after.boardRevision);
+    } finally {
+      await env.close();
+    }
+  });
+
 });
