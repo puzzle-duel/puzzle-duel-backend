@@ -11,7 +11,7 @@ run_id="${4:-}"
 [[ "$mode" == plan || "$mode" == apply ]] || { echo "BLOCKED: invalid mode"; exit 2; }
 [[ "$migration" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] || { echo "BLOCKED: invalid migration ID"; exit 2; }
 [[ "$expected_sha" =~ ^[a-f0-9]{64}$ ]] || { echo "BLOCKED: invalid checksum"; exit 2; }
-[[ "$run_id" =~ ^[0-9]+$ ]] || { echo "BLOCKED: invalid run ID"; exit 2; }
+[[ "$run_id" =~ ^[0-9]+-[0-9]+$ ]] || { echo "BLOCKED: invalid run ID"; exit 2; }
 
 base=/home/pzd-staging/pzd-staging
 incoming="$base/migration-runs/$run_id"
