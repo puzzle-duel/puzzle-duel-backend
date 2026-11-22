@@ -1,0 +1,113 @@
+name: PZD Reusable Staging Database Migration
+
+# Manual only. Never run in a PR, on push, from main, or in production.
+# The dedicated pzd-staging-migrations environment MUST have required reviewers
+# and be restricted to version/0.0.2. Never use the deployment environment here.
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: "Reviewed migration ID (example: 0001_same_device_writer_recovery)"
+        required: true
+        type: string
+      mode:
+        description: "Plan is read-only; apply requires separate explicit confirmation"
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+      confirmation:
+        description: "For apply only: APPLY pzd_staging <migration-id>"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pzd-staging-database-migrations
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Safely plan or apply approved staging migration
+    if: github.ref == 'refs/heads/version/0.0.2' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: pzd-staging-migrations
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Validate reviewed source and explicit operator intent
+        id: approved
+        shell: bash
+        env:
+          MIGRATION: ${{ inputs.migration }}
+          MODE: ${{ inputs.mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$MIGRATION" =~ ^[0-9]{4}_[a-z0-9_]+$ ]] || { echo "::error::Invalid migration ID"; exit 2; }
+          [[ "$MODE" == plan || "$MODE" == apply ]] || { echo "::error::Invalid mode"; exit 2; }
+          [[ "$MODE" != apply || "$CONFIRMATION" == "APPLY pzd_staging $MIGRATION" ]] || {
+            echo "::error::Apply requires exact confirmation and environment approval"
+            exit 2
+          }
+          [[ "$MODE" != plan || -z "$CONFIRMATION" ]] || {
+            echo "::error::Plan requires empty confirmation"
+            exit 2
+          }
+          SQL="migrations/staging/$MIGRATION.sql"
+          VERIFY="migrations/staging/$MIGRATION.verify.sql"
+          test -f "$SQL" && test -f "$VERIFY" || { echo "::error::Reviewed migration pair missing"; exit 2; }
+          test ! -L "$SQL" && test ! -L "$VERIFY" || { echo "::error::Symlinks refused"; exit 2; }
+          printf 'sha=%s\n' "$(sha256sum "$SQL" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          printf 'mode=%s\n' "$MODE" >> "$GITHUB_OUTPUT"
+          printf 'migration=%s\n' "$MIGRATION" >> "$GITHUB_OUTPUT"
+
+      - name: Configure dedicated migration SSH identity and pinned known-hosts
+        env:
+          SSH_KEY: ${{ secrets.PZD_MIGRATION_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_MIGRATION_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_MIGRATION_HOST }}
+          USER: ${{ secrets.PZD_MIGRATION_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER" || {
+            echo "::error::Dedicated migration environment is not provisioned"
+            exit 2
+          }
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Execute remote validated plan or migration (private backup stays on Oracle)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_MIGRATION_HOST }}
+          USER: ${{ secrets.PZD_MIGRATION_USER }}
+          MIGRATION: ${{ steps.approved.outputs.migration }}
+          MODE: ${{ steps.approved.outputs.mode }}
+          SHA: ${{ steps.approved.outputs.sha }}
+        run: |
+          set -euo pipefail
+          opts=(-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=10)
+          attempt_id="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          dest="/home/pzd-staging/pzd-staging/migration-runs/$attempt_id"
+          # Unique immutable workspace; refuses retry of same run ID.
+          ssh "${opts[@]}" "$USER@$HOST" \
+            "umask 077; mkdir -p /home/pzd-staging/pzd-staging/migration-runs; mkdir '$dest'; chmod 700 '$dest'"
+          scp "${opts[@]}" ops/staging/migrations/run.sh "$USER@$HOST:$dest/runner.sh"
+          scp "${opts[@]}" "migrations/staging/$MIGRATION.sql" "$USER@$HOST:$dest/$MIGRATION.sql"
+          scp "${opts[@]}" "migrations/staging/$MIGRATION.verify.sql" \
+            "$USER@$HOST:$dest/$MIGRATION.verify.sql"
+          ssh "${opts[@]}" "$USER@$HOST" \
+            "bash '$dest/runner.sh' '$MODE' '$MIGRATION' '$SHA' '$attempt_id'" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

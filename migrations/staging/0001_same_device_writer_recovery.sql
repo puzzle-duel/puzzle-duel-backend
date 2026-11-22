@@ -2,7 +2,8 @@
 -- NEVER run on pzd_ingress, production or other databases.
 -- Prerequisite: guest/session PostgreSQL schema is provisioned and verified.
 -- No backfill or mutation of existing claim, writer or session rows.
-BEGIN;
+-- Executed inside the reusable migration runner's single transaction;
+-- DO NOT add BEGIN/COMMIT, dynamic SQL or data-bearing output.
 DO $guard$
 BEGIN
   IF current_database() <> 'pzd_staging' THEN
@@ -54,4 +55,3 @@ REVOKE ALL ON public.tournament_device_credential FROM PUBLIC;
 REVOKE ALL ON public.tournament_writer_recovery_challenge FROM PUBLIC;
 GRANT SELECT, INSERT, UPDATE ON public.tournament_device_credential TO pzd_app_runtime;
 GRANT SELECT, INSERT, UPDATE ON public.tournament_writer_recovery_challenge TO pzd_app_runtime;
-COMMIT;
