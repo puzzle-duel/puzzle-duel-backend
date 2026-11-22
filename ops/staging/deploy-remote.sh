@@ -36,7 +36,9 @@ if ! sudo -n /usr/bin/systemctl restart pzd-staging.service; then
   exit 5
 fi
 # Must be a dedicated loopback-only health endpoint implemented by the staging runtime.
-if ! curl --fail --silent --show-error --max-time 5 --retry 5 --retry-delay 2 http://127.0.0.1:8787/healthz >/dev/null; then
+# Node may need a few seconds after systemd reports the restart successful.
+# Retry connection-refused as well as HTTP 5xx before declaring the release unhealthy.
+if ! curl --fail --silent --show-error --max-time 5 --retry 12 --retry-delay 2 --retry-connrefused http://127.0.0.1:8787/healthz >/dev/null; then
   echo "staging health check failed; rolling back application release" >&2
   if [[ -n "$previous" && "$previous" == "$releases/"* ]]; then
     ln -sfn "$previous" "$base/current.next"
