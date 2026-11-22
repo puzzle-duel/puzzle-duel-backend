@@ -102,3 +102,14 @@ test('legacy refresh has no retry backdoor and replay revokes', async () => {
   await assert.rejects(() => guest.refresh(initial.refreshToken, undefined, now),
     (e: unknown) => e instanceof GuestCredentialError && e.code === 'REFRESH_REPLAY');
 });
+
+test('client retry flag cannot rotate when staging server feature is off', async () => {
+  const pool = new FakePool();
+  const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test', false);
+  const now = new Date('2026-11-22T00:02:00.000Z');
+  const initial = await guest.create(now);
+  await assert.rejects(() => guest.refresh(initial.refreshToken,
+    '0123456789abcdef0123456789abcdef', now), /GUEST_RETRY_NOT_READY/);
+  assert.equal(pool.refreshes.size, 1);
+  assert.equal([...pool.families.values()][0]!.revoked_at, null);
+});
