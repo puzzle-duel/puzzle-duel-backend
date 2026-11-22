@@ -169,3 +169,90 @@ jobs:
           print('A not_recorded code on older entries cannot be recovered retroactively.')
           print('Diagnostic report contents are not available through this Action.')
           PY
+
+
+      - name: Inspect staging guest credential health (read-only, privacy-thresholded)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          # Queries run on Oracle, not the public GitHub runner. Only coarse
+          # status buckets cross the SSH boundary; no row-level data is emitted.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+
+          // This is a public repository: never print the DSN, SQL row values,
+          // tokens, hashes, player IDs, family IDs, request payloads or errors.
+          const bucket = (value) => {
+            const n = Number(value);
+            if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid aggregate');
+            if (n === 0) return 'none';
+            if (n < 5) return 'suppressed (1–4)';
+            if (n < 20) return '5–19';
+            return '20+';
+          };
+          let db;
+          try {
+            const env = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+            const line = env.split(/\r?\n/).find(x => /^PZD_STAGING_DATABASE_URL=/.test(x));
+            if (!line) throw new Error('Missing config');
+            let value = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+            if ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+            const url = new URL(value);
+            if (!['127.0.0.1', 'localhost'].includes(url.hostname) ||
+                url.pathname !== '/pzd_staging') throw new Error('Wrong database');
+            db = new pg.Client({ connectionString: value, connectionTimeoutMillis: 3000 });
+            await db.connect();
+            await db.query('BEGIN TRANSACTION READ ONLY');
+            await db.query("SET LOCAL statement_timeout = '3000ms'");
+            const schema = await db.query(
+              "SELECT to_regclass('public.pzd_guest_families') IS NOT NULL AS families, " +
+              "to_regclass('public.pzd_guest_refresh') IS NOT NULL AS refresh"
+            );
+            if (!schema.rows[0]?.families || !schema.rows[0]?.refresh) throw new Error('Schema missing');
+            const families = await db.query(
+              "SELECT COUNT(*)::int AS total, " +
+              "COUNT(*) FILTER (WHERE revoked_at IS NULL)::int AS active, " +
+              "COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::int AS revoked " +
+              "FROM public.pzd_guest_families"
+            );
+            const refresh = await db.query(
+              "SELECT COUNT(*)::int AS total, " +
+              "COUNT(*) FILTER (WHERE r.used_at IS NOT NULL)::int AS used, " +
+              "COUNT(*) FILTER (WHERE r.used_at IS NULL AND r.expires_at <= now())::int AS expired_unused, " +
+              "COUNT(*) FILTER (WHERE r.used_at IS NULL AND r.expires_at > now() AND f.revoked_at IS NULL)::int AS usable, " +
+              "COUNT(*) FILTER (WHERE f.revoked_at IS NOT NULL)::int AS revoked_family_tokens " +
+              "FROM public.pzd_guest_refresh r JOIN public.pzd_guest_families f USING (family_id)"
+            );
+            await db.query('ROLLBACK');
+            const f = families.rows[0], t = refresh.rows[0];
+            console.log('### Staging guest credential DB health (aggregate only)');
+            console.log();
+            console.log('Read-only transaction; values below five are suppressed. No account or token can be identified.');
+            console.log('| Category | Coarse count |');
+            console.log('| --- | --- |');
+            for (const [label, count] of [
+              ['Guest families', f.total],
+              ['Active families', f.active],
+              ['Revoked families', f.revoked],
+              ['Refresh rows', t.total],
+              ['Used refresh rows', t.used],
+              ['Expired unused refresh rows', t.expired_unused],
+              ['Currently usable refresh rows', t.usable],
+              ['Refresh rows in revoked families', t.revoked_family_tokens],
+            ]) console.log('| ' + label + ' | ' + bucket(count) + ' |');
+            console.log();
+            console.log('This describes staging-wide state; it cannot prove which state belongs to the iPhone.');
+          } catch {
+            console.log('Guest credential DB inspection unavailable (details withheld).');
+            process.exitCode = 1;
+          } finally {
+            if (db) await db.end().catch(() => {});
+          }
+          JS
