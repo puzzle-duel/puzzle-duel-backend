@@ -158,7 +158,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             operation: req.url?.split('?', 1)[0] === '/v1/diagnostics/reports'
               ? 'diagnostic_report' : 'tournament_http',
             route: diagnosticRoute(req.url),
-            errorCode: guestRefreshDiagnosticReason(res) ?? res.getHeader('x-pzd-error-code'),
+            errorCode: guestAuthDiagnosticReason(res) ?? res.getHeader('x-pzd-error-code'),
             method: req.method ?? 'OTHER',
             status: res.statusCode,
             durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
