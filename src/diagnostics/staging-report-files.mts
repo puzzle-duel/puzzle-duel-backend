@@ -4,8 +4,8 @@
  */
 import { constants } from 'node:fs';
 import {
-  closeSync, existsSync, fstatSync, lstatSync, mkdirSync, openSync,
-  readFileSync, readdirSync, renameSync, unlinkSync, writeSync, fsyncSync,
+  closeSync, existsSync, lstatSync, mkdirSync, openSync,
+  readdirSync, unlinkSync, writeSync, fsyncSync,
 } from 'node:fs';
 import { join } from 'node:path';
 
