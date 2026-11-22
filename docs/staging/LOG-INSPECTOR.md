@@ -2,7 +2,7 @@
 
 ## Access without Oracle SSH
 
-Open [PZD Staging Diagnostic Report Status](https://github.com/puzzle-duel/puzzle-duel-backend/actions/workflows/staging-diagnostic-status.yml), choose **Run workflow**, select branch **main**, and run it.
+Open [PZD Staging Diagnostic Report Status](https://github.com/puzzle-duel/puzzle-duel-backend/actions/workflows/staging-diagnostic-status.yml), choose **Run workflow**, select branch **version/0.0.2**, and run it. **Do not select main**: the protected `pzd-staging` environment only permits the release branch. The workflow file is present on `version/0.0.2`.
 
 The Action uses the existing protected `pzd-staging` GitHub environment and pinned staging SSH host identity. It reads `/home/pzd-staging/pzd-staging/http-diagnostics.log` and optional rotated `.1` on Oracle **without changing any files**. The backend remains bound to `127.0.0.1:8787` and Forest Dash is never touched.
 
@@ -24,6 +24,6 @@ This Action **cannot retrieve report event contents**: the current diagnostic re
 
 ## Limitations
 
-- The workflow uses credentials scoped to the GitHub environment `pzd-staging`. Branch restrictions or required approvals for that environment may prevent manual runs from `main`; in that case adjust environment access deliberately, rather than copy keys or reduce SSH verification.
+- The workflow uses credentials scoped to the GitHub environment `pzd-staging`. The environment **rejects main** (`Branch "main" is not allowed to deploy to pzd-staging`). Use **version/0.0.2** instead. The workflow was copied to that branch with a `[skip ci]` documentation/workflow-only commit to avoid starting the automatic backend CD. Do not broaden the environment's deployment branch restrictions.
 - If the server metadata file is absent or empty, the run may show zero diagnostic requests; this is not proof no reports were submitted historically.
 - The Action does not deploy, restart, migrate, rotate logs, or run when application code is pushed. Only a manual workflow dispatch starts it.
