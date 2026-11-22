@@ -69,13 +69,13 @@ test('same rotation ID retries lost response without revoking family or changing
   const t = new Date('2026-11-22T00:02:00.000Z');
   const initial = await guest.create(t);
   const rotationId = '0123456789abcdef0123456789abcdef';
-  const first = await guest.refresh(initial.refreshToken, t, rotationId);
-  const again = await guest.refresh(initial.refreshToken, new Date(t.getTime() + 30_000), rotationId);
+  const first = await guest.refresh(initial.refreshToken, rotationId, t);
+  const again = await guest.refresh(initial.refreshToken, rotationId, new Date(t.getTime() + 30_000));
   assert.equal(again.refreshToken, first.refreshToken);
   assert.equal(pool.families.size, 1);
-  assert.equal([...pool.families.values()][0].revoked_at, null);
+  assert.equal([...pool.families.values()][0]!.revoked_at, null);
   assert.equal(pool.refreshes.size, 2);
-  const next = await guest.refresh(first.refreshToken, new Date(t.getTime() + 60_000), 'fedcba9876543210fedcba9876543210');
+  const next = await guest.refresh(first.refreshToken, 'fedcba9876543210fedcba9876543210', new Date(t.getTime() + 60_000));
   assert.notEqual(next.refreshToken, first.refreshToken);
 });
 
@@ -85,11 +85,11 @@ test('wrong rotation ID replays and revokes; expired retry window fails closed',
     const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test', true);
     const t = new Date('2026-11-22T00:02:00.000Z');
     const initial = await guest.create(t);
-    await guest.refresh(initial.refreshToken, t, '0123456789abcdef0123456789abcdef');
+    await guest.refresh(initial.refreshToken, '0123456789abcdef0123456789abcdef', t);
     const id = delta === 30_000 ? 'fedcba9876543210fedcba9876543210' : '0123456789abcdef0123456789abcdef';
-    await assert.rejects(() => guest.refresh(initial.refreshToken, new Date(t.getTime() + delta), id),
+    await assert.rejects(() => guest.refresh(initial.refreshToken, id, new Date(t.getTime() + delta)),
       (e: unknown) => e instanceof GuestCredentialError && e.code === 'REFRESH_REPLAY');
-    assert.ok([...pool.families.values()][0].revoked_at);
+    assert.ok([...pool.families.values()][0]!.revoked_at);
   }
 });
 
@@ -98,7 +98,7 @@ test('legacy refresh has no retry backdoor and replay revokes', async () => {
   const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test');
   const now = new Date('2026-11-22T00:02:00.000Z');
   const initial = await guest.create(now);
-  await guest.refresh(initial.refreshToken, now);
-  await assert.rejects(() => guest.refresh(initial.refreshToken, now),
+  await guest.refresh(initial.refreshToken, undefined, now);
+  await assert.rejects(() => guest.refresh(initial.refreshToken, undefined, now),
     (e: unknown) => e instanceof GuestCredentialError && e.code === 'REFRESH_REPLAY');
 });
