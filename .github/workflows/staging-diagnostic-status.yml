@@ -390,6 +390,7 @@ jobs:
               "to_regclass('public.tournament_daily_claim') IS NOT NULL AS claim, " +
               "to_regclass('public.tournament_device_credential') IS NOT NULL AS device, " +
               "to_regclass('public.tournament_series_writer') IS NOT NULL AS writer, " +
+              "to_regclass('public.tournament_verified_identity') IS NOT NULL AS identity, " +
               "EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND " +
               " table_name='tournament_series_writer' AND column_name='original_device_credential_id') AS anchor"
             );
@@ -397,6 +398,7 @@ jobs:
             console.log('### Revoked guest account recovery evidence (staging, read-only)');
             console.log();
             console.log('Only coarse aggregate results are printed; this cannot attribute any row to an iPhone.');
+            console.log('The guest subject is joined via verified_identity; internal player UUIDs are different namespaces.');
             console.log('| Schema gate | Result |');
             console.log('| --- | --- |');
             for (const [label, ok] of [
@@ -404,23 +406,31 @@ jobs:
               ['Daily claim', ready.claim],
               ['Registered device key', ready.device],
               ['Writer table', ready.writer],
+              ['Verified identity mapping', ready.identity],
               ['Original writer credential anchor', ready.anchor]
             ]) console.log('| ' + label + ' | ' + (ok ? 'PRESENT' : 'MISSING') + ' |');
             if (Object.values(ready).every(v => v === true)) {
               const summary = await db.query(
-                "SELECT COUNT(*)::int AS revoked_families, " +
+                // Correct mapping is verified_identity.subject -> guest_families.player_id.
+              "SELECT COUNT(*)::int AS revoked_families, " +
                 "COUNT(*) FILTER (WHERE EXISTS (" +
-                " SELECT 1 FROM public.tournament_daily_claim c WHERE c.player_id=f.player_id::text" +
+                " SELECT 1 FROM public.tournament_verified_identity i " +
+                " JOIN public.tournament_daily_claim c ON c.player_id=i.player_id::text " +
+                " WHERE i.subject=f.player_id::text AND i.issuer='https://staging.puzzle-duel.app'" +
                 "))::int AS with_claim, " +
                 "COUNT(*) FILTER (WHERE EXISTS (" +
-                " SELECT 1 FROM public.tournament_device_credential d " +
-                " WHERE d.player_id=f.player_id AND d.revoked_at_ms IS NULL" +
+                " SELECT 1 FROM public.tournament_verified_identity i " +
+                " JOIN public.tournament_device_credential d ON d.player_id=i.player_id " +
+                " WHERE i.subject=f.player_id::text AND i.issuer='https://staging.puzzle-duel.app' " +
+                " AND d.revoked_at_ms IS NULL" +
                 "))::int AS with_registered_key, " +
                 "COUNT(*) FILTER (WHERE EXISTS (" +
-                " SELECT 1 FROM public.tournament_daily_claim c " +
+                " SELECT 1 FROM public.tournament_verified_identity i " +
+                " JOIN public.tournament_daily_claim c ON c.player_id=i.player_id::text " +
                 " JOIN public.tournament_series_writer w ON w.series_key=c.series_id::text " +
                 " JOIN public.tournament_device_credential d ON d.credential_id=w.original_device_credential_id " +
-                " WHERE c.player_id=f.player_id::text AND d.player_id=f.player_id AND d.revoked_at_ms IS NULL" +
+                " WHERE i.subject=f.player_id::text AND i.issuer='https://staging.puzzle-duel.app' " +
+                " AND d.player_id=i.player_id AND d.revoked_at_ms IS NULL" +
                 "))::int AS with_original_writer_key " +
                 "FROM public.pzd_guest_families f WHERE f.revoked_at IS NOT NULL"
               );
