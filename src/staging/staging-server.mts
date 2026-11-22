@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import { buildHttpDiagnostic, diagnosticRoute, resolveRequestId } from '../diagnostics/http-correlation.mts';
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { appendFileSync, lstatSync, readFileSync, renameSync, statSync } from 'node:fs';
-import { createGuestAuthHttpHandler, guestRefreshDiagnosticReason } from './guest-auth-http.mts';
+import { createGuestAuthHttpHandler, guestAuthDiagnosticReason } from './guest-auth-http.mts';
 import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
