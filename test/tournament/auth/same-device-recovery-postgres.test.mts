@@ -247,11 +247,49 @@ test('active writer or expired idle deadline prevents recovery',async()=>{
   } finally {await env.cleanup();}
 });
 
+test('new recovery-enabled claim requires device key and rolls back atomically', async () => {
+  const env = await setup();
+  try {
+    const original = await env.open('player-no-key');
+    const denied = await env.claims.claimAndBootstrap({
+      session: original, originalUtcDate: new Date().toISOString().slice(0, 10),
+    });
+    assert.deepEqual(denied, { ok: false, reason: 'BOOTSTRAP_FAILED' });
+    for (const table of [
+      'tournament_daily_claim', 'tournament_series_writer',
+      'series_fence_state', 'authoritative_game_snapshot',
+    ]) {
+      const rows = await env.pool.query(`SELECT COUNT(*)::int AS n FROM ${table}`);
+      assert.equal(rows.rows[0].n, 0, table);
+    }
+    const key = keypair();
+    await register(env, original, key);
+    const accepted = await env.claims.claimAndBootstrap({
+      session: original, originalUtcDate: new Date().toISOString().slice(0, 10),
+    });
+    assert.equal(accepted.ok, true);
+    const writer = await env.pool.query(
+      'SELECT original_device_credential_id FROM tournament_series_writer',
+    );
+    assert.notEqual(writer.rows[0]?.original_device_credential_id, null);
+  } finally { await env.cleanup(); }
+});
+
 test('pre-existing claims cannot acquire a retroactive device anchor',async()=>{
   const env=await setup();
   try {
     const original=await env.open('player-a');
-    const seriesId=await firstClaim(env,original);
+    // Simulate a claim made BEFORE recovery was activated: old claims keep
+    // their NULL anchor and must never be retroactively upgraded.
+    const legacy = new AtomicDailyClaimBootstrap(env.pool, manifest(), {
+      anchorOriginalDevice: false,
+    });
+    const originalClaim = await legacy.claimAndBootstrap({
+      session: original, originalUtcDate: new Date().toISOString().slice(0, 10),
+    });
+    assert.equal(originalClaim.ok, true);
+    if (!originalClaim.ok) throw new Error('legacy claim failed');
+    const seriesId = originalClaim.claim.seriesId;
     const key=keypair(),fresh=await env.open('player-a');
     await register(env,fresh,key);
     const retry=await env.claims.claimAndBootstrap({

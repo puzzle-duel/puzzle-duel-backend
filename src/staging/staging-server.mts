@@ -28,6 +28,10 @@ export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
   if (env.PZD_STAGING_TOURNAMENT_ENABLED === 'true' && env.PZD_STAGING_GUEST_AUTH_ENABLED !== 'true') {
     throw new Error('Staging tournament requires guest authentication');
   }
+  if (env.PZD_STAGING_SAME_DEVICE_RECOVERY_ENABLED === 'true' &&
+      env.PZD_STAGING_TOURNAMENT_ENABLED !== 'true') {
+    throw new Error('Staging recovery requires staging tournament');
+  }
   if (env.PZD_UAT_APPLY_MIGRATIONS === '1') throw new Error('Automatic migrations are forbidden');
   const host = env.PZD_STAGING_HOST ?? '127.0.0.1';
   if (host !== '127.0.0.1') throw new Error('Staging must bind to loopback only');

@@ -313,7 +313,7 @@ export class AtomicDailyClaimBootstrap {
       if (this.#anchorOriginalDevice) {
         // Only the ORIGINAL immutable claim may pin its registered device key.
         // Existing claims never backfill an anchor on a later login.
-        await client.query(
+        const pinned = await client.query(
           `UPDATE tournament_series_writer w SET original_device_credential_id=s.device_credential_id
            FROM tournament_auth_session s
            WHERE w.series_key=$1 AND w.player_id=$2 AND w.session_id=$3
@@ -322,6 +322,10 @@ export class AtomicDailyClaimBootstrap {
              AND w.original_device_credential_id IS NULL`,
           [claim.seriesId, args.session.playerId, args.session.sessionId],
         );
+        // No new ranked claim with an unanchored writer while recovery is
+        // explicitly enabled. Roll back the entire first-claim transaction.
+        // Existing claims never reach this block and are never backfilled.
+        if (pinned.rowCount !== 1) throw new Error('ORIGINAL_DEVICE_KEY_REQUIRED');
       }
 
       await client.query('COMMIT');
