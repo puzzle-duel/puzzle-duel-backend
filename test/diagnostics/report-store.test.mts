@@ -48,3 +48,19 @@ test('accepts allowlisted writer rejection reason, rejects arbitrary report erro
     { ...event, errorCode: 'SENSITIVE_UNRECOGNIZED_CODE' },
   ] }), { ok: false, status: 400, error: 'MALFORMED_REQUEST' });
 });
+
+test('persistence failures deny 201 and allow safe retry', () => {
+  let fail = true;
+  const persisted: { reportId: string; events: readonly unknown[] }[] = [];
+  const store = new DiagnosticReportStore(() => 100_000, (reportId, events) => {
+    if (fail) throw new Error('disk diagnostic private detail');
+    persisted.push({ reportId, events });
+  });
+  assert.deepEqual(store.submit('player-a', { events: [event] }),
+    { ok: false, status: 503, error: 'DIAGNOSTICS_UNAVAILABLE' });
+  fail = false;
+  const next = store.submit('player-a', { events: [event] });
+  assert.equal(next.ok, true);
+  assert.equal(persisted.length, 1);
+  assert.deepEqual(persisted[0]?.events, [event]);
+});

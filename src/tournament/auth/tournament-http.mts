@@ -117,6 +117,8 @@ export interface TournamentHttpDeps {
   rankings?: F2CRankingService;
   /** Server HMAC key. Never read from the request. */
   provenanceKey?: string;
+  /** Staging-only durable persistence hook for validated diagnostic events. */
+  diagnosticReportPersist?: (reportId: string, events: readonly unknown[]) => void;
   rankedHttpGate?: RankedHttpGateConfig;
   /**
    * Optional injected runtime env that may ONLY tighten denial (P0-FG02).
@@ -131,7 +133,7 @@ type RateBucket = { count: number; resetAt: number };
 
 export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
   const buckets = new Map<string, RateBucket>();
-  const diagnosticReports = new DiagnosticReportStore();
+  const diagnosticReports = new DiagnosticReportStore(Date.now, deps.diagnosticReportPersist);
   const rate = deps.rateLimit ?? { maxPerWindow: 120, windowMs: 60_000 };
 
   function checkRate(playerId: string): boolean {
@@ -208,14 +210,8 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         try { payload = JSON.parse(raw.toString('utf8')); }
         catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
         const result = diagnosticReports.submit(session.playerId, payload);
-        if (result.ok) {
-          // Lite: validated, allowlisted reports are visible in server stdout.
-          // No player identity, tokens, raw request data or persistence.
-          console.log(JSON.stringify({
-            type: 'diagnostic_report', reportId: result.reportId,
-            events: (payload as { events: unknown[] }).events,
-          }));
-        }
+        // Never print diagnostic events to stdout/journald. The staging-only
+        // injected sink stores already-validated events in a private file.
         send(res, result.ok ? 201 : result.status,
           result.ok ? { reportId: result.reportId } : { error: result.error });
         return;
