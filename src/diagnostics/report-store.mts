@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { safeDiagnosticErrorCode } from './http-correlation.mts';
 
 /** Staging-only, in-memory diagnostic reports. Never stores tokens or raw errors. */
 export class DiagnosticReportStore {
@@ -36,7 +37,7 @@ export class DiagnosticReportStore {
       const keys = Object.keys(e);
       if (keys.some((key) => ![
         'timestamp', 'level', 'code', 'operation', 'requestId', 'traceId',
-        'httpMethod', 'httpStatus', 'durationMs',
+        'httpMethod', 'httpStatus', 'durationMs', 'errorCode',
       ].includes(key)) ||
         typeof e.timestamp !== 'string' || !/^\d{4}-\d\d-\d\dT/.test(e.timestamp) ||
         !Number.isFinite(Date.parse(e.timestamp)) ||
@@ -46,7 +47,8 @@ export class DiagnosticReportStore {
         (e.traceId !== undefined && (typeof e.traceId !== 'string' || !/^[a-f0-9]{32}$/.test(e.traceId))) ||
         (e.httpMethod !== undefined && !allowedMethods.has(String(e.httpMethod))) ||
         (e.httpStatus !== undefined && (!Number.isInteger(e.httpStatus) || Number(e.httpStatus) < 100 || Number(e.httpStatus) > 599)) ||
-        (e.durationMs !== undefined && (!Number.isSafeInteger(e.durationMs) || Number(e.durationMs) < 0))) {
+        (e.durationMs !== undefined && (!Number.isSafeInteger(e.durationMs) || Number(e.durationMs) < 0)) ||
+        (e.errorCode !== undefined && safeDiagnosticErrorCode(e.errorCode) === undefined)) {
         return { ok: false, status: 400, error: 'MALFORMED_REQUEST' };
       }
       events.push(Object.freeze({ ...e }));

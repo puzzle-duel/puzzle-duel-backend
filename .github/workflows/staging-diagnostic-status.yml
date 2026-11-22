@@ -5,6 +5,11 @@ name: PZD Staging Diagnostic Report Status
 # and job summaries are public too. Expose only aggregate HTTP status metadata.
 on:
   workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'Optional 32-character hex request ID from Crashlytics (no token or report payload)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -42,79 +47,112 @@ jobs:
         env:
           HOST: ${{ secrets.PZD_STAGING_HOST }}
           USER: ${{ secrets.PZD_STAGING_USER }}
+          TARGET_REQUEST_ID: ${{ inputs.request_id }}
         run: |
           set -euo pipefail
+          if [[ -n "$TARGET_REQUEST_ID" && ! "$TARGET_REQUEST_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo 'request_id must be a lowercase 32-character hex value' >&2
+            exit 2
+          fi
           # Execute only a constant, read-only Python script on Oracle. Never
           # stream raw logs to GitHub's public runners or Action output.
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            -o ConnectTimeout=10 "$USER@$HOST" 'python3 -' <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+            -o ConnectTimeout=10 "$USER@$HOST" "python3 - '$TARGET_REQUEST_ID'" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
           import collections
           import json
           import os
+          import re
           import stat
           import sys
 
+          target = sys.argv[1] if len(sys.argv) > 1 else ''
+          if target and not re.fullmatch(r'[0-9a-f]{32}', target):
+              sys.exit('Invalid request ID')
           base = '/home/pzd-staging/pzd-staging/http-diagnostics.log'
-          reports = []
+          # Reject arbitrary metadata from the log. The repository/run is public.
+          routes = {
+              'tournament_session', 'tournament_manifest', 'tournament_command',
+              'tournament_series', 'tournament_other', 'leaderboard_daily',
+              'leaderboard_weekly', 'guest_auth', 'diagnostic_report', 'other',
+          }
+          errors = {
+              'UNAUTHENTICATED', 'NOT_FOUND', 'MALFORMED_REQUEST', 'RATE_LIMITED',
+              'AUTH_UNAVAILABLE', 'TOURNAMENT_UNAVAILABLE', 'STALE_WRITER',
+              'WRITER_NOT_AUTHORIZED', 'WRITER_STILL_ACTIVE', 'SERIES_NOT_OWNED',
+              'SERIES_STATE_INCONSISTENT', 'SERIES_STATE_CORRUPT', 'SERIES_TERMINAL',
+              'RECOVERY_NOT_ELIGIBLE', 'RECOVERY_PROOF_INVALID', 'PLAYER_MISMATCH',
+              'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
+          }
+          records = []
           for path in (base + '.1', base):
               try:
                   info = os.lstat(path)
                   if not stat.S_ISREG(info.st_mode):
-                      print('Diagnostic log is not a regular file')
-                      sys.exit(1)
+                      sys.exit('Diagnostic log is not a regular file')
                   with open(path, encoding='utf-8') as handle:
                       for line in handle:
                           try:
-                              item = json.loads(line)
+                              entry = json.loads(line)
                           except (ValueError, TypeError):
                               continue
-                          if not isinstance(item, dict):
+                          if not isinstance(entry, dict):
                               continue
-                          if item.get('operation') != 'diagnostic_report':
+                          status = entry.get('status')
+                          if type(status) is not int or not 100 <= status <= 599:
                               continue
-                          status = item.get('status')
-                          if type(status) is not int or not (100 <= status <= 599):
+                          op = entry.get('operation')
+                          if op not in ('diagnostic_report', 'tournament_http'):
                               continue
-                          reports.append(status)
+                          route = entry.get('route')
+                          route = route if isinstance(route, str) and route in routes else 'unknown'
+                          error = entry.get('errorCode')
+                          error = error if isinstance(error, str) and error in errors else 'not_recorded'
+                          rid = entry.get('requestId')
+                          records.append((status, op, route, error, rid))
               except FileNotFoundError:
                   continue
               except (OSError, UnicodeError):
-                  print('Unable to read staging diagnostic metadata')
-                  sys.exit(1)
+                  sys.exit('Unable to read staging diagnostic metadata')
 
-          recent = reports[-50:]
-          counts = collections.Counter(recent)
-          print('## Puzzle Duel staging diagnostic submissions')
+          print('## Puzzle Duel staging HTTP diagnostics')
           print()
-          print('This repository is public. Only sanitized HTTP status aggregates are shown.')
-          print('No raw reports, player IDs, request IDs, IPs, tokens, or exact timestamps are printed.')
+          print('Public-safe: only HTTP status, static route category and allowlisted error code.')
+          print('No raw report events, player IDs, request IDs, IPs, tokens or timestamps are printed.')
           print()
-          print('Recent diagnostic requests inspected: **%d** (maximum 50)' % len(recent))
-          if not recent:
+          reports = [r for r in records if r[1] == 'diagnostic_report'][-50:]
+          counts = collections.Counter(r[0] for r in reports)
+          print('Diagnostic submissions inspected: **%d** (maximum 50)' % len(reports))
+          print()
+          print('| HTTP status | Count |')
+          print('| --- | ---: |')
+          for status, count in sorted(counts.items()):
+              print('| %d | %d |' % (status, count))
+          print()
+          if reports:
+              print('Latest diagnostic statuses: `%s`' %
+                    ' → '.join(str(r[0]) for r in reports[-15:]))
+          print()
+          failures = [r for r in records if r[1] == 'tournament_http' and r[0] >= 400][-20:]
+          print('### Recent tournament failures (maximum 20)')
+          print()
+          print('| HTTP | Route | Safe backend error code |')
+          print('| --- | --- | --- |')
+          for status, _, route, error, _ in failures:
+              print('| %d | %s | %s |' % (status, route, error))
+          if not failures:
+              print('No tournament failures in retained metadata log files.')
+          if target:
               print()
-              print('No diagnostic report requests found in the current and rotated metadata logs.')
-              print('Logs may have rotated, been cleared, or not yet been written.')
-              sys.exit(0)
+              print('### Requested correlation')
+              found = next((r for r in reversed(records) if r[4] == target), None)
+              if found:
+                  print('Request ID matched in retained Oracle metadata.')
+                  print('HTTP: **%d**; route: **%s**; safe error code: **%s**' %
+                        (found[0], found[2], found[3]))
+              else:
+                  print('No matching request ID in current or rotated Oracle metadata logs.')
+                  print('The request may predate retention or the logging enhancement.')
           print()
-          print('| HTTP status | Count | Explanation |')
-          print('| --- | ---: | --- |')
-          labels = {
-              200: 'Successful', 201: 'Successful', 202: 'Accepted',
-              400: 'Malformed report', 401: 'Unauthenticated',
-              403: 'Forbidden', 404: 'Route missing',
-              409: 'Conflict', 429: 'Rate limited',
-              500: 'Internal error', 502: 'Bad gateway',
-              503: 'Service unavailable',
-          }
-          for code in sorted(counts):
-              print('| %d | %d | %s |' % (
-                  code, counts[code], labels.get(code, 'Other HTTP response')))
-          print()
-          print('Latest request status: **HTTP %d**' % recent[-1])
-          print()
-          print('Latest 15 statuses (oldest to newest): `%s`' %
-                ' → '.join(map(str, recent[-15:])))
-          print()
-          print('Note: This log contains request metadata, NOT report event contents.')
-          print('The staging report store is in-memory and currently has no read API.')
+          print('A not_recorded code on older entries cannot be recovered retroactively.')
+          print('Diagnostic report contents are not available through this Action.')
           PY

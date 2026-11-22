@@ -34,3 +34,17 @@ test('rejects arbitrary fields and secrets, never accepts raw payloads', () => {
       { ok: false, status: 400, error: 'MALFORMED_REQUEST' });
   }
 });
+
+test('accepts allowlisted writer rejection reason, rejects arbitrary report error codes', () => {
+  const store = new DiagnosticReportStore();
+  assert.equal(store.submit('player-a', { events: [
+    { ...event, code: 'writerBindingRejected', httpStatus: 409,
+      errorCode: 'WRITER_NOT_AUTHORIZED' },
+  ] }).ok, true);
+  assert.deepEqual(store.submit('player-b', { events: [
+    { ...event, errorCode: 'Bearer secret' },
+  ] }), { ok: false, status: 400, error: 'MALFORMED_REQUEST' });
+  assert.deepEqual(store.submit('player-c', { events: [
+    { ...event, errorCode: 'SENSITIVE_UNRECOGNIZED_CODE' },
+  ] }), { ok: false, status: 400, error: 'MALFORMED_REQUEST' });
+});
