@@ -2,12 +2,12 @@ name: PZD-49 Backend staging CD
 
 on:
   pull_request:
-    branches: [main, "version/0.0.1"]
+    branches: [main, "version/**"]
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
   push:
-    branches: [main, "version/0.0.1"]
+    branches: ["version/**"]
     paths:
       - ".github/workflows/staging-cd.yml"
       - "ops/staging/**"
@@ -52,9 +52,8 @@ jobs:
   deploy:
     name: Deploy to isolated Puzzle Duel staging
     needs: verify
-    # Immutable version branch only; require two independently provisioned gates.
-    # A green verification job alone must never authorize a live host mutation.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/version/0.0.1' && vars.PZD_STAGING_CD_ENABLED == 'true' && vars.PZD_STAGING_RELEASE_001_APPROVED == 'true'
+    # Every version/* push deploys automatically after verification; no manual approval marker or repo variable gate.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/version/')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: pzd-staging
