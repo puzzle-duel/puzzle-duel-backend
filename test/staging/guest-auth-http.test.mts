@@ -62,3 +62,36 @@ for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as c
     }
   });
 }
+
+for (const [reason, code] of [
+  ['TOKEN_FORMAT_INVALID', 'INVALID_REFRESH'],
+  ['TOKEN_NOT_FOUND', 'INVALID_REFRESH'],
+  ['FAMILY_REVOKED', 'INVALID_REFRESH'],
+  ['FAMILY_MISSING', 'INVALID_REFRESH'],
+] as const) {
+  test(`guest refresh diagnostic ${reason} retains generic API response`, async () => {
+    const handler = createGuestAuthHttpHandler({
+      async create() { throw new Error('unexpected'); },
+      async refresh() { throw new GuestCredentialError(code, reason); },
+      async logout() { throw new GuestCredentialError(code, reason); },
+    });
+    const server = createServer((req, res) => { void handler(req, res); });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('No port');
+      const post = (path: string) => fetch(`http://127.0.0.1:${address.port}${path}`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+        body: JSON.stringify({ refreshToken: 'not-a-secret' }),
+      });
+      const refresh = await post('/v1/auth/refresh');
+      assert.equal(refresh.status, 401);
+      assert.equal(refresh.headers.get('x-pzd-error-code'), reason);
+      assert.deepEqual(await refresh.json(), { error: 'INVALID_REFRESH' });
+      const logout = await post('/v1/auth/logout');
+      assert.equal(logout.headers.get('x-pzd-error-code'), null);
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+}

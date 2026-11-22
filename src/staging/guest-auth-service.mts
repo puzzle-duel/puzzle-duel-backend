@@ -12,9 +12,12 @@ const REFRESH_DAYS = 30;
 
 export class GuestCredentialError extends Error {
   readonly code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED';
-  constructor(code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED') {
+  readonly diagnosticReason?: 'TOKEN_FORMAT_INVALID' | 'TOKEN_NOT_FOUND' | 'FAMILY_REVOKED' | 'FAMILY_MISSING';
+  constructor(code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED',
+    diagnosticReason?: 'TOKEN_FORMAT_INVALID' | 'TOKEN_NOT_FOUND' | 'FAMILY_REVOKED' | 'FAMILY_MISSING') {
     super(code);
     this.code = code;
+    this.diagnosticReason = diagnosticReason;
   }
 }
 
@@ -89,7 +92,7 @@ export class PostgresStagingGuestAuth {
   }
 
   async refresh(refreshToken: string, now = new Date()) {
-    if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) throw new GuestCredentialError('INVALID_REFRESH');
+    if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_FORMAT_INVALID');
     const tokenDigest = digest(refreshToken);
     const client = await this.pool.connect();
     try {
@@ -99,9 +102,9 @@ export class PostgresStagingGuestAuth {
         'SELECT family_id FROM pzd_guest_refresh WHERE token_digest = $1', [tokenDigest],
       );
       const familyId = found.rows[0]?.family_id;
-      if (!familyId) throw new GuestCredentialError('INVALID_REFRESH');
+      if (!familyId) throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_NOT_FOUND');
       const familyLock = await client.query('SELECT family_id FROM pzd_guest_families WHERE family_id = $1 FOR UPDATE', [familyId]);
-      if (familyLock.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
+      if (familyLock.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH', 'FAMILY_MISSING');
       const current = await client.query<{
         player_id: string; used_at: Date | null; revoked_at: Date | null; expires_at: Date;
       }>(
@@ -110,7 +113,8 @@ export class PostgresStagingGuestAuth {
          WHERE r.token_digest = $1 FOR UPDATE OF r`, [tokenDigest],
       );
       const row = current.rows[0];
-      if (!row || row.revoked_at) throw new GuestCredentialError('INVALID_REFRESH');
+      if (!row) throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_NOT_FOUND');
+      if (row.revoked_at) throw new GuestCredentialError('INVALID_REFRESH', 'FAMILY_REVOKED');
       if (row.used_at) {
         await client.query('UPDATE pzd_guest_families SET revoked_at = $2 WHERE family_id = $1', [familyId, now]);
         await client.query('COMMIT');
