@@ -1,0 +1,112 @@
+name: PZD Staging Writer Recovery DB Preflight
+
+# Public repository: only boolean readiness outcomes are printable.
+# This Action is READ-ONLY and does not change schema, sessions or writers.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    # Workflow definition is registered on main, but execution is staging-version only.
+    if: github.ref == 'refs/heads/version/0.0.2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pzd-staging
+    steps:
+      - name: Configure pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Check migration and legacy writer readiness (read-only, sanitized)
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+
+          const config = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+          const line = config.split(/\r?\n/).find(x => /^PZD_STAGING_DATABASE_URL=/.test(x));
+          if (!line) throw new Error('Staging DB configuration unavailable');
+          let value = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+          if ((value.startsWith('"') && value.endsWith('"')) ||
+              (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+          const url = new URL(value);
+          if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+            throw new Error('Refusing non-loopback database');
+          }
+          if (url.pathname !== '/pzd_staging') throw new Error('Refusing non-staging database');
+          const db = new pg.Client({ connectionString: value, connectionTimeoutMillis: 3000 });
+          try {
+            await db.connect();
+            await db.query('BEGIN READ ONLY');
+            const objects = await db.query(`
+              SELECT
+                (current_setting('server_version_num')::int BETWEEN 180000 AND 189999) AS pg18,
+                to_regclass('public.tournament_device_credential') IS NOT NULL AS credential_table,
+                to_regclass('public.tournament_writer_recovery_challenge') IS NOT NULL AS challenge_table,
+                EXISTS(SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='tournament_auth_session'
+                    AND column_name='device_credential_id') AS session_column,
+                EXISTS(SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='tournament_series_writer'
+                    AND column_name='original_device_credential_id') AS writer_column
+            `);
+            const checks = objects.rows[0];
+            const schemaReady = Object.values(checks).every(v => v === true);
+            let unanchored = 'not checked (schema missing)';
+            // This is a separate staging-only operator migration, not a
+            // general Stage F2 schema migration. Do not infer readiness from
+            // pzd_schema_migration history.
+            if (checks.writer_column) {
+              const r = await db.query(`
+                SELECT EXISTS(
+                  SELECT 1 FROM public.tournament_series_writer w
+                  JOIN public.tournament_daily_claim c ON c.series_id::text=w.series_key
+                  WHERE c.status IN ('ACTIVE', 'AWAIT_ADVANCE')
+                    AND w.original_device_credential_id IS NULL
+                ) AS present
+              `);
+              unanchored = r.rows[0].present ? 'YES — historical claims must remain fail-closed' : 'NO';
+            }
+            await db.query('ROLLBACK');
+            console.log('## Staging writer recovery readiness');
+            console.log();
+            console.log('Read-only checks. No credentials, tokens, IDs, claims or raw queries are printed.');
+            console.log();
+            console.log('| Check | Result |');
+            console.log('| --- | --- |');
+            console.log('| PostgreSQL 18 | ' + (checks.pg18 ? 'PASS' : 'BLOCKED') + ' |');
+            console.log('| Device credential table | ' + (checks.credential_table ? 'PRESENT' : 'MISSING') + ' |');
+            console.log('| Recovery challenge table | ' + (checks.challenge_table ? 'PRESENT' : 'MISSING') + ' |');
+            console.log('| Auth session credential column | ' + (checks.session_column ? 'PRESENT' : 'MISSING') + ' |');
+            console.log('| Original writer credential column | ' + (checks.writer_column ? 'PRESENT' : 'MISSING') + ' |');
+            console.log('| Active unanchored historical claims | ' + unanchored + ' |');
+            console.log();
+            console.log('**Activation gate:** ' + (schemaReady ? 'SCHEMA READY (UAT still required)' : 'BLOCKED — do not enable recovery yet'));
+          } catch (error) {
+            console.log('Recovery preflight could not complete; activation is BLOCKED.');
+            process.exitCode = 1;
+          } finally {
+            await db.end().catch(() => {});
+          }
+          JS
