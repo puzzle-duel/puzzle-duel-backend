@@ -105,6 +105,7 @@ jobs:
           ssh "${opts[@]}" "$USER@$HOST" \
             "umask 077; mkdir -p /home/pzd-staging/pzd-staging/migration-runs; mkdir '$dest'; chmod 700 '$dest'"
           scp "${opts[@]}" ops/staging/migrations/run.sh "$USER@$HOST:$dest/runner.sh"
+          scp "${opts[@]}" ops/staging/migrations/validate-sql.py "$USER@$HOST:$dest/validate-sql.py"
           scp "${opts[@]}" "migrations/staging/$MIGRATION.sql" "$USER@$HOST:$dest/$MIGRATION.sql"
           scp "${opts[@]}" "migrations/staging/$MIGRATION.verify.sql" \
             "$USER@$HOST:$dest/$MIGRATION.verify.sql"

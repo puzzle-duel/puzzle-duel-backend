@@ -19,12 +19,13 @@ backup_dir="$base/backups/db"
 services="$base/migration-services.conf"
 migration_file="$incoming/$migration.sql"
 verify_file="$incoming/$migration.verify.sql"
+validator="$incoming/validate-sql.py"
 private_log="$incoming/private-run.log"
 
 fail() { echo "BLOCKED: $1 (details remain on Oracle)"; exit 1; }
-[[ -d "$incoming" && ! -L "$incoming" && -f "$migration_file" && -f "$verify_file" ]] ||
+[[ -d "$incoming" && ! -L "$incoming" && -f "$migration_file" && -f "$verify_file" && -f "$validator" ]] ||
   fail "missing staged migration artifacts"
-[[ ! -L "$migration_file" && ! -L "$verify_file" ]] || fail "symlink migration rejected"
+[[ ! -L "$migration_file" && ! -L "$verify_file" && ! -L "$validator" ]] || fail "symlink migration rejected"
 [[ -f "$services" && ! -L "$services" ]] || fail "dedicated migration service config not provisioned"
 [[ "$(stat -c '%a' "$services")" == 600 ]] ||
   fail "migration service config must be mode 0600"
@@ -35,6 +36,7 @@ command -v pg_dump >/dev/null || fail "pg_dump unavailable"
 command -v pg_restore >/dev/null || fail "pg_restore unavailable"
 command -v flock >/dev/null || fail "flock unavailable"
 command -v sha256sum >/dev/null || fail "sha256sum unavailable"
+command -v python3 >/dev/null || fail "python3 unavailable"
 actual_sha="$(sha256sum "$migration_file" | cut -d' ' -f1)"
 [[ "$actual_sha" == "$expected_sha" ]] || fail "source checksum mismatch"
 chmod 600 "$migration_file" "$verify_file"
@@ -114,8 +116,9 @@ echo "On-host backup archive and checksum: CREATED and ARCHIVE LIST VALID"
 echo "Backup restore rehearsal: NOT_RUN (separate operator recovery gate)"
 
 # Transactions cover migration DDL AND checksum ledger together.
-# Migration SQL MUST NOT contain BEGIN/COMMIT or psql backslash commands.
-if grep -Eiq '^[[:space:]]*(BEGIN|COMMIT|ROLLBACK|\\)' "$migration_file"; then
+# Validate top-level SQL without falsely rejecting PL/pgSQL BEGIN blocks.
+# Keep the guard before constructing the transaction; never execute rejected SQL.
+if ! python3 "$validator" "$migration_file" >>"$private_log" 2>&1; then
   fail "migration controls its own transaction or contains psql meta-commands"
 fi
 transaction="$incoming/transaction.sql"
