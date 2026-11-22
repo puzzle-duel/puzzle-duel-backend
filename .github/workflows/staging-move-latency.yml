@@ -1,0 +1,128 @@
+name: PZD Staging Move Latency (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      report_id:
+        description: 'Log Gönder report UUID (NOT requestId)'
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pzd-staging
+    steps:
+      - name: Configure pinned staging SSH
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Correlate retained report events with backend HTTP latency
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+          REPORT_ID: ${{ inputs.report_id }}
+        run: |
+          set -euo pipefail
+          [[ "$REPORT_ID" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || exit 2
+          # Raw report contents remain on Oracle, never reach the PUBLIC runner.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" "python3 - '$REPORT_ID'" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import collections, json, os, re, stat, subprocess, sys
+          target = sys.argv[1]
+          if not re.fullmatch(r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', target):
+              sys.exit('Invalid report id')
+          def load_report():
+              try:
+                  p = subprocess.Popen(
+                      ['journalctl','--no-pager','-o','cat','-u','pzd-staging.service',
+                       '--since','12 hours ago'],
+                      stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                      text=True,errors='replace')
+              except OSError:
+                  return None
+              found = None
+              for line in p.stdout:
+                  if target not in line or '"diagnostic_report"' not in line:
+                      continue
+                  try: item=json.loads(line[line.find('{'):])
+                  except (ValueError,TypeError): continue
+                  if isinstance(item,dict) and item.get('type')=='diagnostic_report' and item.get('reportId')==target and isinstance(item.get('events'),list):
+                      found=item['events']
+              p.wait()
+              return found
+          def load_http():
+              results={}
+              base='/home/pzd-staging/pzd-staging/http-diagnostics.log'
+              for path in (base+'.1',base):
+                  try:
+                      info=os.lstat(path)
+                      if not stat.S_ISREG(info.st_mode):
+                          sys.exit('Unsafe diagnostic log')
+                      with open(path,encoding='utf-8') as fh:
+                          for line in fh:
+                              try: item=json.loads(line)
+                              except (ValueError,TypeError): continue
+                              if not isinstance(item,dict): continue
+                              rid=item.get('requestId')
+                              if isinstance(rid,str) and re.fullmatch(r'[0-9a-f]{32}',rid) and item.get('code')=='http_completed':
+                                  results[rid]=item
+                  except FileNotFoundError:
+                      continue
+              return results
+          def stats(values):
+              values=sorted(values)
+              if not values: return 'n=0'
+              median=values[len(values)//2] if len(values)%2 else (values[len(values)//2-1]+values[len(values)//2])/2
+              p95=values[max(0,(len(values)*95+99)//100-1)]
+              return 'n=%d p50=%dms p95=%dms max=%dms'%(
+                  len(values),round(median/10)*10,round(p95/10)*10,round(values[-1]/10)*10)
+          print('## Staging move latency (privacy-safe aggregate)')
+          events=load_report()
+          if events is None:
+              print('REPORT_NOT_AVAILABLE: no readable report in 12-hour service journal.')
+              print('Do not infer a latency cause without matched requests.')
+              sys.exit(0)
+          server=load_http()
+          phases=collections.defaultdict(dict)
+          pairs=collections.defaultdict(list)
+          for e in events:
+              if not isinstance(e,dict): continue
+              trace=e.get('traceId')
+              ms=e.get('durationMs')
+              if not(isinstance(trace,str) and re.fullmatch(r'[0-9a-f]{32}',trace) and type(ms)==int and ms>=0): continue
+              op=e.get('operation')
+              if isinstance(op,str) and op.startswith('move_'):
+                  phases[trace][op]=ms
+              if op!='tournament_http': continue
+              rid=e.get('requestId')
+              srv=server.get(rid)
+              if not srv or srv.get('route') not in ('tournament_command','tournament_series'): continue
+              srv_ms=srv.get('durationMs')
+              if type(srv_ms) not in (int,float) or srv_ms<0: continue
+              cat='POST command' if e.get('httpMethod')=='POST' else 'GET board' if e.get('httpMethod')=='GET' else None
+              if cat: pairs[cat].append((ms,srv_ms,ms-srv_ms))
+          print('Client events: %d; move traces: %d'%(len(events),len(phases)))
+          print('| Matched request | Client | Backend | Client - backend |')
+          print('| --- | --- | --- | --- |')
+          for cat in ('POST command','GET board'):
+              p=pairs[cat]
+              print('| %s | %s | %s | %s |'%(cat,stats([x[0] for x in p]),stats([x[1] for x in p]),stats([x[2] for x in p])))
+          print('| Tap checkpoint (cumulative) | Elapsed |')
+          print('| --- | --- |')
+          for phase in ('move_writer_checked','move_command_returned','move_board_reloaded','move_animation_arming','move_resolution_applied'):
+              print('| %s | %s |'%(phase,stats([v[phase] for v in phases.values() if phase in v])))
+          print('No IDs, tokens, bodies, timestamps or raw events exposed.')
+          PY
