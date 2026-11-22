@@ -592,7 +592,7 @@ async function loadOwnedBoard(
     serverNowMs: Number(now.rows[0]?.ms),
     awaitAdvance: fence.status === 'AWAIT_ADVANCE',
     resultsPublished: fence.resultsPublished,
-  });
+  } };
 }
 
 async function sendOwnedBoard(
