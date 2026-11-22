@@ -34,6 +34,9 @@ test('staging error reasons are exact allowlisted codes, never raw exception tex
   assert.equal(safeDiagnosticErrorCode('WRITER_NOT_AUTHORIZED'), 'WRITER_NOT_AUTHORIZED');
   assert.equal(safeDiagnosticErrorCode('STALE_WRITER'), 'STALE_WRITER');
   assert.equal(safeDiagnosticErrorCode('WRITER_STILL_ACTIVE'), 'WRITER_STILL_ACTIVE');
+  for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED']) {
+    assert.equal(safeDiagnosticErrorCode(code), code);
+  }
   for (const value of ['Bearer private', 'UNEXPECTED_RAW_EXCEPTION', {}, undefined, '']) {
     assert.equal(safeDiagnosticErrorCode(value), undefined);
   }
