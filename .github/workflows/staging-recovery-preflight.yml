@@ -4,10 +4,6 @@ name: PZD Staging Writer Recovery DB Preflight
 # This Action is READ-ONLY and does not change schema, sessions or writers.
 on:
   workflow_dispatch:
-  push:
-    branches: [version/0.0.2]
-    paths:
-      - ".github/workflows/staging-recovery-preflight.yml"
 
 permissions:
   contents: read
