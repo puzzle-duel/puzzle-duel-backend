@@ -22,7 +22,8 @@ test('GitHub environment setup requires a distinct approver and a verified branc
   assert.match(github,/required_reviewers/);
   assert.match(github,/deployment-branch-policies/);
   assert.match(github,/version\/0\.0\.2/);
-  assert.match(github,/\$\{reviewer,,\}/);
+  assert.match(github,/reviewer_lower/);
+  assert.doesNotMatch(github,/\$\{reviewer,,\}/);
   assert.match(github,/gh secret set PZD_MIGRATION_SSH_PRIVATE_KEY/);
   assert.match(github,/ssh-keygen -F/);
   assert.doesNotMatch(github,/ssh-keyscan/);
