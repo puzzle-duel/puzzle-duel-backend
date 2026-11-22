@@ -19,6 +19,8 @@ export interface DiagnosticHttpEvent {
   readonly code: 'http_completed';
   readonly requestId: string;
   readonly operation: string;
+  readonly route?: string;
+  readonly errorCode?: string;
   readonly method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'OTHER';
   readonly status: number | null;
   readonly durationMs: number;
@@ -27,9 +29,41 @@ export interface DiagnosticHttpEvent {
 
 const OPERATIONS = new Set(['tournament_http', 'diagnostic_report']);
 
+// These are fixed protocol identifiers, never free-form exception messages.
+const SAFE_ERROR_CODES = new Set([
+  'UNAUTHENTICATED', 'NOT_FOUND', 'MALFORMED_REQUEST', 'RATE_LIMITED',
+  'AUTH_UNAVAILABLE', 'TOURNAMENT_UNAVAILABLE', 'STALE_WRITER',
+  'WRITER_NOT_AUTHORIZED', 'WRITER_STILL_ACTIVE', 'SERIES_NOT_OWNED',
+  'SERIES_STATE_INCONSISTENT', 'SERIES_STATE_CORRUPT', 'SERIES_TERMINAL',
+  'RECOVERY_NOT_ELIGIBLE', 'RECOVERY_PROOF_INVALID', 'PLAYER_MISMATCH',
+  'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
+]);
+
+export function safeDiagnosticErrorCode(value: unknown): string | undefined {
+  return typeof value === 'string' && SAFE_ERROR_CODES.has(value) ? value : undefined;
+}
+
+/** Categorizes only static route patterns; no series/player/manifest IDs or query strings. */
+export function diagnosticRoute(url: string | undefined): string {
+  const path = url?.split('?', 1)[0] ?? '';
+  if (path === '/v1/diagnostics/reports') return 'diagnostic_report';
+  if (path === '/v1/tournament/session') return 'tournament_session';
+  if (path.includes('/leaderboards/daily')) return 'leaderboard_daily';
+  if (path.includes('/leaderboards/weekly')) return 'leaderboard_weekly';
+  if (path.includes('/manifests/')) return 'tournament_manifest';
+  if (path.includes('/series/') && /\/commands?(?:\/|$)/.test(path)) return 'tournament_command';
+  if (path.includes('/series/')) return 'tournament_series';
+  if (path.startsWith('/v1/tournament/')) return 'tournament_other';
+  if (path.startsWith('/v1/auth/')) return 'guest_auth';
+  return 'other';
+}
+
+
 export function buildHttpDiagnostic(input: {
   requestId: string;
   operation: string;
+  route?: string;
+  errorCode?: unknown;
   method: string;
   status?: number;
   durationMs: number;
@@ -49,6 +83,8 @@ export function buildHttpDiagnostic(input: {
     code: 'http_completed',
     requestId: input.requestId,
     operation: input.operation,
+    ...(input.route ? { route: input.route } : {}),
+    ...(safeDiagnosticErrorCode(input.errorCode) ? { errorCode: safeDiagnosticErrorCode(input.errorCode) } : {}),
     method,
     status,
     durationMs: Math.round(input.durationMs),
