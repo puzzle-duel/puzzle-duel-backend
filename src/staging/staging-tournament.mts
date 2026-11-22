@@ -10,6 +10,7 @@ import { PostgresSeriesWriterStore } from '../tournament/auth/series-writer-bind
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
 import { PostgresSameDeviceRecovery } from '../tournament/auth/postgres-same-device-recovery.mts';
 import { createTournamentHttpHandler } from '../tournament/auth/tournament-http.mts';
+import { StagingDiagnosticReportFiles } from '../diagnostics/staging-report-files.mts';
 import { AtomicDailyClaimBootstrap } from '../tournament/claims/atomic-claim-bootstrap.mts';
 import { resolveActiveSubgameOrdinal } from '../tournament/claims/active-ordinal.mts';
 import { SystemUtcClock } from '../tournament/ingress/clock.mts';
@@ -86,7 +87,9 @@ export async function createStagingTournamentHandler(pool: pg.Pool, privateKey: 
   uow.setSixGamePublisher(new F2BPublicationService(pool, {
     provenanceKey, manifests, enableUtcDailyManifests: true,
   }));
+  const diagnosticFiles = new StagingDiagnosticReportFiles();
   return createTournamentHttpHandler({
+    diagnosticReportPersist: (reportId, events) => diagnosticFiles.save(reportId, events),
     verifier, sessions, claims, writers, fence, pool, provenanceKey,
     ...(recovery ? { sameDeviceRecovery: recovery } : {}),
     rankings: new F2CRankingService(pool, { provenanceKey }),
