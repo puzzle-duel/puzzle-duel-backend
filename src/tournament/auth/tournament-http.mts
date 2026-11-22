@@ -450,6 +450,25 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
           });
           return;
         }
+        // Move admission remains committed and authoritative. Include an
+        // independently read, owned snapshot in the SAME response so clients
+        // don't have to wait for another network round-trip before animation.
+        // If the read fails or revision/hash differ, omit the snapshot and
+        // allow clients to use the unchanged GET /board recovery path.
+        let authoritativeBoard: Record<string, unknown> | null = null;
+        if (validated.command.commandType === 'move') {
+          try {
+            const latest = await loadOwnedBoard(deps, session.playerId, seriesId);
+            if (latest.status === 200 &&
+                latest.body.boardRevision === decision.boardRevision &&
+                latest.body.stateHash === decision.stateHash) {
+              authoritativeBoard = latest.body;
+            }
+          } catch {
+            // A committed command must never become a reported HTTP failure
+            // merely because a supplementary board read failed.
+          }
+        }
         send(res, 200, {
           decision: 'apply',
           boardRevision: decision.boardRevision,
@@ -460,6 +479,7 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
           awaitAdvance: decision.awaitAdvance,
           duplicateReplay: decision.duplicateReplay ?? false,
           admissionResult: decision.admissionResult ?? null,
+          ...(authoritativeBoard == null ? {} : { authoritativeBoard }),
         });
         return;
       }
@@ -520,24 +540,22 @@ function parsePageSize(value: string | null): number | null {
   return size;
 }
 
-async function sendOwnedBoard(
-  res: ServerResponse,
+async function loadOwnedBoard(
+
   deps: TournamentHttpDeps,
   playerId: string,
   seriesId: string,
-): Promise<void> {
+): Promise<{ status: number; body: Record<string, unknown> }> {
   const claim = await deps.claims.getClaimForPlayer(playerId, seriesId);
   if (!claim) {
-    send(res, 404, { error: 'SERIES_NOT_OWNED' });
-    return;
+    return { status: 404, body: { error: 'SERIES_NOT_OWNED' } };
   }
   let ordinal: number;
   try {
     ordinal = await resolveActiveSubgameOrdinal(deps.pool, seriesId, playerId);
   } catch (error) {
     if (error instanceof OrdinalIntegrityError) {
-      send(res, 409, { error: 'SERIES_STATE_INCONSISTENT' });
-      return;
+      return { status: 409, body: { error: 'SERIES_STATE_INCONSISTENT' } };
     }
     throw error;
   }
@@ -553,11 +571,10 @@ async function sendOwnedBoard(
     `SELECT floor(extract(epoch from clock_timestamp()) * 1000)::bigint AS ms`,
   );
   if (!snap.rowCount || !fence || !writer) {
-    send(res, 409, { error: 'SERIES_STATE_INCONSISTENT' });
-    return;
+    return { status: 409, body: { error: 'SERIES_STATE_INCONSISTENT' } };
   }
   const row = snap.rows[0]!;
-  send(res, 200, {
+  return { status: 200, body: {
     seriesId,
     ordinal,
     ordinalLabel: ORDINAL_LABEL[ordinal] ?? String(ordinal),
@@ -576,6 +593,16 @@ async function sendOwnedBoard(
     awaitAdvance: fence.status === 'AWAIT_ADVANCE',
     resultsPublished: fence.resultsPublished,
   });
+}
+
+async function sendOwnedBoard(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+  seriesId: string,
+): Promise<void> {
+  const result = await loadOwnedBoard(deps, playerId, seriesId);
+  send(res, result.status, result.body);
 }
 
 /**
