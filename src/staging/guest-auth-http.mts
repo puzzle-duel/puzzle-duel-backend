@@ -9,7 +9,7 @@ export function guestAuthDiagnosticReason(res: ServerResponse): string | undefin
 
 export interface GuestAuthGateway {
   create(): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
-  refresh(token: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
+  refresh(token: string, rotationId?: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   logout(token: string): Promise<void>;
 }
 
@@ -84,12 +84,16 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
         reply(201, await gateway.create());
         return true;
       }
-      if (Object.keys(data).length !== 1 || typeof data.refreshToken !== 'string') {
+      if (!(Object.keys(data).length === 1 || (path === '/v1/auth/refresh' &&
+          Object.keys(data).length === 2 && typeof data.rotationId === 'string')) ||
+          typeof data.refreshToken !== 'string' ||
+          (Object.keys(data).length === 2 && (typeof data.rotationId !== 'string' ||
+            !/^[0-9a-f]{32}$/.test(data.rotationId)))) {
         reply(400, { error: 'INVALID_REQUEST' });
         return true;
       }
       if (path === '/v1/auth/refresh') {
-        reply(200, await gateway.refresh(data.refreshToken));
+        reply(200, await gateway.refresh(data.refreshToken, data.rotationId as string | undefined));
       } else {
         await gateway.logout(data.refreshToken);
         // Local-only audit marker for a confirmed explicit guest logout.
