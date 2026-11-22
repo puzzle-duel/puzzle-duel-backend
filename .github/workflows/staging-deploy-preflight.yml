@@ -1,0 +1,62 @@
+name: PZD-50 Staging Deploy Preflight (read-only)
+on:
+  push:
+    branches: [version/0.0.2]
+    paths: [.github/workflows/staging-deploy-preflight.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    environment: pzd-staging
+    timeout-minutes: 5
+    steps:
+      - name: Configure pinned staging SSH
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Inspect staging deployment topology (safe metadata only)
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" 'python3 -' <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import os,subprocess
+          def run(args):
+              try:
+                  p=subprocess.run(args,capture_output=True,text=True,timeout=7)
+                  return p.returncode,p.stdout.strip()
+              except Exception: return -1,''
+          unit='pzd-staging.service'
+          print('## Oracle staging deploy preflight')
+          for flag,prop in [('service_active','ActiveState'),('service_user','User'),('working_directory','WorkingDirectory'),('exec_start','ExecStart')]:
+              code,out=run(['systemctl','show',unit,'-p',prop,'--value'])
+              # No host paths or service arguments are printed.
+              if flag=='service_active': print('service_active: '+('yes' if out=='active' else 'no'))
+              if flag=='service_user': print('runs_as_current_user: '+str(out==os.environ.get('USER')))
+              if flag=='working_directory':
+                  print('working_dir_expected: '+str(out=='/home/pzd-staging/pzd-staging'))
+              if flag=='exec_start':
+                  print('entrypoint_staging_server: '+str('staging-server.mts' in out))
+          for label,path in [('deploy_directory','/home/pzd-staging/pzd-staging'),('source_checkout','/home/pzd-staging/pzd-staging/.git'),('package_manifest','/home/pzd-staging/pzd-staging/package.json'),('node_modules','/home/pzd-staging/pzd-staging/node_modules'),('report_directory','/home/pzd-staging/pzd-staging/diagnostic-reports')]:
+              print(label+': '+('present' if os.path.exists(path) else 'absent'))
+          code,git=run(['git','-C','/home/pzd-staging/pzd-staging','rev-parse','--short','HEAD'])
+          print('git_head_present: '+str(code==0))
+          if code==0: print('git_head: '+git[:12])
+          code,out=run(['systemctl','is-active',unit])
+          code,out=run(['sudo','-n','systemctl','is-active',unit])
+          print('sudo_noninteractive_available: '+str(code==0))
+          PY
