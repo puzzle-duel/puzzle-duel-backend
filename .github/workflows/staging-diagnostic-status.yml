@@ -349,3 +349,102 @@ jobs:
             if (db) await db.end().catch(() => {});
           }
           JS
+
+
+      - name: Check revoked guest account evidence without identity disclosure (read-only)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          # Public workflow: do NOT return row-level results, device key fingerprints,
+          # player identifiers, guest tokens, token digests, or exact dates.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+          const coarse = value => {
+            const n = Number(value);
+            if (!Number.isSafeInteger(n) || n < 0) throw new Error('Bad aggregate');
+            return n === 0 ? 'none' : n < 5 ? 'suppressed (1–4)' : n < 20 ? '5–19' : '20+';
+          };
+          let db;
+          try {
+            const env = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+            const line = env.split(/\r?\n/).find(x => /^PZD_STAGING_DATABASE_URL=/.test(x));
+            if (!line) throw new Error('No staging database configuration');
+            let value = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+            if ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+            const target = new URL(value);
+            if (!['127.0.0.1', 'localhost'].includes(target.hostname) ||
+                target.pathname !== '/pzd_staging') throw new Error('Not staging DB');
+            db = new pg.Client({ connectionString: value, connectionTimeoutMillis: 3000 });
+            await db.connect();
+            await db.query('BEGIN TRANSACTION READ ONLY');
+            await db.query("SET LOCAL statement_timeout = '3000ms'");
+            const check = await db.query(
+              "SELECT to_regclass('public.pzd_guest_families') IS NOT NULL AS family, " +
+              "to_regclass('public.tournament_daily_claim') IS NOT NULL AS claim, " +
+              "to_regclass('public.tournament_device_credential') IS NOT NULL AS device, " +
+              "to_regclass('public.tournament_series_writer') IS NOT NULL AS writer, " +
+              "EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND " +
+              " table_name='tournament_series_writer' AND column_name='original_device_credential_id') AS anchor"
+            );
+            const ready = check.rows[0];
+            console.log('### Revoked guest account recovery evidence (staging, read-only)');
+            console.log();
+            console.log('Only coarse aggregate results are printed; this cannot attribute any row to an iPhone.');
+            console.log('| Schema gate | Result |');
+            console.log('| --- | --- |');
+            for (const [label, ok] of [
+              ['Guest families', ready.family],
+              ['Daily claim', ready.claim],
+              ['Registered device key', ready.device],
+              ['Writer table', ready.writer],
+              ['Original writer credential anchor', ready.anchor]
+            ]) console.log('| ' + label + ' | ' + (ok ? 'PRESENT' : 'MISSING') + ' |');
+            if (Object.values(ready).every(v => v === true)) {
+              const summary = await db.query(
+                "SELECT COUNT(*)::int AS revoked_families, " +
+                "COUNT(*) FILTER (WHERE EXISTS (" +
+                " SELECT 1 FROM public.tournament_daily_claim c WHERE c.player_id=f.player_id::text" +
+                "))::int AS with_claim, " +
+                "COUNT(*) FILTER (WHERE EXISTS (" +
+                " SELECT 1 FROM public.tournament_device_credential d " +
+                " WHERE d.player_id=f.player_id AND d.revoked_at_ms IS NULL" +
+                "))::int AS with_registered_key, " +
+                "COUNT(*) FILTER (WHERE EXISTS (" +
+                " SELECT 1 FROM public.tournament_daily_claim c " +
+                " JOIN public.tournament_series_writer w ON w.series_key=c.series_id::text " +
+                " JOIN public.tournament_device_credential d ON d.credential_id=w.original_device_credential_id " +
+                " WHERE c.player_id=f.player_id::text AND d.player_id=f.player_id AND d.revoked_at_ms IS NULL" +
+                "))::int AS with_original_writer_key " +
+                "FROM public.pzd_guest_families f WHERE f.revoked_at IS NOT NULL"
+              );
+              console.log();
+              console.log('| Revoked family evidence | Coarse count |');
+              console.log('| --- | --- |');
+              const row = summary.rows[0];
+              for (const [label, value] of [
+                ['Revoked guest families', row.revoked_families],
+                ['With saved daily claim', row.with_claim],
+                ['With unrevoked registered device key', row.with_registered_key],
+                ['With original writer-anchored device key', row.with_original_writer_key]
+              ]) console.log('| ' + label + ' | ' + coarse(value) + ' |');
+            } else {
+              console.log('Recovery evidence check BLOCKED by missing schema; not a negative result.');
+            }
+            await db.query('ROLLBACK');
+            console.log();
+            console.log('A stored device key is not account ownership proof until a fresh cryptographic challenge is verified.');
+            console.log('This workflow does not enable, perform or authorize guest linking.');
+          } catch {
+            console.log('Revoked account evidence inspection unavailable; details intentionally withheld.');
+            process.exitCode = 1;
+          } finally {
+            if (db) await db.end().catch(() => {});
+          }
+          JS
