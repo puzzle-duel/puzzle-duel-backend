@@ -3,7 +3,7 @@
  * DB migrations are an explicit separate operator action.
  */
 import { createServer } from 'node:http';
-import { buildHttpDiagnostic, resolveRequestId } from '../diagnostics/http-correlation.mts';
+import { buildHttpDiagnostic, diagnosticRoute, resolveRequestId } from '../diagnostics/http-correlation.mts';
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { appendFileSync, lstatSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { createGuestAuthHttpHandler } from './guest-auth-http.mts';
@@ -153,6 +153,8 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             requestId,
             operation: req.url?.split('?', 1)[0] === '/v1/diagnostics/reports'
               ? 'diagnostic_report' : 'tournament_http',
+            route: diagnosticRoute(req.url),
+            errorCode: res.getHeader('x-pzd-error-code'),
             method: req.method ?? 'OTHER',
             status: res.statusCode,
             durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
