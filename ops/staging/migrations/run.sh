@@ -63,6 +63,12 @@ migrate_check="SELECT CASE WHEN NOT r.rolsuper
 # Service definitions/credentials are pre-provisioned on Oracle by a DB operator,
 # not supplied by workflow inputs or reused from the app runtime DSN.
 db_read() { PGSERVICE="$1" psql -X -w -qAt -v ON_ERROR_STOP=1 -c "$2"; }
+# The login may SET ROLE but intentionally does not INHERIT owner privileges.
+# History and verification must use an explicit, connection-local SET ROLE.
+db_read_owner() {
+  PGSERVICE=pzd_staging_migrate psql -X -w -qAt -v ON_ERROR_STOP=1 \
+    -c 'SET ROLE pzd_migration_owner' -c "$1"
+}
 [[ "$(db_read pzd_staging_migrate "$dbcheck" 2>>"$private_log")" == PASS ]] ||
   fail "migration DB identity check failed"
 [[ "$(db_read pzd_staging_backup "$dbcheck" 2>>"$private_log")" == PASS ]] ||
@@ -74,7 +80,7 @@ history_exists="$(db_read pzd_staging_migrate   "SELECT to_regclass('public.pzd_
   fail "unable to check migration history"
 previous=""
 if [[ "$history_exists" == t ]]; then
-  previous="$(db_read pzd_staging_migrate     "SELECT sha256 FROM public.pzd_staging_migration_history WHERE migration_id='$migration'"     2>>"$private_log")" || fail "unable to read migration history"
+  previous="$(db_read_owner     "SELECT sha256 FROM public.pzd_staging_migration_history WHERE migration_id='$migration'"     2>>"$private_log")" || fail "unable to read migration history"
 fi
 if [[ -n "$previous" ]]; then
   [[ "$previous" == "$expected_sha" ]] ||
@@ -139,7 +145,8 @@ if ! PGSERVICE=pzd_staging_migrate psql -X -w -q -v ON_ERROR_STOP=1   -f "$trans
   fail "transaction failed; no automatic retry or destructive rollback"
 fi
 echo "Migration transaction: COMMITTED"
-verify_result="$(PGSERVICE=pzd_staging_migrate psql -X -w -qAt -v ON_ERROR_STOP=1   -f "$verify_file" 2>>"$private_log")" ||
+verify_result="$(PGSERVICE=pzd_staging_migrate psql -X -w -qAt -v ON_ERROR_STOP=1 \
+  -c 'SET ROLE pzd_migration_owner' -f "$verify_file" 2>>"$private_log")" ||
   fail "post-migration verification execution failed; migration may be committed"
 [[ "$verify_result" == PASS ]] ||
   fail "post-migration verification failed; migration may be committed"
