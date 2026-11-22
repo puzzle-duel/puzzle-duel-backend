@@ -71,6 +71,7 @@ jobs:
             `);
             const checks = objects.rows[0];
             const schemaReady = Object.values(checks).every(v => v === true);
+            let unanchored = 'not checked (schema missing)';
             // This is a separate staging-only operator migration, not a
             // general Stage F2 schema migration. Do not infer readiness from
             // pzd_schema_migration history.
