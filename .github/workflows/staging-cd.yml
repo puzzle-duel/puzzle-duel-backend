@@ -8,12 +8,6 @@ on:
       - "ops/staging/**"
   push:
     branches: ["version/**"]
-    paths:
-      - ".github/workflows/staging-cd.yml"
-      - "ops/staging/**"
-      - "src/**"
-      - "package*.json"
-      - "tsconfig.json"
   workflow_dispatch:
 
 permissions:
