@@ -40,29 +40,52 @@ jobs:
           # Raw report contents remain on Oracle, never reach the PUBLIC runner.
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
             -o ConnectTimeout=10 "$USER@$HOST" "python3 - '$REPORT_ID'" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import collections, json, os, re, stat, subprocess, sys
+          import collections, json, os, re, stat, sys
           target = sys.argv[1]
           if not re.fullmatch(r'[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}', target):
               sys.exit('Invalid report id')
           def load_report():
+              # Report IDs are generated UUIDs, never user-selected filenames.
+              # The service writes to a fixed 0700 directory and 0600 files.
+              directory='/home/pzd-staging/pzd-staging/diagnostic-reports'
               try:
-                  p = subprocess.Popen(
-                      ['journalctl','--no-pager','-o','cat','-u','pzd-staging.service',
-                       '--since','12 hours ago'],
-                      stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-                      text=True,errors='replace')
-              except OSError:
-                  return None
-              found = None
-              for line in p.stdout:
-                  if target not in line or '"diagnostic_report"' not in line:
-                      continue
-                  try: item=json.loads(line[line.find('{'):])
-                  except (ValueError,TypeError): continue
-                  if isinstance(item,dict) and item.get('type')=='diagnostic_report' and item.get('reportId')==target and isinstance(item.get('events'),list):
-                      found=item['events']
-              p.wait()
-              return found
+                  parent=os.lstat(directory)
+              except FileNotFoundError:
+                  print('REPORT_STORE_MISSING: staging report persistence not deployed or initialized.')
+                  sys.exit(3)
+              except PermissionError:
+                  print('REPORT_STORE_UNREADABLE: staging report directory permission denied.')
+                  sys.exit(3)
+              if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+                  print('REPORT_STORE_UNSAFE: staging report directory not a real directory.')
+                  sys.exit(3)
+              path=os.path.join(directory,target+'.json')
+              try:
+                  info=os.lstat(path)
+              except FileNotFoundError:
+                  print('REPORT_NOT_FOUND: requested report not retained in staging private store.')
+                  sys.exit(4)
+              except PermissionError:
+                  print('REPORT_STORE_UNREADABLE: report read permission denied.')
+                  sys.exit(3)
+              if not stat.S_ISREG(info.st_mode) or info.st_size>20480 or info.st_size<=0:
+                  print('REPORT_STORE_UNSAFE: invalid report file.')
+                  sys.exit(3)
+              try:
+                  flags=os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)
+                  fd=os.open(path,flags)
+                  with os.fdopen(fd,'r',encoding='utf-8') as handle:
+                      item=json.load(handle)
+              except (OSError,UnicodeError,ValueError):
+                  print('REPORT_STORE_UNREADABLE: report data is not accessible or valid.')
+                  sys.exit(3)
+              if not isinstance(item,dict) or item.get('version')!=1 or not isinstance(item.get('events'),list):
+                  print('REPORT_STORE_CORRUPT: unexpected stored schema.')
+                  sys.exit(3)
+              if type(item.get('expiresAt')) is not int or item['expiresAt']<=__import__('time').time()*1000:
+                  print('REPORT_EXPIRED: retention limit exceeded.')
+                  sys.exit(4)
+              return item['events']
           def load_http():
               results={}
               base='/home/pzd-staging/pzd-staging/http-diagnostics.log'
@@ -91,10 +114,6 @@ jobs:
                   len(values),round(median/10)*10,round(p95/10)*10,round(values[-1]/10)*10)
           print('## Staging move latency (privacy-safe aggregate)')
           events=load_report()
-          if events is None:
-              print('REPORT_NOT_AVAILABLE: no readable report in 12-hour service journal.')
-              print('Do not infer a latency cause without matched requests.')
-              sys.exit(0)
           server=load_http()
           phases=collections.defaultdict(dict)
           pairs=collections.defaultdict(list)
@@ -115,6 +134,9 @@ jobs:
               cat='POST command' if e.get('httpMethod')=='POST' else 'GET board' if e.get('httpMethod')=='GET' else None
               if cat: pairs[cat].append((ms,srv_ms,ms-srv_ms))
           print('Client events: %d; move traces: %d'%(len(events),len(phases)))
+          if not phases:
+              print('NO_MOVE_TRACES: report has no move trace timing events (may be an old client build).')
+              sys.exit(5)
           print('| Matched request | Client | Backend | Client - backend |')
           print('| --- | --- | --- | --- |')
           for cat in ('POST command','GET board'):
@@ -125,4 +147,7 @@ jobs:
           for phase in ('move_writer_checked','move_command_returned','move_board_reloaded','move_animation_arming','move_resolution_applied'):
               print('| %s | %s |'%(phase,stats([v[phase] for v in phases.values() if phase in v])))
           print('No IDs, tokens, bodies, timestamps or raw events exposed.')
+          if not pairs['POST command'] or not pairs['GET board']:
+              print('INSUFFICIENT_CORRELATION: missing matched POST or GET HTTP request.')
+              sys.exit(5)
           PY
