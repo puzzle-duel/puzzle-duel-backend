@@ -1,6 +1,12 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { GuestCredentialError } from './guest-auth-service.mts';
 
+// Server-local diagnostic metadata; never serialized into HTTP response headers.
+const refreshFailureReasons = new WeakMap<ServerResponse, string>();
+export function guestRefreshDiagnosticReason(res: ServerResponse): string | undefined {
+  return refreshFailureReasons.get(res);
+}
+
 export interface GuestAuthGateway {
   create(): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   refresh(token: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
@@ -92,7 +98,7 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
       if (error instanceof GuestCredentialError) {
         // Only fixed, allowlisted refresh failure categories enter staging HTTP diagnostics.
         // Do not record credentials, request bodies, player identity or arbitrary exception text.
-        if (path === '/v1/auth/refresh') res.setHeader('x-pzd-error-code', error.diagnosticReason ?? error.code);
+        if (path === '/v1/auth/refresh') refreshFailureReasons.set(res, error.diagnosticReason ?? error.code);
         reply(401, { error: error.code });
       } else {
         // Do not expose credentials, database details or exception text.
