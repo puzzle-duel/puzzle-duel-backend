@@ -43,7 +43,7 @@ for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as c
     });
     const observedReasons: (string | undefined)[] = [];
     const server = createServer((req, res) => {
-      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      res.once('finish', () => observedReasons.push(guestAuthDiagnosticReason(res)));
       void handler(req, res);
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -81,7 +81,7 @@ for (const [reason, code] of [
     });
     const observedReasons: (string | undefined)[] = [];
     const server = createServer((req, res) => {
-      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      res.once('finish', () => observedReasons.push(guestAuthDiagnosticReason(res)));
       void handler(req, res);
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
