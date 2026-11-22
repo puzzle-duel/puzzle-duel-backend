@@ -38,8 +38,8 @@ if [[ "$solo" == false ]]; then
     fail "Reviewer must have repository access"
   [[ "$permission" != none ]] || fail "Reviewer has no repository permission"
 else
-  printf '%s\\n' 'SOLO MODE: no independent reviewer. A 10-minute wait timer is NOT an approval.'
-  printf '%s\\n' 'GitHub Actions apply still requires a separate run and exact confirmation.'
+  printf '%s\n' 'SOLO MODE: no independent reviewer. A 10-minute wait timer is NOT an approval.'
+  printf '%s\n' 'GitHub Actions apply still requires a separate run and exact confirmation.'
   printf '%s' "Type SOLO STAGING ONLY to acknowledge this reduced approval assurance: "
   IFS= read -r acknowledgment
   [[ "$acknowledgment" == 'SOLO STAGING ONLY' ]] ||
