@@ -500,6 +500,7 @@ jobs:
               "WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
               "WHERE f.player_id::text=vi.subject AND f.revoked_at IS NULL) THEN 'active_guest' " +
               "ELSE 'guest_no_family' END AS guest_state " +
+              // Daily claims store internal verified identity ID, NOT guest JWT subject UUID.
               "FROM public.tournament_daily_claim c LEFT JOIN public.tournament_verified_identity vi " +
               "ON vi.player_id::text=c.player_id WHERE c.original_utc_date IN " +
               "(DATE '2026-11-20', DATE '2026-11-21', DATE '2026-11-22')), " +
