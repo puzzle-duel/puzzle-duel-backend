@@ -448,3 +448,91 @@ jobs:
             if (db) await db.end().catch(() => {});
           }
           JS
+
+
+      - name: Trace prior manifest gameplay by guest family state (read-only, suppressed)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+          const bucket = v => {
+            const n = Number(v);
+            if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid count');
+            return n === 0 ? 'none' : n < 5 ? 'suppressed (1–4)' : n < 20 ? '5–19' : '20+';
+          };
+          let db;
+          try {
+            const env = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+            const line = env.split(/\r?\n/).find(x => /^PZD_STAGING_DATABASE_URL=/.test(x));
+            if (!line) throw new Error('Missing config');
+            let urlString = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+            if ((urlString.startsWith('"') && urlString.endsWith('"')) ||
+                (urlString.startsWith("'") && urlString.endsWith("'"))) urlString = urlString.slice(1, -1);
+            const url = new URL(urlString);
+            if (!['127.0.0.1', 'localhost'].includes(url.hostname) ||
+                url.pathname !== '/pzd_staging') throw new Error('Invalid DB');
+            db = new pg.Client({ connectionString: urlString, connectionTimeoutMillis: 3000 });
+            await db.connect();
+            await db.query('BEGIN TRANSACTION READ ONLY');
+            await db.query("SET LOCAL statement_timeout = '3000ms'");
+            const checks = await db.query(
+              "SELECT to_regclass('public.tournament_daily_claim') IS NOT NULL AS claims, " +
+              "to_regclass('public.accepted_move_ledger') IS NOT NULL AS moves, " +
+              "to_regclass('public.tournament_daily_series_completion') IS NOT NULL AS completion, " +
+              "to_regclass('public.tournament_daily_result_category') IS NOT NULL AS scores, " +
+              "to_regclass('public.pzd_guest_families') IS NOT NULL AS guest"
+            );
+            if (!Object.values(checks.rows[0]).every(v => v === true)) throw new Error('Incomplete schema');
+            const result = await db.query(
+              "WITH claims AS (SELECT c.series_id, c.original_utc_date, c.player_id, " +
+              "CASE WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
+              "WHERE f.player_id::text=c.player_id AND f.revoked_at IS NOT NULL) THEN 'revoked' " +
+              "WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
+              "WHERE f.player_id::text=c.player_id AND f.revoked_at IS NULL) THEN 'active' " +
+              "ELSE 'unmatched' END AS guest_state " +
+              "FROM public.tournament_daily_claim c WHERE c.original_utc_date IN " +
+              "(DATE '2026-11-20', DATE '2026-11-21', DATE '2026-11-22')), " +
+              "facts AS (SELECT c.original_utc_date AS day, c.guest_state, c.player_id, c.series_id, " +
+              "EXISTS(SELECT 1 FROM public.accepted_move_ledger l WHERE l.series_key=c.series_id::text " +
+              "AND l.player_id=c.player_id) AS has_move, " +
+              "EXISTS(SELECT 1 FROM public.tournament_daily_series_completion k " +
+              "WHERE k.series_id=c.series_id AND k.player_id=c.player_id) AS completed, " +
+              "EXISTS(SELECT 1 FROM public.tournament_daily_result_category s " +
+              "WHERE s.series_id=c.series_id) AS published FROM claims c) " +
+              "SELECT day::text AS day, guest_state, COUNT(*)::int AS claim_count, " +
+              "COUNT(*) FILTER(WHERE has_move)::int AS played_series, " +
+              "COUNT(*) FILTER(WHERE completed)::int AS completed_series, " +
+              "COUNT(*) FILTER(WHERE published)::int AS published_series " +
+              "FROM facts GROUP BY day,guest_state ORDER BY day,guest_state"
+            );
+            await db.query('ROLLBACK');
+            console.log('### Previous manifest identity-chain evidence (read-only)');
+            console.log();
+            console.log('Counts 1–4 are suppressed; no individual player, credential, score, or series is printed.');
+            console.log('Guest account state is CURRENT; it does not imply status on the original play date.');
+            console.log('| UTC manifest date | Current guest state | Claims | With accepted moves | Completed | Published |');
+            console.log('| --- | --- | --- | --- | --- | --- |');
+            const days = ['2026-11-20', '2026-11-21', '2026-11-22'];
+            const states = ['active','revoked','unmatched'];
+            for (const day of days) for (const state of states) {
+              const r = result.rows.find(r => r.day === day && r.guest_state === state);
+              console.log('| ' + day + ' | ' + state + ' | ' +
+                bucket(r?.claim_count ?? 0) + ' | ' + bucket(r?.played_series ?? 0) + ' | ' +
+                bucket(r?.completed_series ?? 0) + ' | ' + bucket(r?.published_series ?? 0) + ' |');
+            }
+            console.log();
+            console.log('This does not identify the iPhone owner and does not authorize linking or reviving guest credentials.');
+          } catch {
+            console.log('Prior manifest evidence check unavailable; details withheld.');
+            process.exitCode = 1;
+          } finally {
+            if (db) await db.end().catch(() => {});
+          }
+          JS
