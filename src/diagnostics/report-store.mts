@@ -6,11 +6,13 @@ export class DiagnosticReportStore {
   private readonly reports = new Map<string, { expiresAt: number; events: readonly unknown[] }>();
   private readonly lastByPlayer = new Map<string, number>();
   private readonly now: () => number;
+  private readonly persist?: (reportId: string, events: readonly unknown[]) => void;
   constructor(
     now: () => number = Date.now,
-    private readonly persist?: (reportId: string, events: readonly unknown[]) => void,
+    persist?: (reportId: string, events: readonly unknown[]) => void,
   ) {
     this.now = now;
+    this.persist = persist;
   }
 
   submit(playerId: string, payload: unknown):
