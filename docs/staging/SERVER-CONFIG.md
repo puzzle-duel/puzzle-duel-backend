@@ -67,11 +67,25 @@ The operator read **`/etc/caddy/Caddyfile`** on `forest-dash-vnic`; this is the 
 ```
 
 - **Configured Puzzle Duel staging public hostname:** `84-13-66-211.sslip.io`
-- **Candidate HTTPS API origin:** `https://84-13-66-211.sslip.io` — **TLS and external /healthz still need verification**.
+- **Verified HTTPS API origin:** `https://84-13-66-211.sslip.io` — Mac external /healthz passed with trusted TLS on 2026-11-22.
 - `staging.puzzle-duel.app` is **NOT** the live Caddy hostname. It appears in app/backend code as a **JWT issuer identifier**, which can remain independent of the HTTPS connection origin as long as both sides expect the same issuer.
 - **Do not replace or erase the `:80` Forest Dash block**. Its HTTP paths and websocket proxy target `127.0.0.1:3001` are separate from Puzzle Duel.
 - DNS/HTTP/TLS smoke test on the Mac (not Oracle): `curl -i --connect-timeout 5 --max-time 12 https://84-13-66-211.sslip.io/healthz`. Expect `200` with a trusted certificate. Do not use `-k` as evidence that iOS will trust TLS.
-- Until that test succeeds, this hostname is **configured**, not yet confirmed externally reachable.
+- That Mac test succeeded on 2026-11-22; see external verification below.
+
+### External HTTPS verification — PASS (2026-11-22, Mac)
+
+The operator ran `curl -i --connect-timeout 5 --max-time 12 https://84-13-66-211.sslip.io/healthz` **without `-k`** and obtained:
+
+```text
+HTTP/2 200
+server: Caddy
+content-type: application/json
+x-request-id: 65fafbc00cb4ff3dc4c14bf2eeeaa713
+{"status":"ok","service":"pzd-staging-bootstrap"}
+```
+
+**VERIFIED PUBLIC STAGING HTTPS ORIGIN: `https://84-13-66-211.sslip.io`**. TLS validation and the public `/healthz` route pass from Mac. This does not by itself verify guest auth, tournament endpoints, iPhone TLS, or a full cold-start UAT.
 
 ## 3. Server runtime configuration — names, not secret values
 
