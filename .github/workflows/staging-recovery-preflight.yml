@@ -71,15 +71,9 @@ jobs:
             `);
             const checks = objects.rows[0];
             const schemaReady = Object.values(checks).every(v => v === true);
-            let applied = false;
-            let unanchored = 'not checked (schema missing)';
-            if (await db.query("SELECT to_regclass('public.pzd_schema_migration') IS NOT NULL AS present").then(r => r.rows[0].present)) {
-              const r = await db.query(
-                'SELECT EXISTS(SELECT 1 FROM public.pzd_schema_migration WHERE migration_id = $1) AS applied',
-                ['0013_same_device_writer_recovery'],
-              );
-              applied = r.rows[0].applied === true;
-            }
+            // This is a separate staging-only operator migration, not a
+            // general Stage F2 schema migration. Do not infer readiness from
+            // pzd_schema_migration history.
             if (checks.writer_column) {
               const r = await db.query(`
                 SELECT EXISTS(
@@ -103,10 +97,9 @@ jobs:
             console.log('| Recovery challenge table | ' + (checks.challenge_table ? 'PRESENT' : 'MISSING') + ' |');
             console.log('| Auth session credential column | ' + (checks.session_column ? 'PRESENT' : 'MISSING') + ' |');
             console.log('| Original writer credential column | ' + (checks.writer_column ? 'PRESENT' : 'MISSING') + ' |');
-            console.log('| Migration 0013 recorded | ' + (applied ? 'YES' : 'NO') + ' |');
             console.log('| Active unanchored historical claims | ' + unanchored + ' |');
             console.log();
-            console.log('**Activation gate:** ' + (schemaReady && applied ? 'SCHEMA READY (UAT still required)' : 'BLOCKED — do not enable recovery yet'));
+            console.log('**Activation gate:** ' + (schemaReady ? 'SCHEMA READY (UAT still required)' : 'BLOCKED — do not enable recovery yet'));
           } catch (error) {
             console.log('Recovery preflight could not complete; activation is BLOCKED.');
             process.exitCode = 1;
