@@ -92,7 +92,7 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
       if (error instanceof GuestCredentialError) {
         // Only fixed, allowlisted refresh failure categories enter staging HTTP diagnostics.
         // Do not record credentials, request bodies, player identity or arbitrary exception text.
-        if (path === '/v1/auth/refresh') res.setHeader('x-pzd-error-code', error.code);
+        if (path === '/v1/auth/refresh') res.setHeader('x-pzd-error-code', error.diagnosticReason ?? error.code);
         reply(401, { error: error.code });
       } else {
         // Do not expose credentials, database details or exception text.
