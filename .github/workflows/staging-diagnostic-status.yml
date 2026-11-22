@@ -1,0 +1,120 @@
+name: PZD Staging Diagnostic Report Status
+
+# Read-only inspection: never downloads full logs, rotates files, restarts services,
+# deploys, or prints sensitive data. This repository is PUBLIC: workflow output
+# and job summaries are public too. Expose only aggregate HTTP status metadata.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pzd-staging-diagnostic-readonly
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Inspect recent diagnostic report statuses (read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pzd-staging
+    steps:
+      - name: Configure pinned staging SSH
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Summarize diagnostic report HTTP statuses, without exposing raw log
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          # Execute only a constant, read-only Python script on Oracle. Never
+          # stream raw logs to GitHub's public runners or Action output.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" 'python3 -' <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import collections
+          import json
+          import os
+          import stat
+          import sys
+
+          base = '/home/pzd-staging/pzd-staging/http-diagnostics.log'
+          reports = []
+          for path in (base + '.1', base):
+              try:
+                  info = os.lstat(path)
+                  if not stat.S_ISREG(info.st_mode):
+                      print('Diagnostic log is not a regular file')
+                      sys.exit(1)
+                  with open(path, encoding='utf-8') as handle:
+                      for line in handle:
+                          try:
+                              item = json.loads(line)
+                          except (ValueError, TypeError):
+                              continue
+                          if not isinstance(item, dict):
+                              continue
+                          if item.get('operation') != 'diagnostic_report':
+                              continue
+                          status = item.get('status')
+                          if type(status) is not int or not (100 <= status <= 599):
+                              continue
+                          reports.append(status)
+              except FileNotFoundError:
+                  continue
+              except (OSError, UnicodeError):
+                  print('Unable to read staging diagnostic metadata')
+                  sys.exit(1)
+
+          recent = reports[-50:]
+          counts = collections.Counter(recent)
+          print('## Puzzle Duel staging diagnostic submissions')
+          print()
+          print('This repository is public. Only sanitized HTTP status aggregates are shown.')
+          print('No raw reports, player IDs, request IDs, IPs, tokens, or exact timestamps are printed.')
+          print()
+          print('Recent diagnostic requests inspected: **%d** (maximum 50)' % len(recent))
+          if not recent:
+              print()
+              print('No diagnostic report requests found in the current and rotated metadata logs.')
+              print('Logs may have rotated, been cleared, or not yet been written.')
+              sys.exit(0)
+          print()
+          print('| HTTP status | Count | Explanation |')
+          print('| --- | ---: | --- |')
+          labels = {
+              200: 'Successful', 201: 'Successful', 202: 'Accepted',
+              400: 'Malformed report', 401: 'Unauthenticated',
+              403: 'Forbidden', 404: 'Route missing',
+              409: 'Conflict', 429: 'Rate limited',
+              500: 'Internal error', 502: 'Bad gateway',
+              503: 'Service unavailable',
+          }
+          for code in sorted(counts):
+              print('| %d | %d | %s |' % (
+                  code, counts[code], labels.get(code, 'Other HTTP response')))
+          print()
+          print('Latest request status: **HTTP %d**' % recent[-1])
+          print()
+          print('Latest 15 statuses (oldest to newest): `%s`' %
+                ' → '.join(map(str, recent[-15:])))
+          print()
+          print('Note: This log contains request metadata, NOT report event contents.')
+          print('The staging report store is in-memory and currently has no read API.')
+          PY
