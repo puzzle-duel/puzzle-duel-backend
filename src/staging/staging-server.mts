@@ -44,12 +44,14 @@ export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error('Staging DB must be the isolated local pzd_staging database');
   }
   const guestAuthEnabled = env.PZD_STAGING_GUEST_AUTH_ENABLED === 'true';
+  const guestRetryEnabled = env.PZD_STAGING_GUEST_RETRY_ENABLED === 'true';
+  if (guestRetryEnabled && !guestAuthEnabled) throw new Error('Guest retry requires guest auth');
   const keyPath = env.PZD_STAGING_GUEST_SIGNING_KEY_FILE;
   const keyId = env.PZD_STAGING_GUEST_SIGNING_KID;
   if (guestAuthEnabled && (!keyPath || !keyPath.startsWith('/') || !keyId || !/^[A-Za-z0-9_-]{1,128}$/.test(keyId))) {
     throw new Error('Staging guest auth requires absolute private key path and pinned kid');
   }
-  return { host, port, databaseUrl, guestAuthEnabled, keyPath, keyId };
+  return { host, port, databaseUrl, guestAuthEnabled, guestRetryEnabled, keyPath, keyId };
 }
 
 export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
@@ -73,8 +75,16 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           (privateKey.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) {
         throw new Error('Guest signing key must be RSA 2048 or stronger');
       }
+      if (config.guestRetryEnabled) {
+        const ready = await pool.query<{ present: boolean }>(
+          `SELECT EXISTS(SELECT 1 FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='pzd_guest_refresh'
+              AND column_name='rotation_id_digest') AS present`,
+        );
+        if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
+      }
       guestHandler = createGuestAuthHttpHandler(
-        new PostgresStagingGuestAuth(pool, privateKey, config.keyId!),
+        new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
       );
       const verifier = new PinnedRs256JwtVerifier({
         issuer: GUEST_ISSUER, audience: GUEST_AUDIENCE,
