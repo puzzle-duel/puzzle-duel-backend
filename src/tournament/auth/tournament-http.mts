@@ -52,11 +52,13 @@ function send(res: ServerResponse, status: number, data: unknown): void {
     data !== null && typeof data === 'object' && !Array.isArray(data)
     ? safeDiagnosticErrorCode((data as { error?: unknown }).error)
     : undefined;
+  // Also retain the header in ServerResponse's header map so that the
+  // staging ingress 'finish' diagnostic can access it through getHeader().
+  if (code) res.setHeader('x-pzd-error-code', code);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
-    ...(code ? { 'x-pzd-error-code': code } : {}),
   });
   res.end(body);
 }
