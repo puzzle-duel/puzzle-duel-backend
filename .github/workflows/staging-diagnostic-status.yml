@@ -82,6 +82,7 @@ jobs:
               'SERIES_STATE_INCONSISTENT', 'SERIES_STATE_CORRUPT', 'SERIES_TERMINAL',
               'RECOVERY_NOT_ELIGIBLE', 'RECOVERY_PROOF_INVALID', 'PLAYER_MISMATCH',
               'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
+              'INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
           }
           records = []
           for path in (base + '.1', base):
@@ -141,6 +142,18 @@ jobs:
               print('| %d | %s | %s |' % (status, route, error))
           if not failures:
               print('No tournament failures in retained metadata log files.')
+          refresh_failures = [r for r in records if r[1] == 'tournament_http' and
+                              r[2] == 'guest_auth' and r[0] == 401 and
+                              r[3] in ('INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED')]
+          print()
+          print('### Guest refresh failures (allowlisted categories only)')
+          print()
+          print('| Safe backend error code | Count |')
+          print('| --- | ---: |')
+          for code, count in sorted(collections.Counter(r[3] for r in refresh_failures[-50:]).items()):
+              print('| %s | %d |' % (code, count))
+          if not refresh_failures:
+              print('No classified guest refresh failures in retained metadata.')
           if target:
               print()
               print('### Requested correlation')
