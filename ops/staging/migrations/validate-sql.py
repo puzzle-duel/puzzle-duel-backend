@@ -77,9 +77,10 @@ def validate(sql: str) -> None:
             output.append(c)
             i += 1
     stripped = "".join(output)
-    for line in stripped.splitlines():
-        if line.lstrip().startswith("\\"):
-            raise ValueError("psql metacommand refused")
+    # A psql meta-command may follow a SQL semicolon on the same line.
+    # Outside quoted SQL and comments, any backslash is unsafe for -f input.
+    if "\\" in stripped:
+        raise ValueError("psql metacommand refused")
     for statement in stripped.split(";"):
         if FORBIDDEN.match(statement):
             raise ValueError("transaction command refused")
