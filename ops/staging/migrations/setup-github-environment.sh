@@ -46,8 +46,7 @@ JSON
 gh api --method POST "repos/$repo/environments/$environment/deployment-branch-policies" \
   -f name="version/0.0.2" >/dev/null
 
-details="$(gh api "repos/$repo/environments/$environment")"
-printf '%s\n' "$details" | gh api --method GET "repos/$repo/environments/$environment" \
+gh api "repos/$repo/environments/$environment" \
   --jq '.protection_rules[].type' | grep -qx required_reviewers ||
   fail "Required reviewer protection was not confirmed"
 gh api "repos/$repo/environments/$environment/deployment-branch-policies" \
