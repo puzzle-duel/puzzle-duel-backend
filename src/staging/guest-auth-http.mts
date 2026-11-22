@@ -2,9 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { GuestCredentialError } from './guest-auth-service.mts';
 
 // Server-local diagnostic metadata; never serialized into HTTP response headers.
-const refreshFailureReasons = new WeakMap<ServerResponse, string>();
-export function guestRefreshDiagnosticReason(res: ServerResponse): string | undefined {
-  return refreshFailureReasons.get(res);
+const guestAuthReasons = new WeakMap<ServerResponse, string>();
+export function guestAuthDiagnosticReason(res: ServerResponse): string | undefined {
+  return guestAuthReasons.get(res);
 }
 
 export interface GuestAuthGateway {
@@ -92,13 +92,16 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
         reply(200, await gateway.refresh(data.refreshToken));
       } else {
         await gateway.logout(data.refreshToken);
+        // Local-only audit marker for a confirmed explicit guest logout.
+        // Never expose the marker or token as HTTP headers or response fields.
+        guestAuthReasons.set(res, 'GUEST_LOGOUT_REVOKED');
         reply(200, { status: 'revoked' });
       }
     } catch (error) {
       if (error instanceof GuestCredentialError) {
         // Only fixed, allowlisted refresh failure categories enter staging HTTP diagnostics.
         // Do not record credentials, request bodies, player identity or arbitrary exception text.
-        if (path === '/v1/auth/refresh') refreshFailureReasons.set(res, error.diagnosticReason ?? error.code);
+        if (path === '/v1/auth/refresh') guestAuthReasons.set(res, error.diagnosticReason ?? error.code);
         reply(401, { error: error.code });
       } else {
         // Do not expose credentials, database details or exception text.

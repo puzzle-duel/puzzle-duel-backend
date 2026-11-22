@@ -4,6 +4,9 @@ name: PZD Staging Diagnostic Report Status
 # deploys, or prints sensitive data. This repository is PUBLIC: workflow output
 # and job summaries are public too. Expose only aggregate HTTP status metadata.
 on:
+  push:
+    branches: [version/0.0.2]
+    paths: [.github/workflows/staging-diagnostic-status.yml]
   workflow_dispatch:
     inputs:
       request_id:
@@ -84,6 +87,7 @@ jobs:
               'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
               'INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
               'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING',
+              'GUEST_LOGOUT_REVOKED',
           }
           records = []
           for path in (base + '.1', base):
@@ -159,6 +163,17 @@ jobs:
               print('| %s | %d |' % (code, count))
           if not refresh_failures:
               print('No classified guest refresh failures in retained metadata.')
+          print()
+          print('### Revocation origin events (only after audit logging deployment)')
+          print()
+          audit = [r[3] for r in records if r[2] == 'guest_auth' and
+                   r[3] in ('REFRESH_REPLAY', 'GUEST_LOGOUT_REVOKED')]
+          print('| Fixed origin | Coarse count |')
+          print('| --- | ---: |')
+          for key, count in sorted(collections.Counter(audit).items()):
+              print('| %s | %s |' % (key, 'suppressed (1–4)' if count < 5 else '5–19' if count < 20 else '20+'))
+          if not audit:
+              print('No classified revocation origin events in retained metadata.')
           if target:
               print()
               print('### Requested correlation')
@@ -258,6 +273,77 @@ jobs:
             console.log('This describes staging-wide state; it cannot prove which state belongs to the iPhone.');
           } catch {
             console.log('Guest credential DB inspection unavailable (details withheld).');
+            process.exitCode = 1;
+          } finally {
+            if (db) await db.end().catch(() => {});
+          }
+          JS
+
+
+      - name: Examine historical revocation time windows (read-only, coarse buckets only)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          # All raw dates and row-level data remain on Oracle.
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+          const bucket = n => {
+            n = Number(n);
+            if (!Number.isSafeInteger(n) || n < 0) throw new Error('Invalid aggregate');
+            return n === 0 ? 'none' : n < 5 ? 'suppressed (1–4)' : n < 20 ? '5–19' : '20+';
+          };
+          let db;
+          try {
+            const config = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+            const line = config.split(/\r?\n/).find(x => /^PZD_STAGING_DATABASE_URL=/.test(x));
+            if (!line) throw new Error('Missing staging DSN');
+            let value = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+            if ((value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+            const url = new URL(value);
+            if (!['127.0.0.1', 'localhost'].includes(url.hostname) ||
+                url.pathname !== '/pzd_staging') throw new Error('Refused non-staging DB');
+            db = new pg.Client({ connectionString: value, connectionTimeoutMillis: 3000 });
+            await db.connect();
+            await db.query('BEGIN TRANSACTION READ ONLY');
+            await db.query("SET LOCAL statement_timeout = '3000ms'");
+            const result = await db.query(
+              "SELECT COUNT(*)::int AS revoked, " +
+              "COUNT(*) FILTER (WHERE f.revoked_at >= TIMESTAMPTZ '2026-11-22 00:00:00+00' AND " +
+              "  f.revoked_at < TIMESTAMPTZ '2026-11-22 00:10:00+00')::int AS near_cutover, " +
+              "COUNT(*) FILTER (WHERE f.revoked_at < TIMESTAMPTZ '2026-11-22 00:00:00+00')::int AS before_cutover, " +
+              "COUNT(*) FILTER (WHERE f.revoked_at >= TIMESTAMPTZ '2026-11-22 00:10:00+00')::int AS after_cutover, " +
+              "COUNT(*) FILTER (WHERE latest.used_at IS NOT NULL AND latest.used_at < f.revoked_at)::int AS previously_rotated " +
+              "FROM public.pzd_guest_families f LEFT JOIN LATERAL " +
+              "(SELECT MAX(r.used_at) AS used_at FROM public.pzd_guest_refresh r WHERE r.family_id = f.family_id) latest ON true " +
+              "WHERE f.revoked_at IS NOT NULL"
+            );
+            await db.query('ROLLBACK');
+            const row = result.rows[0];
+            console.log('### Historical revocation timing (coarse and anonymous)');
+            console.log();
+            console.log('UTC crossover: 2026-11-22 00:00 UTC (03:00 Türkiye).');
+            console.log('Exact revoked_at timestamps, identities, and rows never leave Oracle.');
+            console.log('| Cohort | Coarse count |');
+            console.log('| --- | --- |');
+            for (const [label, count] of [
+              ['All revoked families', row.revoked],
+              ['Revoked before crossover', row.before_cutover],
+              ['Revoked between 00:00 and 00:10 UTC', row.near_cutover],
+              ['Revoked after 00:10 UTC', row.after_cutover],
+              ['Revoked families with earlier used refresh', row.previously_rotated],
+            ]) console.log('| ' + label + ' | ' + bucket(count) + ' |');
+            console.log();
+            console.log('Earlier used refresh is compatible with replay OR logout; NOT causal proof.');
+            console.log('Past revocation origin was not persisted; no account attribution is possible.');
+          } catch {
+            console.log('Historical revocation timing unavailable (details withheld).');
             process.exitCode = 1;
           } finally {
             if (db) await db.end().catch(() => {});

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createGuestAuthHttpHandler, guestRefreshDiagnosticReason } from '../../src/staging/guest-auth-http.mts';
+import { createGuestAuthHttpHandler, guestAuthDiagnosticReason } from '../../src/staging/guest-auth-http.mts';
 import { GuestCredentialError } from '../../src/staging/guest-auth-service.mts';
 
 test('guest auth HTTP contract: HTTPS, no client player identity, refresh and logout', async () => {
@@ -43,7 +43,7 @@ for (const code of ['INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED'] as c
     });
     const observedReasons: (string | undefined)[] = [];
     const server = createServer((req, res) => {
-      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      res.once('finish', () => observedReasons.push(guestAuthDiagnosticReason(res)));
       void handler(req, res);
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -81,7 +81,7 @@ for (const [reason, code] of [
     });
     const observedReasons: (string | undefined)[] = [];
     const server = createServer((req, res) => {
-      res.once('finish', () => observedReasons.push(guestRefreshDiagnosticReason(res)));
+      res.once('finish', () => observedReasons.push(guestAuthDiagnosticReason(res)));
       void handler(req, res);
     });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -104,3 +104,31 @@ for (const [reason, code] of [
     }
   });
 }
+
+test('successful explicit logout marks only server-local revocation provenance', async () => {
+  const observed: (string | undefined)[] = [];
+  const handler = createGuestAuthHttpHandler({
+    async create() { throw new Error('unused'); },
+    async refresh() { throw new Error('unused'); },
+    async logout() {},
+  });
+  const server = createServer((req, res) => {
+    res.once('finish', () => observed.push(guestAuthDiagnosticReason(res)));
+    void handler(req, res);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const response = await fetch(`http://127.0.0.1:${address.port}/v1/auth/logout`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-proto': 'https' },
+      body: JSON.stringify({ refreshToken: 'secret-only-in-request' }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-pzd-error-code'), null);
+    assert.deepEqual(await response.json(), { status: 'revoked' });
+    assert.deepEqual(observed, ['GUEST_LOGOUT_REVOKED']);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
+});
