@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildHttpDiagnostic, emitHttpDiagnostic, resolveRequestId } from '../../src/diagnostics/http-correlation.mts';
+import { buildHttpDiagnostic, diagnosticRoute, safeDiagnosticErrorCode, emitHttpDiagnostic, resolveRequestId } from '../../src/diagnostics/http-correlation.mts';
 
 test('valid 128-bit client correlation is preserved; malformed values replaced', () => {
   const valid = 'abcdef0123456789abcdef0123456789';
@@ -28,4 +28,36 @@ test('structured output is allowlisted and excludes request data', () => {
   assert.throws(() => buildHttpDiagnostic({
     requestId, operation: 'Bearer-secret', method: 'GET', durationMs: 1,
   }));
+});
+
+test('staging error reasons are exact allowlisted codes, never raw exception text', () => {
+  assert.equal(safeDiagnosticErrorCode('WRITER_NOT_AUTHORIZED'), 'WRITER_NOT_AUTHORIZED');
+  assert.equal(safeDiagnosticErrorCode('STALE_WRITER'), 'STALE_WRITER');
+  assert.equal(safeDiagnosticErrorCode('WRITER_STILL_ACTIVE'), 'WRITER_STILL_ACTIVE');
+  for (const value of ['Bearer private', 'UNEXPECTED_RAW_EXCEPTION', {}, undefined, '']) {
+    assert.equal(safeDiagnosticErrorCode(value), undefined);
+  }
+  const event = buildHttpDiagnostic({
+    requestId: 'abcdef0123456789abcdef0123456789',
+    operation: 'tournament_http', route: 'tournament_series',
+    errorCode: 'WRITER_NOT_AUTHORIZED', method: 'POST', status: 409, durationMs: 8,
+  });
+  assert.equal(event.errorCode, 'WRITER_NOT_AUTHORIZED');
+  assert.equal(event.route, 'tournament_series');
+  const untrusted = buildHttpDiagnostic({
+    requestId: 'abcdef0123456789abcdef0123456789',
+    operation: 'tournament_http', route: 'other',
+    errorCode: 'Bearer private', method: 'POST', status: 409, durationMs: 8,
+  });
+  assert.equal('errorCode' in untrusted, false);
+});
+
+test('HTTP route classifier never includes series IDs or query strings', () => {
+  assert.equal(diagnosticRoute('/v1/tournament/session'), 'tournament_session');
+  assert.equal(diagnosticRoute('/v1/diagnostics/reports'), 'diagnostic_report');
+  assert.equal(diagnosticRoute('/v1/tournament/leaderboards/daily?date=2026-11-22'), 'leaderboard_daily');
+  assert.equal(diagnosticRoute('/v1/tournament/series/secret-series-id/command'), 'tournament_command');
+  assert.equal(diagnosticRoute('/v1/tournament/series/secret-series-id'), 'tournament_series');
+  assert.equal(diagnosticRoute('/v1/auth/guest'), 'guest_auth');
+  assert.equal(diagnosticRoute('/malicious/secret'), 'other');
 });
