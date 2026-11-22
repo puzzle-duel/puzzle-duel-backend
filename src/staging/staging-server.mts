@@ -3,8 +3,9 @@
  * DB migrations are an explicit separate operator action.
  */
 import { createServer } from 'node:http';
+import { buildHttpDiagnostic, resolveRequestId } from '../diagnostics/http-correlation.mts';
 import { createPrivateKey, createPublicKey } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { appendFileSync, lstatSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { createGuestAuthHttpHandler } from './guest-auth-http.mts';
 import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
@@ -141,6 +142,40 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
 
     }
     const server = createServer((req, res) => {
+      // Staging-only: correlate iOS x-request-id with backend responses.
+      // Store only allowlisted status/method/duration metadata, never headers or URLs.
+      const requestId = resolveRequestId(req.headers['x-request-id']);
+      res.setHeader('x-request-id', requestId);
+      if (!(req.method === 'GET' && req.url === '/healthz')) {
+        const started = process.hrtime.bigint();
+        res.once('finish', () => {
+          const entry = buildHttpDiagnostic({
+            requestId,
+            operation: req.url?.split('?', 1)[0] === '/v1/diagnostics/reports'
+              ? 'diagnostic_report' : 'tournament_http',
+            method: req.method ?? 'OTHER',
+            status: res.statusCode,
+            durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
+          });
+          const line = JSON.stringify(entry);
+          console.log(line);
+          // The deploy account can read this bounded private log without journal sudo.
+          const path = '/home/pzd-staging/pzd-staging/http-diagnostics.log';
+          try {
+            const existing = lstatSync(path, { throwIfNoEntry: false });
+            if (existing?.isSymbolicLink() || (existing && !existing.isFile())) {
+              throw new Error('Unsafe diagnostic log path');
+            }
+            if (existing && existing.size + Buffer.byteLength(line) + 1 > 5 * 1024 * 1024) {
+              renameSync(path, path + '.1');
+            }
+            appendFileSync(path, line + '\n', { mode: 0o600 });
+          } catch {
+            // Observability must not break staging requests.
+            console.warn('Staging diagnostic file unavailable');
+          }
+        });
+      }
       res.setHeader('cache-control', 'no-store');
       res.setHeader('content-type', 'application/json');
       // Session lifecycle is handled separately; tournament HTTP must not shadow it.
