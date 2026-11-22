@@ -29,6 +29,17 @@ test('GitHub environment setup requires a distinct approver and a verified branc
   assert.doesNotMatch(github,/ssh-keyscan/);
 });
 
+test('solo-admin setup uses wait timer without pretending a second reviewer exists', () => {
+  assert.match(github, /--single-admin/);
+  assert.match(github, /SOLO STAGING ONLY/);
+  assert.match(github, /"wait_timer": 10/);
+  assert.match(github, /"reviewers": \[\]/);
+  assert.match(github, /"custom_branch_policies": true/);
+  assert.match(github, /Unexpected reviewer rule in single-admin environment/);
+  assert.match(github, /10-minute wait timer was not confirmed/);
+  assert.match(github, /Environment already exists/);
+});
+
 test('PostgreSQL admin bootstrap is staging-only, passwordless source, and denies runtime owner rights', () => {
   assert.match(roles,/current_database\(\) <> 'pzd_staging'/);
   assert.match(roles,/CREATE ROLE pzd_staging_migrator/);

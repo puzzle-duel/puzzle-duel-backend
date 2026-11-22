@@ -19,6 +19,23 @@ The script creates `pzd-staging-migrations` with **required reviewers**, **preve
 
 **GitHub admin warning:** If the environment already exists, review it through [GitHub Environments](https://github.com/puzzle-duel/puzzle-duel-backend/settings/environments); do not overwrite existing protection rules blindly. If GitHub denies required reviewers under your repository plan, stop; do not replace them with self-approval. The deployment workflow contains an independent hard `version/0.0.2` branch check, but that is not a substitute for deployment review.
 
+## Single-admin alternative (one GitHub user)
+
+When the organization has only one human GitHub admin, **never invent a second reviewer** and never configure a fake self-approval. GitHub's environment wait timer is a delay/cancellation window; **it does not provide independent authorization**. The existing workflow still requires a separate explicit `apply` run and exact typed confirmation, and the migration runner refuses missing roles, wrong DB and missing backups.
+
+After this single-admin PR is merged, choose the explicit solo option:
+
+```bash
+cd ~/Desktop/workspace/puzzle-duel-backend
+git fetch origin version/0.0.2
+git show origin/version/0.0.2:ops/staging/migrations/setup-github-environment.sh > /tmp/pzd-setup-migrations.sh
+bash /tmp/pzd-setup-migrations.sh --single-admin
+```
+
+Type `SOLO STAGING ONLY` at the interactive acknowledgment. This creates the environment with a **10-minute wait timer**, **no required reviewer**, branch `version/0.0.2` only, and the independent migration SSH key. The script verifies these controls before storing any secrets. A timer does not replace a second person's review; when an independent maintainer becomes available, replace solo mode with required reviewers and enable `prevent_self_review`.
+
+The setup refuses to overwrite an existing environment. If it already exists, inspect it in GitHub Settings → Environments and confirm policies before any run. On unsupported GitHub plans or API protection rules, the script fails rather than silently removing them.
+
 ## 2. Install new *public* SSH key on Oracle (operator action)
 
 The generated public key must be added to the `pzd-staging` account's authorized keys after verifying Oracle host identity:
