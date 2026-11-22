@@ -487,17 +487,21 @@ jobs:
               "to_regclass('public.accepted_move_ledger') IS NOT NULL AS moves, " +
               "to_regclass('public.tournament_daily_series_completion') IS NOT NULL AS completion, " +
               "to_regclass('public.tournament_daily_result_category') IS NOT NULL AS scores, " +
-              "to_regclass('public.pzd_guest_families') IS NOT NULL AS guest"
+              "to_regclass('public.pzd_guest_families') IS NOT NULL AS guest, " +
+              "to_regclass('public.tournament_verified_identity') IS NOT NULL AS identity"
             );
             if (!Object.values(checks.rows[0]).every(v => v === true)) throw new Error('Incomplete schema');
             const result = await db.query(
               "WITH claims AS (SELECT c.series_id, c.original_utc_date, c.player_id, " +
-              "CASE WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
-              "WHERE f.player_id::text=c.player_id AND f.revoked_at IS NOT NULL) THEN 'revoked' " +
+              "CASE WHEN vi.player_id IS NULL THEN 'identity_unmatched' " +
+              "WHEN vi.issuer <> 'https://staging.puzzle-duel.app' THEN 'other_issuer' " +
               "WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
-              "WHERE f.player_id::text=c.player_id AND f.revoked_at IS NULL) THEN 'active' " +
-              "ELSE 'unmatched' END AS guest_state " +
-              "FROM public.tournament_daily_claim c WHERE c.original_utc_date IN " +
+              "WHERE f.player_id::text=vi.subject AND f.revoked_at IS NOT NULL) THEN 'revoked_guest' " +
+              "WHEN EXISTS (SELECT 1 FROM public.pzd_guest_families f " +
+              "WHERE f.player_id::text=vi.subject AND f.revoked_at IS NULL) THEN 'active_guest' " +
+              "ELSE 'guest_no_family' END AS guest_state " +
+              "FROM public.tournament_daily_claim c LEFT JOIN public.tournament_verified_identity vi " +
+              "ON vi.player_id::text=c.player_id WHERE c.original_utc_date IN " +
               "(DATE '2026-11-20', DATE '2026-11-21', DATE '2026-11-22')), " +
               "facts AS (SELECT c.original_utc_date AS day, c.guest_state, c.player_id, c.series_id, " +
               "EXISTS(SELECT 1 FROM public.accepted_move_ledger l WHERE l.series_key=c.series_id::text " +
@@ -516,11 +520,11 @@ jobs:
             console.log('### Previous manifest identity-chain evidence (read-only)');
             console.log();
             console.log('Counts 1–4 are suppressed; no individual player, credential, score, or series is printed.');
-            console.log('Guest account state is CURRENT; it does not imply status on the original play date.');
+            console.log('Identity relationship: daily_claim.player_id -> verified_identity.player_id -> verified_identity.subject -> guest_families.player_id. Family state is CURRENT; it does not imply status on the original play date.');
             console.log('| UTC manifest date | Current guest state | Claims | With accepted moves | Completed | Published |');
             console.log('| --- | --- | --- | --- | --- | --- |');
             const days = ['2026-11-20', '2026-11-21', '2026-11-22'];
-            const states = ['active','revoked','unmatched'];
+            const states = ['active_guest','revoked_guest','guest_no_family','other_issuer','identity_unmatched'];
             for (const day of days) for (const state of states) {
               const r = result.rows.find(r => r.day === day && r.guest_state === state);
               console.log('| ' + day + ' | ' + state + ' | ' +
