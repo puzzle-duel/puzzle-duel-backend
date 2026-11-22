@@ -1,5 +1,7 @@
 # PZD-49 — Isolated staging CD (Forest Dash shared host)
 
+> **CURRENT CONFIGURATION (2026-11-22):** Read [docs/staging/SERVER-CONFIG.md](../../docs/staging/SERVER-CONFIG.md) first. This older PZD-49 plan retains historical, superseded gates/status. **Oracle IP is 84.13.66.211**, backend CD is deployed on `version/**` pushes; the public HTTPS staging endpoint remains **unverified/broken**. Do not rely on the old “not deployed” text or `APPROVED_FOR_CD` instructions below.
+
 ## Status
 Pipeline code prepared on PZD-49 branch. **Not deployed or end-to-end validated.** The existing Forest Dash service is not a deployment target. Production will use a separate server and remains subject to PZD-45.
 
