@@ -113,3 +113,19 @@ test('client retry flag cannot rotate when staging server feature is off', async
   assert.equal(pool.refreshes.size, 1);
   assert.equal([...pool.families.values()][0]!.revoked_at, null);
 });
+
+test('late duplicate of same rotation proof cannot revoke an already advanced family', async () => {
+  const pool = new FakePool();
+  const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test', true);
+  const t = new Date('2026-11-22T00:02:00.000Z');
+  const initial = await guest.create(t);
+  const firstId = '0123456789abcdef0123456789abcdef';
+  const secondId = 'fedcba9876543210fedcba9876543210';
+  const rotated = await guest.refresh(initial.refreshToken, firstId, t);
+  await guest.refresh(rotated.refreshToken, secondId, new Date(t.getTime() + 10_000));
+  await assert.rejects(
+    () => guest.refresh(initial.refreshToken, firstId, new Date(t.getTime() + 20_000)),
+    (e: unknown) => e instanceof GuestCredentialError && e.code === 'INVALID_REFRESH',
+  );
+  assert.equal([...pool.families.values()][0]!.revoked_at, null);
+});
