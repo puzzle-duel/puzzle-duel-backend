@@ -105,6 +105,8 @@ export class PostgresStagingGuestAuth {
   }
 
   async refresh(refreshToken: string, rotationId?: string, now = new Date()) {
+    // Prevent enabled clients from silently rotating without retry guarantees.
+    if (rotationId !== undefined && !this.retryableRotation) throw new Error('GUEST_RETRY_NOT_READY');
     if (rotationId !== undefined && !ROTATION_ID.test(rotationId)) {
       throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_FORMAT_INVALID');
     }
