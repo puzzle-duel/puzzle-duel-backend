@@ -37,11 +37,41 @@
 - **`staging.puzzle-duel.app` is a proposed/configured hostname, not a deployed/verified domain.** The Mac test `curl https://staging.puzzle-duel.app/healthz` returned `Could not resolve host` on 2026-11-22.
 - Mac test `curl -vk https://84.13.66.211/healthz`: TCP/443 connected, **TLS handshake failed** with `tlsv1 alert internal error`.
 - Mac test `curl --resolve staging.puzzle-duel.app:443:84.13.66.211 https://staging.puzzle-duel.app/healthz`: same TLS handshake failure. DNS-only bypass did **not** fix TLS.
-- No verified public Puzzle Duel HTTPS origin exists in the evidence as of this revision. **Do not use `https://staging.puzzle-duel.app` or `https://84.13.66.211` as if it worked.**
+- A live Caddy hostname was found later in this same revision; see section 2A. Public HTTPS health/TLS has not yet been verified. **Do not use `https://staging.puzzle-duel.app` or `https://84.13.66.211` as if it worked.**
 - Existing `ops/staging/Caddyfile.example` is a **template**, not evidence that the live `/etc/caddy/Caddyfile` includes that site. Existing HTTPS/Forest Dash routing must be inspected read-only on the VM before changes.
 - The Flutter `GuestAuthClient` **requires HTTPS**. It also checks the JWT `iss` claim `https://staging.puzzle-duel.app`, matching backend staging guest issuer. If adopting a real IP-based or alternate-domain HTTPS origin, explicitly review trusted TLS certificate, public ingress, and issuer config/contract; changing a `--dart-define` alone is not sufficient.
 - Never bind port 8787 to the public interface or expose it directly to the internet as a workaround.
 - **Decision outstanding:** configure a secure public HTTPS ingress for this Oracle IP, without modifying Forest Dash routes. When functional, record the verified public origin here AND in the client companion document.
+
+## 2A. LIVE CADDYFILE FOUND — 2026-11-22 (operator output)
+
+The operator read **`/etc/caddy/Caddyfile`** on `forest-dash-vnic`; this is the **actual live hostname** rather than the earlier unverified sample:
+
+```caddyfile
+:80 {
+    root * /var/www/forest-dash
+
+    handle /ws {
+        reverse_proxy 127.0.0.1:3001
+    }
+
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+84-13-66-211.sslip.io {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+- **Configured Puzzle Duel staging public hostname:** `84-13-66-211.sslip.io`
+- **Candidate HTTPS API origin:** `https://84-13-66-211.sslip.io` — **TLS and external /healthz still need verification**.
+- `staging.puzzle-duel.app` is **NOT** the live Caddy hostname. It appears in app/backend code as a **JWT issuer identifier**, which can remain independent of the HTTPS connection origin as long as both sides expect the same issuer.
+- **Do not replace or erase the `:80` Forest Dash block**. Its HTTP paths and websocket proxy target `127.0.0.1:3001` are separate from Puzzle Duel.
+- DNS/HTTP/TLS smoke test on the Mac (not Oracle): `curl -i --connect-timeout 5 --max-time 12 https://84-13-66-211.sslip.io/healthz`. Expect `200` with a trusted certificate. Do not use `-k` as evidence that iOS will trust TLS.
+- Until that test succeeds, this hostname is **configured**, not yet confirmed externally reachable.
 
 ## 3. Server runtime configuration — names, not secret values
 
