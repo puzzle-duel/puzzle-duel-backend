@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { safeDiagnosticErrorCode } from './http-correlation.mts';
 
-/** Staging-only, in-memory diagnostic reports. Never stores tokens or raw errors. */
+/** Staging-only validated diagnostic reports. Never stores tokens or raw errors. */
 export class DiagnosticReportStore {
   private readonly reports = new Map<string, { expiresAt: number; events: readonly unknown[] }>();
   private readonly lastByPlayer = new Map<string, number>();
   private readonly now: () => number;
-  constructor(now: () => number = Date.now) {
+  constructor(
+    now: () => number = Date.now,
+    private readonly persist?: (reportId: string, events: readonly unknown[]) => void,
+  ) {
     this.now = now;
   }
 
@@ -76,6 +79,15 @@ export class DiagnosticReportStore {
       this.reports.delete(oldest);
     }
     const reportId = randomUUID();
+    if (this.persist) {
+      try {
+        this.persist(reportId, events);
+      } catch {
+        // Never acknowledge HTTP 201 for a report that was not persisted.
+        // No tokens, stack traces or raw exception strings in logs.
+        return { ok: false, status: 503, error: 'DIAGNOSTICS_UNAVAILABLE' };
+      }
+    }
     this.reports.set(reportId, { expiresAt: now + 3_600_000, events });
     this.lastByPlayer.set(playerId, now);
     return { ok: true, reportId };
