@@ -83,6 +83,7 @@ jobs:
               'RECOVERY_NOT_ELIGIBLE', 'RECOVERY_PROOF_INVALID', 'PLAYER_MISMATCH',
               'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
               'INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
+              'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING',
           }
           records = []
           for path in (base + '.1', base):
@@ -139,12 +140,16 @@ jobs:
           print('| HTTP | Route | Safe backend error code |')
           print('| --- | --- | --- |')
           for status, _, route, error, _ in failures:
-              print('| %d | %s | %s |' % (status, route, error))
+              # No individual guest-token subreason in public per-request rows.
+              shown = 'INVALID_REFRESH' if route == 'guest_auth' and error in (
+                  'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING') else error
+              print('| %d | %s | %s |' % (status, route, shown))
           if not failures:
               print('No tournament failures in retained metadata log files.')
           refresh_failures = [r for r in records if r[1] == 'tournament_http' and
                               r[2] == 'guest_auth' and r[0] == 401 and
-                              r[3] in ('INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED')]
+                              r[3] in ('INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
+                                       'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING')]
           print()
           print('### Guest refresh failures (allowlisted categories only)')
           print()
@@ -160,8 +165,10 @@ jobs:
               found = next((r for r in reversed(records) if r[4] == target), None)
               if found:
                   print('Request ID matched in retained Oracle metadata.')
+                  safe_code = 'INVALID_REFRESH' if found[2] == 'guest_auth' and found[3] in (
+                      'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING') else found[3]
                   print('HTTP: **%d**; route: **%s**; safe error code: **%s**' %
-                        (found[0], found[2], found[3]))
+                        (found[0], found[2], safe_code))
               else:
                   print('No matching request ID in current or rotated Oracle metadata logs.')
                   print('The request may predate retention or the logging enhancement.')
