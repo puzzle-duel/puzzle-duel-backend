@@ -39,6 +39,7 @@ const SAFE_ERROR_CODES = new Set([
   'IDLE_EXPIRED', 'HARD_CUTOFF_EXPIRED', 'SNAPSHOT_CHANGED',
   'INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
   'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING',
+  'GUEST_LOGOUT_REVOKED',
 ]);
 
 export function safeDiagnosticErrorCode(value: unknown): string | undefined {
