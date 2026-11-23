@@ -21,6 +21,7 @@ export interface DiagnosticHttpEvent {
   readonly operation: string;
   readonly route?: string;
   readonly errorCode?: string;
+  readonly writerDenial?: 'SESSION_MISMATCH' | 'DEVICE_MISMATCH' | 'GENERATION_MISMATCH';
   readonly method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'OTHER';
   readonly status: number | null;
   readonly durationMs: number;
@@ -67,6 +68,7 @@ export function buildHttpDiagnostic(input: {
   operation: string;
   route?: string;
   errorCode?: unknown;
+  writerDenial?: unknown;
   method: string;
   status?: number;
   durationMs: number;
@@ -88,6 +90,11 @@ export function buildHttpDiagnostic(input: {
     operation: input.operation,
     ...(input.route ? { route: input.route } : {}),
     ...(safeDiagnosticErrorCode(input.errorCode) ? { errorCode: safeDiagnosticErrorCode(input.errorCode) } : {}),
+    ...(input.errorCode === 'WRITER_NOT_AUTHORIZED' &&
+      (input.writerDenial === 'SESSION_MISMATCH' ||
+       input.writerDenial === 'DEVICE_MISMATCH' ||
+       input.writerDenial === 'GENERATION_MISMATCH')
+      ? { writerDenial: input.writerDenial } : {}),
     method,
     status,
     durationMs: Math.round(input.durationMs),
