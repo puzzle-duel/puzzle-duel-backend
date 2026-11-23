@@ -7,6 +7,7 @@ import { buildHttpDiagnostic, diagnosticRoute, resolveRequestId } from '../diagn
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { appendFileSync, lstatSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { createGuestAuthHttpHandler, guestAuthDiagnosticReason } from './guest-auth-http.mts';
+import { redeemEnrollmentCode, EnrollmentRejected } from './named-device-enrollment.mts';
 import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
@@ -79,6 +80,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       }
     };
     let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
+    let enrollmentHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     let tournamentHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     let sessionHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     if (config.guestAuthEnabled) {
@@ -101,6 +103,53 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
               AND column_name='rotation_id_digest') AS present`,
         );
         if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
+      }
+      if (env.PZD_STAGING_DEVICE_ENROLLMENT_ENABLED === 'true') {
+        const ready = await pool.query<{ present: string | null }>(
+          "SELECT to_regclass('public.pzd_staging_device_enrollment')::text AS present");
+        if (!ready.rows[0]?.present) throw new Error('Named enrollment migration not applied');
+        enrollmentHandler = async (req, res) => {
+          const reply = (status: number, error: string) => {
+            res.writeHead(status); res.end(JSON.stringify({ error }));
+          };
+          if (req.method !== 'POST' || req.url !== '/v1/auth/named-enroll') {
+            reply(405, 'METHOD_NOT_ALLOWED'); return;
+          }
+          if (req.headers['x-forwarded-proto'] !== 'https') {
+            reply(403, 'HTTPS_REQUIRED'); return;
+          }
+          if (!req.headers['content-type']?.startsWith('application/json') ||
+              req.headers['transfer-encoding'] !== undefined ||
+              Number(req.headers['content-length'] ?? '0') > 512) {
+            reply(400, 'INVALID_REQUEST'); return;
+          }
+          let size = 0;
+          const chunks: Buffer[] = [];
+          for await (const chunk of req) {
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            size += bytes.length;
+            if (size > 512) { reply(413, 'PAYLOAD_TOO_LARGE'); return; }
+            chunks.push(bytes);
+          }
+          try {
+            const body: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+            if (!body || typeof body !== 'object' || Array.isArray(body) ||
+                Object.keys(body).length !== 1 ||
+                typeof (body as Record<string, unknown>).code !== 'string') {
+              reply(400, 'INVALID_REQUEST'); return;
+            }
+            const result = await redeemEnrollmentCode(
+              pool, privateKey, config.keyId!, (body as {code: string}).code);
+            res.writeHead(200);
+            res.end(JSON.stringify(result));
+          } catch (error) {
+            if (error instanceof EnrollmentRejected || error instanceof SyntaxError) {
+              reply(401, 'ENROLLMENT_REJECTED');
+            } else {
+              reply(503, 'ENROLLMENT_UNAVAILABLE');
+            }
+          }
+        };
       }
       guestHandler = createGuestAuthHttpHandler(
         new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
@@ -234,6 +283,13 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           if (!res.headersSent) {
             res.writeHead(503); res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
           } else { res.destroy(); }
+        });
+        return;
+      }
+      if (enrollmentHandler && req.url === '/v1/auth/named-enroll') {
+        void enrollmentHandler(req, res).catch(() => {
+          if (!res.headersSent) { res.writeHead(503); res.end(JSON.stringify({error:'ENROLLMENT_UNAVAILABLE'})); }
+          else { res.destroy(); }
         });
         return;
       }
