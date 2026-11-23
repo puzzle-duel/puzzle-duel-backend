@@ -63,7 +63,7 @@ export class PostgresStagingGuestAuth {
     this.retryableRotation = retryableRotation;
   }
 
-  async create(now = new Date(), beforeCommit?: (credentials: { accessToken: string; refreshToken: string; expiresAt: string }) => void) {
+  async create(now = new Date(), beforeCommit?: (credentials: { accessToken: string; refreshToken: string; expiresAt: string }, context: { client: pg.PoolClient; playerId: string }) => Promise<void>) {
     const playerId = randomUUID();
     const familyId = randomUUID();
     const refreshToken = opaqueToken();
@@ -83,7 +83,7 @@ export class PostgresStagingGuestAuth {
       };
       // Operator-only hook: persist credentials before committing identity.
       // If persistence fails, rollback prevents an orphaned account.
-      beforeCommit?.(credentials);
+      if (beforeCommit) await beforeCommit(credentials, { client, playerId });
       await client.query('COMMIT');
       return credentials;
     } catch (error) {
