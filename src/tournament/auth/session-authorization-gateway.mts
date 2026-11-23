@@ -28,7 +28,11 @@ export interface SessionAuthorizationGatewayDeps {
   ) => Promise<number>;
 }
 
+export type WriterDenialCategory = 'SESSION_MISMATCH' | 'DEVICE_MISMATCH' | 'GENERATION_MISMATCH';
+
 export class SessionAuthorizationGateway implements AuthorizationGateway {
+  /** Staging-only static forensics; never contains identifiers or secrets. */
+  writerDenialCategory: WriterDenialCategory | null = null;
   readonly #deps: SessionAuthorizationGatewayDeps;
 
   constructor(deps: SessionAuthorizationGatewayDeps) {
@@ -41,6 +45,7 @@ export class SessionAuthorizationGateway implements AuthorizationGateway {
     clientClaimedPlayerId?: string;
     clientClaimedWriterGeneration?: number;
   }): Promise<AuthorizationDecision> {
+    this.writerDenialCategory = null;
     if (!args.clientClaimedSeriesKey) {
       return { ok: false, reason: 'AUTH_REQUIRED' };
     }
@@ -67,16 +72,19 @@ export class SessionAuthorizationGateway implements AuthorizationGateway {
     // P0-F11 fail-closed: only the active writer session/device may mutate,
     // including device_handoff. Cross-device seize by another same-player
     // session is rejected; broader recovery policy remains BLOCKED.
-    if (
-      writer.sessionId !== this.#deps.session.sessionId ||
-      writer.deviceId !== this.#deps.session.deviceId
-    ) {
+    if (writer.sessionId !== this.#deps.session.sessionId) {
+      this.writerDenialCategory = 'SESSION_MISMATCH';
+      return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
+    }
+    if (writer.deviceId !== this.#deps.session.deviceId) {
+      this.writerDenialCategory = 'DEVICE_MISMATCH';
       return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
     }
     if (
       args.clientClaimedWriterGeneration !== undefined &&
       args.clientClaimedWriterGeneration !== writer.writerGeneration
     ) {
+      this.writerDenialCategory = 'GENERATION_MISMATCH';
       return { ok: false, reason: 'WRITER_NOT_AUTHORIZED' };
     }
 
