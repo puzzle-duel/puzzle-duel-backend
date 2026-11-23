@@ -24,8 +24,15 @@ export async function issueEnrollmentCode(pool: pg.Pool, slug: NamedPlayer, supp
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Serialize re-issuance for this named slug without requiring UPDATE
+    // privileges on the operator-owned identity registry (SELECT-only).
+    // Transaction-scoped lock is released automatically on commit/rollback.
+    await client.query(
+      "SELECT pg_advisory_xact_lock(hashtext('pzd_named_device_enrollment'), hashtext($1::text))",
+      [slug],
+    );
     const found = await client.query<{ player_id: string }>(
-      'SELECT player_id FROM public.pzd_staging_test_players WHERE slug=$1 FOR UPDATE', [slug]);
+      'SELECT player_id FROM public.pzd_staging_test_players WHERE slug=$1', [slug]);
     if (found.rowCount !== 1) throw new Error('PLAYER_NOT_PROVISIONED');
     const playerId = found.rows[0]!.player_id;
     // Invalidate previously issued, unused codes for the same named identity.
