@@ -122,7 +122,11 @@ before(async () => {
   const now = await dbNow();
   const weeks = visibleWeekStarts(now);
   currentWeek = weeks[0]!;
-  previousWeek = weeks[1]!;
+  // At Monday 00:00–01:00 UTC the immediately preceding week has not yet
+  // reached its established FINAL cutoff. Use the latest *settled* visible
+  // previous week so these integration cases remain independent of CI time.
+  previousWeek = weeks.find((week, index) =>
+    index > 0 && now >= weeklyFinalCutoffMs(week))!;
   faultWeek = weeks[3]!;
   assert.ok(now >= weeklyFinalCutoffMs(previousWeek));
   assert.ok(now < weeklyFinalCutoffMs(currentWeek));
