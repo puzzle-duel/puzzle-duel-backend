@@ -66,3 +66,25 @@ test('HTTP route classifier never includes series IDs or query strings', () => {
   assert.equal(diagnosticRoute('/v1/auth/guest'), 'guest_auth');
   assert.equal(diagnosticRoute('/malicious/secret'), 'other');
 });
+
+test('writer mismatch subtype is emitted only for exact sanctioned writer denials', () => {
+  const base = {
+    requestId: 'abcdef0123456789abcdef0123456789',
+    operation: 'tournament_http', method: 'POST', status: 409,
+    durationMs: 5,
+  };
+  for (const writerDenial of ['SESSION_MISMATCH', 'DEVICE_MISMATCH', 'GENERATION_MISMATCH']) {
+    const event = buildHttpDiagnostic({ ...base, errorCode: 'WRITER_NOT_AUTHORIZED', writerDenial });
+    assert.equal(event.writerDenial, writerDenial);
+    assert.equal(JSON.stringify(event).includes('sessionSecret'), false);
+  }
+  for (const errorCode of ['UNAUTHENTICATED', 'WRITER_NOT_AUTHORIZED']) {
+    for (const writerDenial of ['player-123', 'Bearer sensitive', '<script>']) {
+      const event = buildHttpDiagnostic({ ...base, errorCode, writerDenial });
+      assert.equal('writerDenial' in event, false);
+    }
+  }
+  assert.equal('writerDenial' in buildHttpDiagnostic({
+    ...base, errorCode: 'UNAUTHENTICATED', writerDenial: 'SESSION_MISMATCH',
+  }), false);
+});
