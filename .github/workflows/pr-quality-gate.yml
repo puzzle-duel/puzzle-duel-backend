@@ -23,6 +23,8 @@ jobs:
           fetch-depth: 0
       - name: Quality gate tests
         run: python3 tools/pr_quality_gate_test.py
+      - name: Diagnostic report selection regression
+        run: python3 -m unittest discover -s test/diagnostics -p 'test_latest_report_selection.py' -v
       - name: Quality gate
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
