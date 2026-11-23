@@ -17,7 +17,7 @@ const script = source.split('\n').filter(Boolean).map(line => {
   return line.slice(10);
 }).join('\n') + '\n';
 
-function execute(inputs: Record<string,string>) {
+function execute(inputs: Partial<Record<string,string>>) {
   const dir = mkdtempSync(join(tmpdir(), 'pzd-inspector-'));
   try {
     mkdirSync(join(dir, 'bin'));
