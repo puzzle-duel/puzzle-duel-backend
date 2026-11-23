@@ -5,4 +5,4 @@ CREATE TABLE public.pzd_staging_enrollment_grants (
   expires_at timestamptz NOT NULL
 );
 REVOKE ALL ON public.pzd_staging_enrollment_grants FROM PUBLIC;
-GRANT SELECT, INSERT, DELETE ON public.pzd_staging_enrollment_grants TO pzd_app_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.pzd_staging_enrollment_grants TO pzd_app_runtime;
