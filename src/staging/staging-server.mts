@@ -102,6 +102,10 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         );
         if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
       }
+      const enrollmentReady = await pool.query<{ exists: string | null }>(
+        "SELECT to_regclass('public.pzd_staging_enrollment_grants')::text AS exists",
+      );
+      if (!enrollmentReady.rows[0]?.exists) throw new Error('Named enrollment schema not ready');
       guestHandler = createGuestAuthHttpHandler(
         new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
       );
