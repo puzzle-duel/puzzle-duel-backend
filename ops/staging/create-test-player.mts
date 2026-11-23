@@ -4,7 +4,7 @@
  * Uses the existing staging guest issuer until provider-backed test identities exist.
  */
 import { createPrivateKey } from 'node:crypto';
-import { readFileSync, openSync, writeFileSync, closeSync, unlinkSync, statSync, fsyncSync, fstatSync } from 'node:fs';
+import { readFileSync, openSync, writeFileSync, closeSync, unlinkSync, statSync, fsyncSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
 import { PostgresStagingGuestAuth } from '../../src/staging/guest-auth-service.mts';
@@ -46,9 +46,8 @@ async function main(): Promise<void> {
     const privateKey = createPrivateKey(readFileSync(keyFile));
     const auth = new PostgresStagingGuestAuth(pool, privateKey, kid);
     await auth.create(new Date(), (issued) => {
-    // Persist credentials while the DB transaction is still open.
-    // A write/fsync error rolls back the account rather than orphaning it.
-    writeFileSync(fd, JSON.stringify({
+      // A write/fsync failure rolls back the database transaction.
+      writeFileSync(fd, JSON.stringify({
       displayName: player.name,
       accountKind: 'staging-test-guest',
       note: 'Operator test identity only; NOT Apple/Google verified. Never use in production.',
