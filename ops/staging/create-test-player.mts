@@ -40,27 +40,31 @@ async function main(): Promise<void> {
   }
   // Exclusive creation: do not overwrite or silently rotate an existing identity.
   const fd = openSync(destination, 'wx', 0o600);
-  const pool = new pg.Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 3000 });
   let committed = false;
+  let pool: pg.Pool | undefined;
   try {
     const privateKey = createPrivateKey(readFileSync(keyFile));
+    pool = new pg.Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 3000 });
     const auth = new PostgresStagingGuestAuth(pool, privateKey, kid);
     await auth.create(new Date(), (issued) => {
-      // A write/fsync failure rolls back the database transaction.
+      // Persist and sync credentials before committing the guest account.
+      // A failed write rolls back the DB transaction.
       writeFileSync(fd, JSON.stringify({
-      displayName: player.name,
-      accountKind: 'staging-test-guest',
-      note: 'Operator test identity only; NOT Apple/Google verified. Never use in production.',
-      ...issued,
-    }, null, 2) + '\n');
-    console.log('Staging test player created. Credentials written to private file (0600).');
-    console.log('Do not paste credentials into chat, CI output or GitHub.');
+        displayName: player.name,
+        accountKind: 'staging-test-guest',
+        note: 'Operator test identity only; NOT Apple/Google verified.',
+        ...issued,
+      }, null, 2) + '\\n');
+      fsyncSync(fd);
+    });
+    committed = true;
+    console.log('Staging test player created; private credentials stored (0600).');
   } catch (error) {
     if (!committed) unlinkSync(destination);
     throw error;
   } finally {
     closeSync(fd);
-    await pool.end();
+    if (pool) await pool.end();
   }
 }
 
