@@ -11,6 +11,7 @@ import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
 import { createStagingTournamentHandler } from './staging-tournament.mts';
+import { writerDenialDiagnostic } from '../tournament/auth/tournament-http.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
 
@@ -169,6 +170,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
               ? 'diagnostic_report' : 'tournament_http',
             route: diagnosticRoute(req.url),
             errorCode: guestAuthDiagnosticReason(res) ?? res.getHeader('x-pzd-error-code'),
+            writerDenial: writerDenialDiagnostic(res),
             method: req.method ?? 'OTHER',
             status: res.statusCode,
             durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
