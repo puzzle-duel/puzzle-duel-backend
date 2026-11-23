@@ -8,6 +8,7 @@ export function guestAuthDiagnosticReason(res: ServerResponse): string | undefin
 }
 
 export interface GuestAuthGateway {
+  enroll(code: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string; playerId: string }>;
   create(): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   refresh(token: string, rotationId?: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   logout(token: string): Promise<void>;
@@ -19,7 +20,7 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
   const attempts = new Map<string, { count: number; resetAt: number }>();
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const path = req.url?.split('?')[0];
-    if (!['/v1/auth/guest', '/v1/auth/refresh', '/v1/auth/logout'].includes(path ?? '')) return false;
+    if (!['/v1/auth/guest', '/v1/auth/refresh', '/v1/auth/logout', '/v1/auth/enroll'].includes(path ?? '')) return false;
     res.setHeader('cache-control', 'no-store');
     res.setHeader('content-type', 'application/json');
     const reply = (status: number, data: object) => {
@@ -76,6 +77,15 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
         return true;
       }
       const data = payload as Record<string, unknown>;
+      if (path === '/v1/auth/enroll') {
+        if (Object.keys(data).length !== 1 || typeof data.code !== 'string' ||
+            !/^[0-9a-f]{32}$/.test(data.code)) {
+          reply(400, { error: 'INVALID_REQUEST' });
+          return true;
+        }
+        reply(200, await gateway.enroll(data.code));
+        return true;
+      }
       if (path === '/v1/auth/guest') {
         if (Object.keys(data).length !== 0) {
           reply(400, { error: 'INVALID_REQUEST' });
