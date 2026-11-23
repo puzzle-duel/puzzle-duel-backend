@@ -382,9 +382,11 @@ describe('PZD-41 F2 versioned migrations and privileges', () => {
 
   it('separates runtime, reader, settlement, and audit privileges on the installed schema', async () => {
     const admin = new pg.Pool({ connectionString: urlFor(GATE) });
+    // Use a reliably FINAL-eligible historical week even during Monday
+    // 00:00–01:00 UTC settlement grace. No cutoff behavior is changed.
     const weeks = await admin.query(
       `SELECT to_char(date_trunc('week', clock_timestamp() AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS current_week,
-              to_char((date_trunc('week', clock_timestamp() AT TIME ZONE 'UTC')::date - 7), 'YYYY-MM-DD') AS previous_week`,
+              to_char((date_trunc('week', clock_timestamp() AT TIME ZONE 'UTC')::date - 14), 'YYYY-MM-DD') AS previous_week`,
     );
     const currentWeek = String(weeks.rows[0].current_week);
     const previousWeek = String(weeks.rows[0].previous_week);
