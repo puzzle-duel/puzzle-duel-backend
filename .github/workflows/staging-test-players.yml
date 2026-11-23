@@ -40,12 +40,6 @@ jobs:
           cd /home/pzd-staging/pzd-staging/current
           test -f ops/staging/create-test-player.mts
           for player in gokhan serap; do
-            file="/home/pzd-staging/pzd-staging/${player}-test-player.credentials.json"
-            if [[ -e "$file" ]]; then
-              test -s "$file" || { echo "Incomplete existing credential file; operator recovery required"; exit 1; }
-              echo "Staging identity already provisioned: $player"
-              continue
-            fi
             PZD_TEST_PLAYER_CREATE=YES PZD_TEST_PLAYER="$player" \
               /opt/pzd-node26/bin/node --env-file=/home/pzd-staging/pzd-staging/staging.env \
               --experimental-strip-types ops/staging/create-test-player.mts
