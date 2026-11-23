@@ -3,7 +3,7 @@
  * Operator-only: never mount as an HTTP route or run during deployment.
  * Uses the existing staging guest issuer until provider-backed test identities exist.
  */
-import { createPrivateKey, randomUUID } from 'node:crypto';
+import { createPrivateKey } from 'node:crypto';
 import { readFileSync, openSync, writeFileSync, closeSync, unlinkSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
@@ -27,8 +27,14 @@ async function main(): Promise<void> {
     throw new Error('Missing staging signing configuration');
   }
   if ((statSync(keyFile).mode & 0o077) !== 0) throw new Error('Signing key permissions too broad');
-  const destination = resolve(process.env.PZD_TEST_PLAYER_CREDENTIAL_FILE ??
-    '/home/pzd-staging/pzd-staging/gokhan-test-player.credentials.json');
+  const selection = process.env.PZD_TEST_PLAYER;
+  const players: Record<string, { name: string; file: string }> = {
+    gokhan: { name: 'Gökhan Aydın', file: 'gokhan-test-player.credentials.json' },
+    serap: { name: 'Serap Nazlı Aydın', file: 'serap-test-player.credentials.json' },
+  };
+  const player = selection ? players[selection] : undefined;
+  if (!player) throw new Error('Select PZD_TEST_PLAYER=gokhan or serap');
+  const destination = resolve('/home/pzd-staging/pzd-staging', player.file);
   if (!destination.startsWith('/home/pzd-staging/pzd-staging/')) {
     throw new Error('Credentials must remain in private staging directory');
   }
@@ -42,7 +48,7 @@ async function main(): Promise<void> {
     const issued = await auth.create();
     committed = true;
     writeFileSync(fd, JSON.stringify({
-      displayName: 'Gökhan Aydın',
+      displayName: player.name,
       accountKind: 'staging-test-guest',
       note: 'Operator test identity only; NOT Apple/Google verified. Never use in production.',
       ...issued,
