@@ -60,6 +60,24 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
   const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 3, connectionTimeoutMillis: 3000 });
   try {
     await pool.query('SELECT 1');
+    // Shared private staging sink for HTTP and session lifecycle events.
+    // Do not let diagnostic I/O affect authentication or tournament behavior.
+    const appendStagingDiagnostic = (line: string) => {
+      console.log(line);
+      const path = '/home/pzd-staging/pzd-staging/http-diagnostics.log';
+      try {
+        const existing = lstatSync(path, { throwIfNoEntry: false });
+        if (existing?.isSymbolicLink() || (existing && !existing.isFile())) {
+          throw new Error('Unsafe diagnostic log path');
+        }
+        if (existing && existing.size + Buffer.byteLength(line) + 1 > 5 * 1024 * 1024) {
+          renameSync(path, path + '.1');
+        }
+        appendFileSync(path, line + '\n', { mode: 0o600 });
+      } catch {
+        console.warn('Staging diagnostic file unavailable');
+      }
+    };
     let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
     let tournamentHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     let sessionHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
@@ -116,6 +134,21 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       }
       sessionHandler = async (req, res) => {
         const method = req.method ?? 'GET';
+        const trace = (stage: string) => {
+          // Fixed stage strings only: no player, device, token or session material.
+          // Ingress resolves the ID once and stores it on the response.
+          // Never regenerate it here: invalid/missing client IDs must still correlate.
+          const requestId = res.getHeader('x-request-id');
+          if (typeof requestId !== 'string') return;
+          appendStagingDiagnostic(JSON.stringify({
+            timestamp: new Date().toISOString(),
+            code: 'staging_session_transition',
+            requestId,
+            operation: 'tournament_session',
+            stage,
+          }));
+        };
+        trace('session_request_begin');
         if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) {
           res.writeHead(404); res.end(JSON.stringify({ error: 'NOT_FOUND' })); return;
         }
@@ -125,24 +158,29 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         }
         let identity;
         try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
-        catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
+        catch { trace('jwt_verification_rejected'); res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
         const active = await pool.query(
           'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
           [identity.subject],
         );
         if (!active.rowCount) {
+          trace('guest_family_inactive');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }
         if (method === 'POST') {
+          trace('new_session_open_begin');
           const opened = await sessions.openAfterVerifiedJwt(identity);
+          trace('new_session_open_ok');
           res.writeHead(201); res.end(JSON.stringify(opened)); return;
         }
         const secret = req.headers['x-pzd-session-secret'];
         if (typeof secret !== 'string') {
+          trace('session_secret_missing');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }
         if (method === 'DELETE') {
           const revoked = await sessions.revokeSession(identity, secret);
+          trace(revoked ? 'session_revoke_ok' : 'session_revoke_rejected');
           res.writeHead(revoked ? 204 : 401);
           res.end(revoked ? '' : JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }
@@ -150,8 +188,10 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           ? await sessions.renewActiveSession(identity, secret)
           : await sessions.authenticateVerifiedSession(identity, secret);
         if (!verified) {
+          trace(method === 'PATCH' ? 'session_renew_rejected' : 'session_restore_rejected');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }
+        trace(method === 'PATCH' ? 'session_renew_ok' : 'session_restore_ok');
         res.writeHead(200); res.end(JSON.stringify(verified));
       };
 
@@ -175,23 +215,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             status: res.statusCode,
             durationMs: Number(process.hrtime.bigint() - started) / 1_000_000,
           });
-          const line = JSON.stringify(entry);
-          console.log(line);
-          // The deploy account can read this bounded private log without journal sudo.
-          const path = '/home/pzd-staging/pzd-staging/http-diagnostics.log';
-          try {
-            const existing = lstatSync(path, { throwIfNoEntry: false });
-            if (existing?.isSymbolicLink() || (existing && !existing.isFile())) {
-              throw new Error('Unsafe diagnostic log path');
-            }
-            if (existing && existing.size + Buffer.byteLength(line) + 1 > 5 * 1024 * 1024) {
-              renameSync(path, path + '.1');
-            }
-            appendFileSync(path, line + '\n', { mode: 0o600 });
-          } catch {
-            // Observability must not break staging requests.
-            console.warn('Staging diagnostic file unavailable');
-          }
+          appendStagingDiagnostic(JSON.stringify(entry));
         });
       }
       res.setHeader('cache-control', 'no-store');
