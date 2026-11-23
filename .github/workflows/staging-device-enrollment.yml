@@ -1,0 +1,60 @@
+name: Pair named staging iOS device
+on:
+  workflow_dispatch:
+    inputs:
+      player:
+        description: Named staging player
+        required: true
+        type: choice
+        options: [gokhan, serap]
+      code_sha256:
+        description: SHA-256 hex digest of device secret (not the secret)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: pzd-staging-device-enrollment
+  cancel-in-progress: false
+jobs:
+  register:
+    runs-on: ubuntu-latest
+    environment: pzd-staging
+    timeout-minutes: 8
+    steps:
+      - name: Install pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Register one-time code hash on Oracle staging
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+          PLAYER: ${{ inputs.player }}
+          DIGEST: ${{ inputs.code_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAYER" == gokhan || "$PLAYER" == serap ]]
+          [[ "$DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
+          printf '%s\n' "$PLAYER" "$DIGEST" | ssh $SSH_OPTS "$USER@$HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          REMOTE          ssh $SSH_OPTS "$USER@$HOST" \
+            "PZD_ENROLLMENT_PLAYER='$PLAYER' PZD_ENROLLMENT_DIGEST='$DIGEST' bash -se" <<'REMOTE'
+          set -euo pipefail
+          cd /home/pzd-staging/pzd-staging/current
+          test -f ops/staging/register-device-enrollment.mts
+          /opt/pzd-node26/bin/node --env-file=/home/pzd-staging/pzd-staging/staging.env \
+            --experimental-strip-types ops/staging/register-device-enrollment.mts
+          REMOTE
