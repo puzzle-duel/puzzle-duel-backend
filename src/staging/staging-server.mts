@@ -112,7 +112,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           const reply = (status: number, error: string) => {
             res.writeHead(status); res.end(JSON.stringify({ error }));
           };
-          if (req.method !== 'POST' || req.url !== '/v1/auth/named-enroll') {
+          if (req.method !== 'POST' || req.url !== '/v1/auth/guest?named-enrollment=1') {
             reply(405, 'METHOD_NOT_ALLOWED'); return;
           }
           if (req.headers['x-forwarded-proto'] !== 'https') {
@@ -286,7 +286,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         });
         return;
       }
-      if (enrollmentHandler && req.url === '/v1/auth/named-enroll') {
+      if (enrollmentHandler && req.url === '/v1/auth/guest?named-enrollment=1') {
         void enrollmentHandler(req, res).catch(() => {
           if (!res.headersSent) { res.writeHead(503); res.end(JSON.stringify({error:'ENROLLMENT_UNAVAILABLE'})); }
           else { res.destroy(); }
