@@ -42,13 +42,12 @@ async function main(): Promise<void> {
   const fd = openSync(destination, 'wx', 0o600);
   const pool = new pg.Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 3000 });
   let committed = false;
-  let credentialsWritten = false;
   try {
     const privateKey = createPrivateKey(readFileSync(keyFile));
     const auth = new PostgresStagingGuestAuth(pool, privateKey, kid);
-    const issued = await auth.create();
-    // Persist credentials before marking success. Never remove a file once DB
-    // creation succeeded: it is the only recovery material for that account.
+    await auth.create(new Date(), (issued) => {
+    // Persist credentials while the DB transaction is still open.
+    // A write/fsync error rolls back the account rather than orphaning it.
     writeFileSync(fd, JSON.stringify({
       displayName: player.name,
       accountKind: 'staging-test-guest',
