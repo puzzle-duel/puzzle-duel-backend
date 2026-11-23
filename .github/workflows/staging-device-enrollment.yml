@@ -48,9 +48,7 @@ jobs:
           [[ "$PLAYER" == gokhan || "$PLAYER" == serap ]]
           [[ "$DIGEST" =~ ^[a-f0-9]{64}$ ]]
           SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
-          printf '%s\n' "$PLAYER" "$DIGEST" | ssh $SSH_OPTS "$USER@$HOST" 'bash -se' <<'REMOTE'
-          set -euo pipefail
-          REMOTE          ssh $SSH_OPTS "$USER@$HOST" \
+          ssh $SSH_OPTS "$USER@$HOST" \
             "PZD_ENROLLMENT_PLAYER='$PLAYER' PZD_ENROLLMENT_DIGEST='$DIGEST' bash -se" <<'REMOTE'
           set -euo pipefail
           cd /home/pzd-staging/pzd-staging/current
