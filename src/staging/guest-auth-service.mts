@@ -94,6 +94,54 @@ export class PostgresStagingGuestAuth {
     }
   }
 
+  /** Redeem a device-generated 128-bit challenge authorized out-of-band by the staging operator.
+   * Creates a fresh refresh-token family for the EXISTING player; never reuses
+   * the provisioning credential or creates a new player identity.
+   */
+  async enroll(code: string, now = new Date()) {
+    if (!/^[0-9a-f]{32}$/.test(code)) throw new GuestCredentialError('INVALID_REFRESH');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const granted = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_staging_enrollment_grants
+         WHERE code_digest=$1 AND expires_at>$2 FOR UPDATE`,
+        [digest(code), now],
+      );
+      const playerId = granted.rows[0]?.player_id;
+      if (!playerId) throw new GuestCredentialError('INVALID_REFRESH');
+      // Ensure the target is still the exact operator-provisioned named identity.
+      const player = await client.query(
+        'SELECT 1 FROM public.pzd_staging_test_players WHERE player_id=$1',
+        [playerId],
+      );
+      if (player.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
+      const familyId = randomUUID();
+      const refreshToken = opaqueToken();
+      await client.query(
+        'INSERT INTO public.pzd_guest_families (family_id, player_id) VALUES ($1,$2)',
+        [familyId, playerId],
+      );
+      await client.query(
+        `INSERT INTO public.pzd_guest_refresh (family_id,player_id,token_digest,expires_at)
+         VALUES ($1,$2,$3,$4)`,
+        [familyId, playerId, digest(refreshToken), new Date(now.getTime() + REFRESH_DAYS * 86400000)],
+      );
+      await client.query('DELETE FROM public.pzd_staging_enrollment_grants WHERE code_digest=$1', [digest(code)]);
+      await client.query('COMMIT');
+      return {
+        accessToken: accessJwt(this.privateKey, this.keyId, playerId, now),
+        refreshToken, expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
+        playerId,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async logout(refreshToken: string, now = new Date()): Promise<void> {
     if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) {
       throw new GuestCredentialError('INVALID_REFRESH');
