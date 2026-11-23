@@ -47,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ -n "$RID" || -n "$REPORT" ]] || { echo "::error::request_id or report_id is required"; exit 2; }
+          [[ -z "$RID" || -z "$REPORT" ]] || { echo "::error::Provide only one lookup ID"; exit 2; }
           [[ -z "$RID" || "$RID" =~ ^[a-f0-9]{32}$ ]] || exit 2
           [[ -z "$REPORT" || "$REPORT" =~ ^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$ ]] || exit 2
           # This repository is PUBLIC. Only allowlisted operational metadata
@@ -57,7 +58,7 @@ jobs:
           rid, report = sys.argv[1:3]
           hx = re.compile(r'^[a-f0-9]{32}$')
           uid = re.compile(r'^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
-          if (not rid and not report) or (rid and not hx.fullmatch(rid)) or (report and not uid.fullmatch(report)):
+          if (not rid and not report) or (rid and report) or (rid and not hx.fullmatch(rid)) or (report and not uid.fullmatch(report)):
               sys.exit('Invalid correlation input')
           root='/home/pzd-staging/pzd-staging'
           d=root+'/diagnostic-reports'
@@ -104,7 +105,12 @@ jobs:
                   traces.add(e['traceId'])
           if rid and traces:
               for events in report_files:
-                  selected.extend(e for e in events if e.get('traceId') in traces and e not in selected)
+                  for e in events:
+                      if e.get('traceId') not in traces or e in selected: continue
+                      selected.append(e)
+                      related=e.get('requestId')
+                      if isinstance(related,str) and hx.fullmatch(related):
+                          req_ids.add(related)
           http=[]
           for path in (base+'.1',base):
               if not check_file(path,25*1024*1024): continue
