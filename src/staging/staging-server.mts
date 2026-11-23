@@ -104,10 +104,8 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         );
         if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
       }
-      if (env.PZD_STAGING_DEVICE_ENROLLMENT_ENABLED === 'true') {
-        const ready = await pool.query<{ present: string | null }>(
-          "SELECT to_regclass('public.pzd_staging_device_enrollment')::text AS present");
-        if (!ready.rows[0]?.present) throw new Error('Named enrollment migration not applied');
+      // This route exists only in isolated staging; before migration it fails
+      // closed with ENROLLMENT_UNAVAILABLE, without preventing service startup.
         enrollmentHandler = async (req, res) => {
           const reply = (status: number, error: string) => {
             res.writeHead(status); res.end(JSON.stringify({ error }));
@@ -150,7 +148,6 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             }
           }
         };
-      }
       guestHandler = createGuestAuthHttpHandler(
         new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
       );
