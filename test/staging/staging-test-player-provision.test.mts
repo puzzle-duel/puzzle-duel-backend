@@ -31,3 +31,11 @@ test('provisioning requires explicit workflow and private SSH', () => {
   assert.match(workflow, /for player in gokhan serap/);
   assert.match(cd, /ops\/staging\/create-test-player\.mts/);
 });
+
+test('named profiles and crash reconciliation are DB-backed', () => {
+  assert.match(bootstrap, /reconcileExisting\\(pool, slug, destination\\)/);
+  assert.match(bootstrap, /pzd_staging_test_players/);
+  assert.match(bootstrap, /token_digest=\\$2/);
+  assert.match(bootstrap, /context\\.client\\.query/);
+  assert.doesNotMatch(workflow, /test -s "\\$file"/);
+});
