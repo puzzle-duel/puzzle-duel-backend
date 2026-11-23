@@ -1,0 +1,1 @@
+SELECT CASE WHEN to_regclass('public.pzd_staging_device_enrollment') IS NOT NULL THEN 'PASS' ELSE 'FAIL' END;
