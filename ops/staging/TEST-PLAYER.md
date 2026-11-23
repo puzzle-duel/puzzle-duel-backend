@@ -1,11 +1,13 @@
-# Named staging test players — Gökhan Aydın and Serap Nazlı Aydın
+# Staging-only named test players
 
-These are staging-only guest-backed test identities, **not** Apple/Google verified accounts. No production access or production auth bypass is added.
+Gökhan Aydın and Serap Nazlı Aydın are distinct staging guest-backed accounts, not Apple/Google-verified identities. They are not production identities.
 
-After PR merge and successful `version/0.0.2` deployment, run the GitHub Actions **Provision named staging test players** workflow once. It uses the existing pinned staging SSH secrets and the private Oracle `staging.env`; the owner need not access Oracle. The workflow creates two independent player IDs and refresh families and stores credential material in separate 0600 files on the VM. Re-runs skip existing files; no existing Guest is modified.
+## One-time setup without Oracle terminal access
 
-The credential file contains the requested display name as metadata. **It is not yet a persisted tournament profile name**; that requires a separate profile schema/read-model integration. The Flutter app does not automatically import these identities, and a secure account provisioning/linking mechanism is still needed for selectable Gökhan/Serap builds. Do not put tokens in GitHub secrets, logs, build flags, or chat.
+1. Merge this PR into version/0.0.2 and allow staging CD to deploy the provisioning script.
+2. Apply reviewed migration `0003_named_test_players` through the existing **PZD Reusable Staging Database Migration** workflow in the `pzd-staging-migrations` environment. The migration uses a separate DB owner and backup; it is never run automatically by the app or CD.
+3. Run **Provision named staging test players** workflow from the deployed version branch. Existing staging SSH secrets are used; no operator SSH commands or credentials are pasted into Actions.
 
-The script is not an HTTP endpoint. It refuses production DB, non-staging profile, missing signing key, or absent explicit approval. It fsyncs credentials before committing DB identity; failed file writes roll back the account. A process crash between file persistence and DB commit can leave a credential file with no account: in that case the workflow fails closed and requires an operator recovery procedure, never silent replacement. It does not reset existing players.
+The provisioning script inserts `slug`, `player_id`, and `display_name` into `pzd_staging_test_players` in the same transaction as the guest account and refresh token. Credential files remain mode 0600 on the Oracle VM. On retry, the script checks the DB account and unspent refresh-token digest before treating a file as a completed identity. An orphan file from a pre-commit crash can be recreated only after proving neither the named profile nor its token digest exists. If evidence is ambiguous, provisioning stops without overwriting or rotating credentials.
 
-Staging CD packages the script but **does not run it**. The separate workflow is intentionally manual and auditable.
+This creates persistent profile names in the staging DB, but does not yet integrate them into leaderboard read models or provide Flutter secure credential import. Those are separate tasks. No game mechanics, graphics, or animations change.
