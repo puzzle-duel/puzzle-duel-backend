@@ -126,11 +126,11 @@ jobs:
                       chunk=stream.read(count)
                       # A partial first JSONL record is never parsed.
                       if count<size:
-                          chunk=chunk.partition(b'\\n')[2]
+                          chunk=chunk.partition(b'\n')[2]
                       chunks.insert(0,chunk)
                       remaining-=count
                   if remaining<=0: break
-              return b'\\n'.join(chunks).splitlines()
+              return b'\n'.join(chunks).splitlines()
           http=[]
           if recent:
               lines=latest_http_bytes()
