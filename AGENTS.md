@@ -12,6 +12,9 @@ Accepted ADRs are binding; Proposed ones require owner decision. When unclear ST
 - Use transactional limits, rate limiting, safe request size constraints, structured logging without raw credentials/tokens, minimal personal data; no fake competitors.
 - No paid boosts impacting ranking, no tournament or Monster rollout in MVP.
 
+## Mandatory staging observability reading gate — EVERY backend task
+Before any endpoint, auth/session, request, diagnostics, staging/CD or logging change, read the [client canonical staging observability release gate](https://github.com/puzzle-duel/puzzle-duel-client/blob/version/0.0.2/docs/staging/STAGING-OBSERVABILITY-RELEASE-GATE.md) and backend `.github/workflows/staging-diagnostic-status.yml`, `src/diagnostics/http-correlation.mts`, `src/diagnostics/report-store.mts`, `src/staging/staging-server.mts`. Preserve the same 32-lowercase-hex `x-request-id` from the client, safe route/status/duration/error-code logging and Report ID/Request ID correlation. Keep all event/schema allowlists and privacy constraints synchronized across client, backend and Inspector. Never claim end-to-end verification from passing CI alone; identify NOT_RUN UAT. The named Gökhan/Serap test-player provisioning/enrollment was reverted; do not restore it for logging work. No gameplay or animation changes.
+
 ## Security and deployment
 No secrets or live config in public repo, fixtures, actions logs or PRs. Do not change SportsDash services, network bindings, DB or secrets without approved infrastructure ADR. Feature flags for risky changes, safe migrations, backups/restore and health checks required before production.
 Require API contract tests, replay vectors matching client, concurrency/idempotency/security tests, error path tests and migrations with rollback guidance. Format/lint/test reports must state what actually ran.
