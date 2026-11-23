@@ -1,0 +1,75 @@
+name: PZD Staging Named Player Read-only Verification
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - version/0.0.2
+    paths:
+      - .github/workflows/staging-named-player-verify.yml
+permissions:
+  contents: read
+concurrency:
+  group: pzd-staging-named-player-readonly
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/version/0.0.2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pzd-staging
+    steps:
+      - name: Configure pinned staging SSH
+        shell: bash
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Read named player records on Oracle (no tokens or player IDs)
+        shell: bash
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o ConnectTimeout=10 "$USER@$HOST" 'bash -se' <<'REMOTE' | tee -a "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          cd /home/pzd-staging/pzd-staging/current
+          /opt/pzd-node26/bin/node --env-file=/home/pzd-staging/pzd-staging/staging.env --input-type=module <<'JS'
+          import pg from 'pg';
+          const url = process.env.PZD_STAGING_DATABASE_URL;
+          if (process.env.PZD_RUNTIME_PROFILE !== 'staging' || !url) throw Error('Staging profile/database unavailable');
+          const parsed = new URL(url);
+          if (!['localhost','127.0.0.1'].includes(parsed.hostname) || parsed.pathname !== '/pzd_staging') throw Error('Non-staging database refused');
+          const pool = new pg.Pool({connectionString:url, max:1, connectionTimeoutMillis:3000});
+          try {
+            const client = await pool.connect();
+            try {
+              await client.query('BEGIN READ ONLY');
+              const check = await client.query("SELECT to_regclass('public.pzd_staging_test_players') IS NOT NULL AS present");
+              console.log('## Oracle staging named player verification');
+              if (!check.rows[0].present) {
+                console.log('Migration: NOT_APPLIED');
+                console.log('gokhan: NOT_VERIFIED');
+                console.log('serap: NOT_VERIFIED');
+              } else {
+                console.log('Migration: APPLIED');
+                const result = await client.query("SELECT slug, display_name FROM public.pzd_staging_test_players WHERE slug IN ('gokhan','serap')");
+                for (const [slug,name] of [['gokhan','Gökhan Aydın'],['serap','Serap Nazlı Aydın']]) {
+                  const matching = result.rows.filter(row=>row.slug===slug && row.display_name===name);
+                  console.log(slug+': '+(matching.length===1?'PRESENT':'NOT_VERIFIED'));
+                }
+              }
+              await client.query('ROLLBACK');
+            } finally { client.release(); }
+          } finally { await pool.end(); }
+          JS
+          REMOTE
