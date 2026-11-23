@@ -1,6 +1,6 @@
 /** Staging-only, one-time named-player device enrollment.
  * A pairing code is an authorization secret: never log or put it in CI artifacts.
- * Codes are stored only as SHA-256 digests, expire in five minutes, and can
+ * Codes are stored only as SHA-256 digests, expire in fifteen minutes, and can
  * create one independent refresh family for an EXISTING named player.
  */
 import { createHash, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto';
@@ -9,7 +9,7 @@ import { GUEST_AUDIENCE, GUEST_ISSUER } from './guest-auth-service.mts';
 
 const CODE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-const TTL_MS = 5 * 60 * 1000;
+const TTL_MS = 15 * 60 * 1000;
 const REFRESH_MS = 30 * 86400 * 1000;
 const ACCESS_MS = 15 * 60 * 1000;
 export type NamedPlayer = 'gokhan' | 'serap';
@@ -25,10 +25,10 @@ export async function ensureEnrollmentSchema(pool: pg.Pool): Promise<void> {
 
 /** Operator-only. Deliver the returned code through an authenticated private
  * channel, never via public GitHub Actions output or workflow artifacts. */
-export async function issueEnrollmentCode(pool: pg.Pool, slug: NamedPlayer, now = new Date()):
-    Promise<{ code: string; expiresAt: string; playerId: string }> {
+export async function issueEnrollmentCode(pool: pg.Pool, slug: NamedPlayer, suppliedDigest: string, now = new Date()):
+    Promise<{ expiresAt: string; playerId: string }> {
   if (slug !== 'gokhan' && slug !== 'serap') throw new Error('INVALID_PLAYER');
-  const code = randomBytes(32).toString('base64url');
+  if (!/^[a-f0-9]{64}$/.test(suppliedDigest)) throw new Error('INVALID_CODE_DIGEST');
   const expiresAt = new Date(now.getTime() + TTL_MS);
   const client = await pool.connect();
   try {
@@ -41,9 +41,9 @@ export async function issueEnrollmentCode(pool: pg.Pool, slug: NamedPlayer, now 
     await client.query('DELETE FROM public.pzd_staging_device_enrollment WHERE player_id=$1', [playerId]);
     await client.query(
       'INSERT INTO public.pzd_staging_device_enrollment(code_digest,player_id,expires_at) VALUES($1,$2,$3)',
-      [digest(code), playerId, expiresAt]);
+      [suppliedDigest, playerId, expiresAt]);
     await client.query('COMMIT');
-    return { code, expiresAt: expiresAt.toISOString(), playerId };
+    return { expiresAt: expiresAt.toISOString(), playerId };
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
