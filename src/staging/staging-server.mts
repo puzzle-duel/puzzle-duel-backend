@@ -73,7 +73,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         if (existing && existing.size + Buffer.byteLength(line) + 1 > 5 * 1024 * 1024) {
           renameSync(path, path + '.1');
         }
-        appendFileSync(path, line + '\\n', { mode: 0o600 });
+        appendFileSync(path, line + '\n', { mode: 0o600 });
       } catch {
         console.warn('Staging diagnostic file unavailable');
       }
