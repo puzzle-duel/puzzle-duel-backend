@@ -24,9 +24,8 @@
     "test:uat": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/uat/tournament-uat-e2e.test.mts",
     "uat:server": "node --experimental-strip-types src/tournament/uat/uat-server.mts serve",
     "uat:issue": "node --experimental-strip-types src/tournament/uat/uat-server.mts issue",
-    "test:uat": "node --experimental-strip-types --test --test-concurrency=1 test/tournament/uat/tournament-uat-e2e.test.mts",
-    "uat:server": "node --experimental-strip-types src/tournament/uat/uat-server.mts serve",
-    "uat:issue": "node --experimental-strip-types src/tournament/uat/uat-server.mts issue"
+    "staging:server": "node --experimental-strip-types src/staging/staging-server.mts",
+    "test:staging": "node --experimental-strip-types --test test/staging/staging-server.test.mts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
