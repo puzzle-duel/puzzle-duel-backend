@@ -619,4 +619,51 @@ describe('PZD-40 authenticated tournament HTTP E2E (candidate OpenAPI)', () => {
     }
   });
 
+  it('owned board identifies current writer session without exposing either session ID', async () => {
+    const env = await boot();
+    try {
+      const auth = env.bearer('pzd50-writer-visibility');
+      const openOwner = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST', headers: { authorization: auth },
+      });
+      assert.equal(openOwner.status, 201);
+      const first = (await openOwner.json()) as { sessionSecret: string };
+      const ownerHeaders = {
+        authorization: auth, 'x-pzd-session-secret': first.sessionSecret,
+        'content-type': 'application/json',
+      };
+      const claimed = await fetch(`${env.base}/v1/tournament/claims/daily`, {
+        method: 'POST', headers: ownerHeaders,
+        body: JSON.stringify({ originalUtcDate: env.today }),
+      });
+      assert.equal(claimed.status, 201);
+      const { seriesId } = (await claimed.json()) as { seriesId: string };
+      const owner = await fetch(
+        `${env.base}/v1/tournament/series/${seriesId}/board`,
+        { headers: ownerHeaders },
+      );
+      assert.equal(owner.status, 200);
+      const ownBoard = await owner.json() as Record<string, unknown>;
+      assert.equal(ownBoard.writerSessionMatches, true);
+      assert.equal(Object.hasOwn(ownBoard, 'sessionId'), false);
+
+      const openedOtherSession = await fetch(`${env.base}/v1/tournament/session`, {
+        method: 'POST', headers: { authorization: auth },
+      });
+      assert.equal(openedOtherSession.status, 201);
+      const second = (await openedOtherSession.json()) as { sessionSecret: string };
+      const fromSecond = await fetch(
+        `${env.base}/v1/tournament/series/${seriesId}/board`,
+        { headers: { authorization: auth, 'x-pzd-session-secret': second.sessionSecret } },
+      );
+      assert.equal(fromSecond.status, 200);
+      const secondBoard = await fromSecond.json() as Record<string, unknown>;
+      assert.equal(secondBoard.writerSessionMatches, false);
+      assert.equal(Object.hasOwn(secondBoard, 'sessionId'), false);
+      assert.equal(secondBoard.stateHash, ownBoard.stateHash);
+    } finally {
+      await env.close();
+    }
+  });
+
 });
