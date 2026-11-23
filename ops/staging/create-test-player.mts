@@ -4,7 +4,7 @@
  * Uses the existing staging guest issuer until provider-backed test identities exist.
  */
 import { createPrivateKey } from 'node:crypto';
-import { readFileSync, openSync, writeFileSync, closeSync, unlinkSync, statSync } from 'node:fs';
+import { readFileSync, openSync, writeFileSync, closeSync, unlinkSync, statSync, fsyncSync, fstatSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
 import { PostgresStagingGuestAuth } from '../../src/staging/guest-auth-service.mts';
@@ -42,11 +42,13 @@ async function main(): Promise<void> {
   const fd = openSync(destination, 'wx', 0o600);
   const pool = new pg.Pool({ connectionString: url, max: 2, connectionTimeoutMillis: 3000 });
   let committed = false;
+  let credentialsWritten = false;
   try {
     const privateKey = createPrivateKey(readFileSync(keyFile));
     const auth = new PostgresStagingGuestAuth(pool, privateKey, kid);
     const issued = await auth.create();
-    committed = true;
+    // Persist credentials before marking success. Never remove a file once DB
+    // creation succeeded: it is the only recovery material for that account.
     writeFileSync(fd, JSON.stringify({
       displayName: player.name,
       accountKind: 'staging-test-guest',
