@@ -14,15 +14,6 @@ const REFRESH_MS = 30 * 86400 * 1000;
 const ACCESS_MS = 15 * 60 * 1000;
 export type NamedPlayer = 'gokhan' | 'serap';
 
-export async function ensureEnrollmentSchema(pool: pg.Pool): Promise<void> {
-  await pool.query(`CREATE TABLE IF NOT EXISTS public.pzd_staging_device_enrollment (
-    code_digest text PRIMARY KEY,
-    player_id uuid NOT NULL REFERENCES public.pzd_guest_accounts(player_id),
-    expires_at timestamptz NOT NULL,
-    consumed_at timestamptz
-  )`);
-}
-
 /** Operator-only. Deliver the returned code through an authenticated private
  * channel, never via public GitHub Actions output or workflow artifacts. */
 export async function issueEnrollmentCode(pool: pg.Pool, slug: NamedPlayer, suppliedDigest: string, now = new Date()):
