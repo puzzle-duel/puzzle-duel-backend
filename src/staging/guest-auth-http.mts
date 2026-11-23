@@ -8,7 +8,7 @@ export function guestAuthDiagnosticReason(res: ServerResponse): string | undefin
 }
 
 export interface GuestAuthGateway {
-  enroll(code: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string; playerId: string }>;
+  enroll?(code: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string; playerId: string }>;
   create(): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   refresh(token: string, rotationId?: string): Promise<{ accessToken: string; refreshToken: string; expiresAt: string }>;
   logout(token: string): Promise<void>;
@@ -83,6 +83,7 @@ export function createGuestAuthHttpHandler(gateway: GuestAuthGateway) {
           reply(400, { error: 'INVALID_REQUEST' });
           return true;
         }
+        if (!gateway.enroll) { reply(503, { error: 'AUTH_UNAVAILABLE' }); return true; }
         reply(200, await gateway.enroll(data.code));
         return true;
       }
