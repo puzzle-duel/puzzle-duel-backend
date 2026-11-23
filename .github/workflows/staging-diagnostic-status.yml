@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
     inputs:
       request_id:
-        description: 'Exact 32-character hex requestId (or specify report_id)'
+        description: 'Optional requestId; leave both inputs empty for latest 1 MiB retained HTTP logs'
         required: false
         type: string
       report_id:
-        description: 'Log Gönder (UAT) report UUID (optional)'
+        description: 'Optional report UUID; leave both inputs empty for latest 1 MiB logs'
         required: false
         type: string
 permissions:
@@ -37,7 +37,7 @@ jobs:
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
-      - name: Correlate retained events by exact requestId and reportId
+      - name: Inspect last 1 MiB or correlate by exact requestId and reportId
         shell: bash
         env:
           HOST: ${{ secrets.PZD_STAGING_HOST }}
@@ -46,7 +46,6 @@ jobs:
           REPORT: ${{ inputs.report_id }}
         run: |
           set -euo pipefail
-          [[ -n "$RID" || -n "$REPORT" ]] || { echo "::error::request_id or report_id is required"; exit 2; }
           [[ -z "$RID" || -z "$REPORT" ]] || { echo "::error::Provide only one lookup ID"; exit 2; }
           [[ -z "$RID" || "$RID" =~ ^[a-f0-9]{32}$ ]] || exit 2
           [[ -z "$REPORT" || "$REPORT" =~ ^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$ ]] || exit 2
@@ -58,8 +57,9 @@ jobs:
           rid, report = sys.argv[1:3]
           hx = re.compile(r'^[a-f0-9]{32}$')
           uid = re.compile(r'^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
-          if (not rid and not report) or (rid and report) or (rid and not hx.fullmatch(rid)) or (report and not uid.fullmatch(report)):
+          if (rid and report) or (rid and not hx.fullmatch(rid)) or (report and not uid.fullmatch(report)):
               sys.exit('Invalid correlation input')
+          recent = not rid and not report
           root='/home/pzd-staging/pzd-staging'
           d=root+'/diagnostic-reports'
           base=root+'/http-diagnostics.log'
@@ -95,7 +95,7 @@ jobs:
           selected=[]
           for events in report_files:
               if report: selected.extend(events)
-              else: selected.extend(e for e in events if e.get('requestId')==rid)
+              elif rid: selected.extend(e for e in events if e.get('requestId')==rid)
           req_ids={rid} if rid else set()
           traces=set()
           for e in selected:
@@ -111,24 +111,60 @@ jobs:
                       related=e.get('requestId')
                       if isinstance(related,str) and hx.fullmatch(related):
                           req_ids.add(related)
+          def latest_http_bytes():
+              # Strict 1 MiB source byte budget, newest first; include rotated
+              # log if the active file has fewer than 1 MiB of data.
+              remaining=1024*1024
+              chunks=[]
+              for path in (base,base+'.1'):
+                  if not check_file(path,25*1024*1024): continue
+                  with open(path,'rb') as stream:
+                      stream.seek(0,os.SEEK_END)
+                      size=stream.tell()
+                      count=min(size,remaining)
+                      stream.seek(size-count)
+                      chunk=stream.read(count)
+                      # A partial first JSONL record is never parsed.
+                      if count<size:
+                          chunk=chunk.partition(b'\n')[2]
+                      chunks.insert(0,chunk)
+                      remaining-=count
+                  if remaining<=0: break
+              return b'\n'.join(chunks).splitlines()
           http=[]
-          for path in (base+'.1',base):
-              if not check_file(path,25*1024*1024): continue
-              with open(path,encoding='utf-8') as stream:
-                  for line in stream:
-                      try: e=json.loads(line)
-                      except (ValueError,TypeError): continue
-                      if not isinstance(e,dict) or e.get('code')!='http_completed' or e.get('requestId') not in req_ids: continue
-                      if type(e.get('status')) is not int or not 100<=e['status']<=599: continue
-                      http.append(e)
+          if recent:
+              lines=latest_http_bytes()
+          else:
+              lines=[]
+              for path in (base+'.1',base):
+                  if not check_file(path,25*1024*1024): continue
+                  with open(path,'rb') as stream:
+                      lines.extend(stream)
+          for line in lines:
+              try: e=json.loads(line)
+              except (ValueError,TypeError,UnicodeDecodeError): continue
+              if not isinstance(e,dict) or e.get('code')!='http_completed': continue
+              if not recent and e.get('requestId') not in req_ids: continue
+              if type(e.get('status')) is not int or not 100<=e['status']<=599: continue
+              http.append(e)
+          if recent:
+              # Correlate the same retained HTTP request IDs with available
+              # submitted diagnostics without including unrelated reports.
+              backend_ids={e.get('requestId') for e in http if isinstance(e.get('requestId'),str)}
+              for events in report_files:
+                  selected.extend(e for e in events if e.get('requestId') in backend_ids)
           print('## Staging Unified Request Log Inspector')
-          print('Only the selected retained correlation is shown; no unrelated accounts.')
+          if recent:
+              print('Mode: latest 1 MiB of retained backend HTTP diagnostics (active, then rotated).')
+              print('Matching submitted client diagnostic events are included when their request IDs are retained.')
+          else:
+              print('Mode: exact requestId/reportId correlation; no unrelated accounts.')
           print('Sanitized metadata only: no identifiers, timestamps, secrets, payloads, IPs or raw events.')
           print()
           print('### Every recorded matching HTTP status')
           print('| # | Method | Route | HTTP | Outcome | Duration | Error code |')
           print('| ---: | --- | --- | ---: | --- | ---: | --- |')
-          for n,e in enumerate(http[:250],1):
+          for n,e in enumerate(http[:10000],1):
               duration=e.get('durationMs')
               duration=str(round(duration))+'ms' if type(duration) in (int,float) and 0<=duration<=120000 else 'n/a'
               print('| %d | %s | %s | %d | %s | %s | %s |' %
@@ -146,7 +182,7 @@ jobs:
           print('### Matching client diagnostic events')
           print('| # | Event | Operation | Method | HTTP | Duration | Error code |')
           print('| ---: | --- | --- | --- | ---: | ---: | --- |')
-          for n,e in enumerate(selected[:100],1):
+          for n,e in enumerate(selected[:10000],1):
               op=e.get('operation')
               op=op if isinstance(op,str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,64}',op) else 'not_recorded'
               status=e.get('httpStatus')
@@ -161,5 +197,5 @@ jobs:
           print()
           print('Scope: current/.1 backend HTTP metadata and 24h private client reports.')
           print('Missing correlation or unlogged events cannot be reconstructed retroactively.')
-          if len(http)>250 or len(selected)>100: print('Output bounded; not all retained rows displayed.')
+          if len(http)>10000 or len(selected)>10000: print('Output truncated at 10,000 rows per category.')
           PY
