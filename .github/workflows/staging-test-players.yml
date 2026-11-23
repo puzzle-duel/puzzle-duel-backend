@@ -1,0 +1,47 @@
+name: Provision named staging test players
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pzd-staging-test-player-provision
+  cancel-in-progress: false
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    environment: pzd-staging
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+      - name: Create both identities once, without exposing credentials
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes"
+          ssh $SSH_OPTS "$USER@$HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /home/pzd-staging/pzd-staging/current
+          test -f ops/staging/create-test-player.mts
+          for player in gokhan serap; do
+            PZD_TEST_PLAYER_CREATE=YES PZD_TEST_PLAYER="$player" \
+              /opt/pzd-node26/bin/node --env-file=/home/pzd-staging/pzd-staging/staging.env \
+              --experimental-strip-types ops/staging/create-test-player.mts
+          done
+          REMOTE
