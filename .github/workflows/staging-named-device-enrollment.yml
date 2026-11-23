@@ -1,0 +1,61 @@
+name: Authorize named iOS staging enrollment
+on:
+  workflow_dispatch:
+    inputs:
+      player:
+        description: 'Named staging player'
+        type: choice
+        required: true
+        options:
+          - gokhan
+          - serap
+      device_code:
+        description: '32-character code shown on the iPhone; expires after 10 minutes'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: pzd-staging-device-enrollment
+  cancel-in-progress: false
+jobs:
+  authorize:
+    if: github.ref == 'refs/heads/version/0.0.2'
+    runs-on: ubuntu-latest
+    environment: pzd-staging
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Validate operator selected code
+        env:
+          CODE: ${{ inputs.device_code }}
+          PLAYER: ${{ inputs.player }}
+        run: |
+          set -euo pipefail
+          [[ "$CODE" =~ ^[0-9a-f]{32}$ ]] || { echo "::error::Invalid device code"; exit 2; }
+          [[ "$PLAYER" == gokhan || "$PLAYER" == serap ]] || exit 2
+      - name: Install pinned staging SSH identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Authorize exact existing named player (no secret output)
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+          CODE: ${{ inputs.device_code }}
+          PLAYER: ${{ inputs.player }}
+        run: |
+          set -euo pipefail
+          [[ "$CODE" =~ ^[0-9a-f]{32}$ ]]
+          [[ "$PLAYER" == gokhan || "$PLAYER" == serap ]]
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "$USER@$HOST" \
+            "cd /home/pzd-staging/pzd-staging/current && PZD_NAMED_ENROLLMENT_APPROVED=YES PZD_ENROLLMENT_CODE='$CODE' PZD_ENROLLMENT_PLAYER='$PLAYER' /opt/pzd-node26/bin/node --env-file=/home/pzd-staging/pzd-staging/staging.env --experimental-strip-types ops/staging/authorize-device-enrollment.mts"
