@@ -17,11 +17,11 @@ test('named test players are isolated to staging DB and explicit selection', () 
 });
 
 test('credential persistence happens before DB commit', () => {
-  const persisted = service.indexOf('beforeCommit?.(credentials)');
+  const persisted = service.indexOf('await beforeCommit(credentials, { client, playerId })');
   const committed = service.indexOf("await client.query('COMMIT')", persisted);
   assert.ok(persisted >= 0 && committed > persisted);
   assert.match(bootstrap, /fsyncSync\(fd\)/);
-  assert.match(bootstrap, /auth\.create\(new Date\(\), \(issued\) =>/);
+  assert.match(bootstrap, /auth\.create\(new Date\(\), async \(issued, context\) =>/);
 });
 
 test('provisioning requires explicit workflow and private SSH', () => {
@@ -33,9 +33,9 @@ test('provisioning requires explicit workflow and private SSH', () => {
 });
 
 test('named profiles and crash reconciliation are DB-backed', () => {
-  assert.match(bootstrap, /reconcileExisting\\(pool, slug, destination\\)/);
+  assert.match(bootstrap, /reconcileExisting\(pool, slug, destination\)/);
   assert.match(bootstrap, /pzd_staging_test_players/);
-  assert.match(bootstrap, /token_digest=\\$2/);
-  assert.match(bootstrap, /context\\.client\\.query/);
-  assert.doesNotMatch(workflow, /test -s "\\$file"/);
+  assert.match(bootstrap, /token_digest=\$2/);
+  assert.match(bootstrap, /context\.client\.query/);
+  assert.doesNotMatch(workflow, /test -s "\$file"/);
 });
