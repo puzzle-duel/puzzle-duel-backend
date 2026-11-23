@@ -102,7 +102,7 @@ async function main(): Promise<void> {
           displayName: player.name,
           accountKind: 'staging-test-guest',
           ...issued,
-        }) + '\\n');
+        }) + '\n');
         fsyncSync(fd);
         persisted = true;
       });
