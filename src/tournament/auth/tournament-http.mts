@@ -20,7 +20,7 @@ import type { DeviceRecoveryProofInput } from './device-recovery-proof.mts';
 import type { AtomicDailyClaimBootstrap } from '../claims/atomic-claim-bootstrap.mts';
 import { resolveActiveSubgameOrdinal } from '../claims/active-ordinal.mts';
 import type { PostgresSeriesWriterStore } from './series-writer-binding.mts';
-import { SessionAuthorizationGateway } from './session-authorization-gateway.mts';
+import { SessionAuthorizationGateway, type WriterDenialCategory } from './session-authorization-gateway.mts';
 import type { TrustedGameplayService } from '../adjudication/trusted-gameplay.mts';
 import { validateUntrustedClientCommand } from '../adjudication/client-commands.mts';
 import type { SeriesFenceStore } from '../ingress/series-fence.mts';
@@ -42,6 +42,12 @@ import {
 } from './ranked-feature-gate.mts';
 
 const MAX_BODY = 16_384;
+const writerDiagnostics = new WeakMap<ServerResponse, WriterDenialCategory>();
+/** Staging ingress reads this for correlated privacy-safe HTTP diagnostics only. */
+export function writerDenialDiagnostic(res: ServerResponse): WriterDenialCategory | undefined {
+  return writerDiagnostics.get(res);
+}
+
 
 function send(res: ServerResponse, status: number, data: unknown): void {
   const body = status === 204 ? '' : JSON.stringify(data);
@@ -444,6 +450,10 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
           return;
         }
         if (decision.decision === 'reject') {
+          if (process.env.PZD_RUNTIME_PROFILE === 'staging' &&
+              decision.reason === 'WRITER_NOT_AUTHORIZED' && gateway.writerDenialCategory) {
+            writerDiagnostics.set(res, gateway.writerDenialCategory);
+          }
           send(res, 409, {
             error: decision.reason,
             admissionResult: decision.admissionResult ?? null,
