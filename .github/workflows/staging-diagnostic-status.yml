@@ -1,3 +1,5 @@
+# GitHub workflow_dispatch UI is defined on default main; runtime reads Oracle staging.
+# Empty inputs intentionally select the latest 1 MiB sanitized HTTP diagnostics.
 name: PZD Staging Unified Request Log Inspector
 on:
   workflow_dispatch:
