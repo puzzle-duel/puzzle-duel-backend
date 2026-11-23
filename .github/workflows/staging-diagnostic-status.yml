@@ -1,26 +1,27 @@
-name: PZD Staging Diagnostic Report Status
-
-# Read-only inspection: never downloads full logs, rotates files, restarts services,
-# deploys, or prints sensitive data. This repository is PUBLIC: workflow output
-# and job summaries are public too. Expose only aggregate HTTP status metadata.
+name: PZD Staging Unified Request Log Inspector
 on:
   workflow_dispatch:
-
+    inputs:
+      request_id:
+        description: 'Exact 32-character hex requestId (or specify report_id)'
+        required: false
+        type: string
+      report_id:
+        description: 'Log Gönder (UAT) report UUID (optional)'
+        required: false
+        type: string
 permissions:
   contents: read
-
 concurrency:
-  group: pzd-staging-diagnostic-readonly
+  group: staging-unified-log-readonly
   cancel-in-progress: false
-
 jobs:
   inspect:
-    name: Inspect recent diagnostic report statuses (read-only)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: pzd-staging
     steps:
-      - name: Configure pinned staging SSH
+      - name: Configure staging SSH
         shell: bash
         env:
           SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
@@ -36,85 +37,129 @@ jobs:
           chmod 600 "$HOME/.ssh/id_ed25519"
           printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
-
-      - name: Summarize diagnostic report HTTP statuses, without exposing raw log
+      - name: Correlate retained events by exact requestId and reportId
         shell: bash
         env:
           HOST: ${{ secrets.PZD_STAGING_HOST }}
           USER: ${{ secrets.PZD_STAGING_USER }}
+          RID: ${{ inputs.request_id }}
+          REPORT: ${{ inputs.report_id }}
         run: |
           set -euo pipefail
-          # Execute only a constant, read-only Python script on Oracle. Never
-          # stream raw logs to GitHub's public runners or Action output.
+          [[ -n "$RID" || -n "$REPORT" ]] || { echo "::error::request_id or report_id is required"; exit 2; }
+          [[ -z "$RID" || -z "$REPORT" ]] || { echo "::error::Provide only one lookup ID"; exit 2; }
+          [[ -z "$RID" || "$RID" =~ ^[a-f0-9]{32}$ ]] || exit 2
+          [[ -z "$REPORT" || "$REPORT" =~ ^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$ ]] || exit 2
+          # This repository is PUBLIC. Only allowlisted operational metadata
+          # leaves Oracle; raw logs/identities/secrets never leave its disk.
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
-            -o ConnectTimeout=10 "$USER@$HOST" 'python3 -' <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
-          import collections
-          import json
-          import os
-          import stat
-          import sys
-
-          base = '/home/pzd-staging/pzd-staging/http-diagnostics.log'
-          reports = []
-          for path in (base + '.1', base):
-              try:
-                  info = os.lstat(path)
-                  if not stat.S_ISREG(info.st_mode):
-                      print('Diagnostic log is not a regular file')
-                      sys.exit(1)
-                  with open(path, encoding='utf-8') as handle:
-                      for line in handle:
-                          try:
-                              item = json.loads(line)
-                          except (ValueError, TypeError):
-                              continue
-                          if not isinstance(item, dict):
-                              continue
-                          if item.get('operation') != 'diagnostic_report':
-                              continue
-                          status = item.get('status')
-                          if type(status) is not int or not (100 <= status <= 599):
-                              continue
-                          reports.append(status)
-              except FileNotFoundError:
-                  continue
-              except (OSError, UnicodeError):
-                  print('Unable to read staging diagnostic metadata')
-                  sys.exit(1)
-
-          recent = reports[-50:]
-          counts = collections.Counter(recent)
-          print('## Puzzle Duel staging diagnostic submissions')
+            -o ConnectTimeout=10 "$USER@$HOST" "python3 - '$RID' '$REPORT'" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import collections, json, os, re, stat, sys, time
+          rid, report = sys.argv[1:3]
+          hx = re.compile(r'^[a-f0-9]{32}$')
+          uid = re.compile(r'^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
+          if (not rid and not report) or (rid and report) or (rid and not hx.fullmatch(rid)) or (report and not uid.fullmatch(report)):
+              sys.exit('Invalid correlation input')
+          root='/home/pzd-staging/pzd-staging'
+          d=root+'/diagnostic-reports'
+          base=root+'/http-diagnostics.log'
+          allowed_codes=set('UNAUTHENTICATED NOT_FOUND MALFORMED_REQUEST RATE_LIMITED AUTH_UNAVAILABLE TOURNAMENT_UNAVAILABLE STALE_WRITER WRITER_NOT_AUTHORIZED WRITER_STILL_ACTIVE SERIES_NOT_OWNED SERIES_STATE_INCONSISTENT SERIES_STATE_CORRUPT SERIES_TERMINAL RECOVERY_NOT_ELIGIBLE RECOVERY_PROOF_INVALID PLAYER_MISMATCH IDLE_EXPIRED HARD_CUTOFF_EXPIRED SNAPSHOT_CHANGED INVALID_REFRESH REFRESH_REPLAY REFRESH_EXPIRED TOKEN_FORMAT_INVALID TOKEN_NOT_FOUND FAMILY_REVOKED FAMILY_MISSING GUEST_LOGOUT_REVOKED'.split())
+          allowed_routes=set('tournament_session tournament_manifest tournament_command tournament_series tournament_other leaderboard_daily leaderboard_weekly guest_auth diagnostic_report other'.split())
+          allowed_events=set('applicationStarted httpCompleted httpFailed authExpired authRefreshSucceeded authRefreshFailed sessionRestored sessionRestoreFailed writerBindingRejected diagnosticFailure'.split())
+          def safe(v,allowed):
+              return v if isinstance(v,str) and v in allowed else 'not_recorded'
+          def check_file(path,max_bytes):
+              try: st=os.lstat(path)
+              except FileNotFoundError: return False
+              if not stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_size>max_bytes:
+                  sys.exit('Unsafe or oversized log file')
+              return True
+          def get_events(path):
+              if not check_file(path,20480): return []
+              with open(path,encoding='utf-8') as f: data=json.load(f)
+              if not isinstance(data,dict) or data.get('version')!=1 or not isinstance(data.get('events'),list):
+                  return []
+              if type(data.get('expiresAt')) is not int or data['expiresAt']<=time.time()*1000:
+                  return []
+              return [e for e in data['events'] if isinstance(e,dict)]
+          report_files=[]
+          try:
+              st=os.lstat(d)
+              if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode) or st.st_mode&0o077:
+                  sys.exit('Unsafe report directory')
+              names=[report+'.json'] if report else sorted(os.listdir(d))[:100]
+              for name in names:
+                  if uid.fullmatch(name[:-5]) and name.endswith('.json'):
+                      report_files.append(get_events(d+'/'+name))
+          except FileNotFoundError: pass
+          selected=[]
+          for events in report_files:
+              if report: selected.extend(events)
+              else: selected.extend(e for e in events if e.get('requestId')==rid)
+          req_ids={rid} if rid else set()
+          traces=set()
+          for e in selected:
+              if isinstance(e.get('requestId'),str) and hx.fullmatch(e['requestId']):
+                  req_ids.add(e['requestId'])
+              if isinstance(e.get('traceId'),str) and hx.fullmatch(e['traceId']):
+                  traces.add(e['traceId'])
+          if rid and traces:
+              for events in report_files:
+                  for e in events:
+                      if e.get('traceId') not in traces or e in selected: continue
+                      selected.append(e)
+                      related=e.get('requestId')
+                      if isinstance(related,str) and hx.fullmatch(related):
+                          req_ids.add(related)
+          http=[]
+          for path in (base+'.1',base):
+              if not check_file(path,25*1024*1024): continue
+              with open(path,encoding='utf-8') as stream:
+                  for line in stream:
+                      try: e=json.loads(line)
+                      except (ValueError,TypeError): continue
+                      if not isinstance(e,dict) or e.get('code')!='http_completed' or e.get('requestId') not in req_ids: continue
+                      if type(e.get('status')) is not int or not 100<=e['status']<=599: continue
+                      http.append(e)
+          print('## Staging Unified Request Log Inspector')
+          print('Only the selected retained correlation is shown; no unrelated accounts.')
+          print('Sanitized metadata only: no identifiers, timestamps, secrets, payloads, IPs or raw events.')
           print()
-          print('This repository is public. Only sanitized HTTP status aggregates are shown.')
-          print('No raw reports, player IDs, request IDs, IPs, tokens, or exact timestamps are printed.')
+          print('### Every recorded matching HTTP status')
+          print('| # | Method | Route | HTTP | Outcome | Duration | Error code |')
+          print('| ---: | --- | --- | ---: | --- | ---: | --- |')
+          for n,e in enumerate(http[:250],1):
+              duration=e.get('durationMs')
+              duration=str(round(duration))+'ms' if type(duration) in (int,float) and 0<=duration<=120000 else 'n/a'
+              print('| %d | %s | %s | %d | %s | %s | %s |' %
+                    (n,safe(e.get('method'),{'GET','POST','PATCH','PUT','DELETE','OTHER'}),
+                     safe(e.get('route'),allowed_routes),e['status'],
+                     safe(e.get('outcome'),{'ok','client_error','server_error','network_error'}),
+                     duration,safe(e.get('errorCode'),allowed_codes)))
+          if not http: print('| — | — | — | — | — | — | Not retained |')
           print()
-          print('Recent diagnostic requests inspected: **%d** (maximum 50)' % len(recent))
-          if not recent:
-              print()
-              print('No diagnostic report requests found in the current and rotated metadata logs.')
-              print('Logs may have rotated, been cleared, or not yet been written.')
-              sys.exit(0)
+          print('### HTTP status counts')
+          for code,count in sorted(collections.Counter(e['status'] for e in http).items()):
+              print('- HTTP %d: %d' % (code,count))
+          if not http: print('- No retained HTTP match')
           print()
-          print('| HTTP status | Count | Explanation |')
-          print('| --- | ---: | --- |')
-          labels = {
-              200: 'Successful', 201: 'Successful', 202: 'Accepted',
-              400: 'Malformed report', 401: 'Unauthenticated',
-              403: 'Forbidden', 404: 'Route missing',
-              409: 'Conflict', 429: 'Rate limited',
-              500: 'Internal error', 502: 'Bad gateway',
-              503: 'Service unavailable',
-          }
-          for code in sorted(counts):
-              print('| %d | %d | %s |' % (
-                  code, counts[code], labels.get(code, 'Other HTTP response')))
+          print('### Matching client diagnostic events')
+          print('| # | Event | Operation | Method | HTTP | Duration | Error code |')
+          print('| ---: | --- | --- | --- | ---: | ---: | --- |')
+          for n,e in enumerate(selected[:100],1):
+              op=e.get('operation')
+              op=op if isinstance(op,str) and re.fullmatch(r'[a-zA-Z0-9_-]{1,64}',op) else 'not_recorded'
+              status=e.get('httpStatus')
+              status=str(status) if type(status) is int and 100<=status<=599 else 'n/a'
+              duration=e.get('durationMs')
+              duration=str(duration)+'ms' if type(duration) is int and 0<=duration<=120000 else 'n/a'
+              print('| %d | %s | %s | %s | %s | %s | %s |' %
+                    (n,safe(e.get('code'),allowed_events),op,
+                     safe(e.get('httpMethod'),{'GET','POST','PATCH','PUT','DELETE'}),
+                     status,duration,safe(e.get('errorCode'),allowed_codes)))
+          if not selected: print('| — | — | — | — | — | — | Not retained |')
           print()
-          print('Latest request status: **HTTP %d**' % recent[-1])
-          print()
-          print('Latest 15 statuses (oldest to newest): `%s`' %
-                ' → '.join(map(str, recent[-15:])))
-          print()
-          print('Note: This log contains request metadata, NOT report event contents.')
-          print('The staging report store is in-memory and currently has no read API.')
+          print('Scope: current/.1 backend HTTP metadata and 24h private client reports.')
+          print('Missing correlation or unlogged events cannot be reconstructed retroactively.')
+          if len(http)>250 or len(selected)>100: print('Output bounded; not all retained rows displayed.')
           PY
