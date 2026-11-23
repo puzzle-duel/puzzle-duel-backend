@@ -42,10 +42,22 @@ jobs:
         env:
           HOST: ${{ secrets.PZD_STAGING_HOST }}
           USER: ${{ secrets.PZD_STAGING_USER }}
-          RID: ${{ inputs.request_id }}
-          REPORT: ${{ inputs.report_id }}
         run: |
           set -euo pipefail
+          # Do not put user-supplied IDs in runner environment definitions:
+          # GitHub prints the entire env block in PUBLIC workflow logs.
+          # The workflow_dispatch event JSON is read locally without echoing
+          # supplied IDs, so only a safe mode notice enters public output.
+          eval "$(python3 - <<'LOOKUP'
+          import json, os, shlex
+          with open(os.environ['GITHUB_EVENT_PATH'], encoding='utf-8') as f:
+              values = json.load(f).get('inputs') or {}
+          for key, field in (('RID', 'request_id'), ('REPORT', 'report_id')):
+              value = values.get(field) or ''
+              if not isinstance(value, str): value = ''
+              print(key + '=' + shlex.quote(value))
+          LOOKUP
+          )"
           # Accept a valid UUID pasted into request_id (or a valid request ID
           # pasted into report_id) without silently selecting an unrelated mode.
           HEX='^[a-f0-9]{32}
