@@ -17,3 +17,10 @@ CREATE TABLE IF NOT EXISTS public.pzd_provider_challenges (
 CREATE INDEX IF NOT EXISTS pzd_provider_challenges_expiry
   ON public.pzd_provider_challenges (expires_at);
 REVOKE ALL ON public.pzd_provider_challenges FROM PUBLIC;
+
+-- Runtime can issue and consume challenges, but cannot delete or rewrite scope.
+REVOKE ALL ON public.pzd_provider_challenges FROM pzd_app_runtime;
+GRANT SELECT ON public.pzd_provider_challenges TO pzd_app_runtime;
+GRANT INSERT (nonce_digest,binding_digest,provider,purpose,expires_at)
+  ON public.pzd_provider_challenges TO pzd_app_runtime;
+GRANT UPDATE (consumed_at) ON public.pzd_provider_challenges TO pzd_app_runtime;
