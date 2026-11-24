@@ -50,7 +50,7 @@ Optional cosmetic palettes only; no team crest, name or trademark licensing assu
 Age-appropriate privacy, parental controls where required, ad SDK settings and store regulations MUST be reviewed before release.
 
 ## MVP candidates
-F01 deterministic puzzle core and animation; F02 instant guest and offline free play; F03 configurable easy/medium/hard; F04 daily challenge and one cross-platform **daily-only** leaderboard; F05 optional verified Apple/Google sign-in; F06 independently validated scores and anti-replay; F07 frequency-capped interstitial policy; F08 small free theme selection (P1); F09 minimal privacy-conscious telemetry, crash tracking and remote configuration.
+F01 deterministic puzzle core and animation; F02 instant guest and offline free play; F03 configurable easy/medium/hard; F04 daily challenge and one cross-platform **daily-only** leaderboard; F05 optional sign-in at launch and for Practice; verified Apple or Google sign-in mandatory before official ranked tournament entry (including staging; PZD-26/27 owner decision 2026-11-24); F06 independently validated scores and anti-replay; F07 frequency-capped interstitial policy; F08 small free theme selection (P1); F09 minimal privacy-conscious telemetry, crash tracking and remote configuration.
 MVP exclusions: Monster release, tournament/PvP, advanced progression, **all-time leaderboard**, AI, cash prizes, pay-to-win.
 
 ## Acceptance evidence before release
