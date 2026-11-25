@@ -15,6 +15,7 @@ class FakePool {
     this.commands.push(sql);
     const v = values as (string | Date | null)[];
     if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [], rowCount: null };
+    if (sql.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [{ pg_advisory_xact_lock: '' }], rowCount: 1 };
     if (sql.startsWith('INSERT INTO pzd_guest_accounts')) return { rows: [], rowCount: 1 };
     if (sql.startsWith('INSERT INTO pzd_guest_families')) {
       this.families.set(v[0] as string, { player_id: v[1] as string, revoked_at: null });
@@ -55,9 +56,13 @@ class FakePool {
       return { rows: [], rowCount: 1 };
     }
     if (sql.startsWith('UPDATE pzd_guest_families SET revoked_at')) {
-      const family = this.families.get(v[0] as string)!;
+      const family = this.families.get(v[0] as string);
+      if (!family || family.revoked_at) return { rows: [], rowCount: 0 };
       family.revoked_at = v[1] as Date;
       return { rows: [], rowCount: 1 };
+    }
+    if (sql.includes('SELECT account_class FROM public.pzd_guest_accounts')) {
+      return { rows: [{ account_class: 'guest' }], rowCount: 1 };
     }
     throw new Error('Unhandled SQL');
   }

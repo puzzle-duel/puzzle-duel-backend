@@ -41,6 +41,10 @@ const SAFE_ERROR_CODES = new Set([
   'INVALID_REFRESH', 'REFRESH_REPLAY', 'REFRESH_EXPIRED',
   'TOKEN_FORMAT_INVALID', 'TOKEN_NOT_FOUND', 'FAMILY_REVOKED', 'FAMILY_MISSING',
   'GUEST_LOGOUT_REVOKED',
+  'RANKED_AUTH_REQUIRED', 'ACCOUNT_CONFLICT', 'GUEST_PROOF_REQUIRED',
+  'INVALID_PROVIDER_ASSERTION', 'INVALID_PROVIDER_CHALLENGE',
+  'PROVIDER_CONFIG_MISSING', 'AUTH_CHALLENGE_ISSUED',
+  'AUTH_LOGIN_SUCCESS', 'AUTH_LINK_SUCCESS', 'PROVIDER_KEYS_UNAVAILABLE',
 ]);
 
 export function safeDiagnosticErrorCode(value: unknown): string | undefined {
@@ -58,6 +62,7 @@ export function diagnosticRoute(url: string | undefined): string {
   if (path.includes('/series/') && /\/commands?(?:\/|$)/.test(path)) return 'tournament_command';
   if (path.includes('/series/')) return 'tournament_series';
   if (path.startsWith('/v1/tournament/')) return 'tournament_other';
+  if (path.startsWith('/v1/auth/providers/')) return 'provider_auth';
   if (path.startsWith('/v1/auth/')) return 'guest_auth';
   return 'other';
 }

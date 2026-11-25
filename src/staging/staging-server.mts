@@ -8,12 +8,26 @@ import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { appendFileSync, lstatSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { createGuestAuthHttpHandler, guestAuthDiagnosticReason } from './guest-auth-http.mts';
 import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-auth-service.mts';
+import { createProviderAuthHttpHandler, providerAuthDiagnosticReason } from './provider-auth-http.mts';
+import { PostgresProviderIdentityAuth } from './provider-identity-service.mts';
+import { ProviderJwks } from './provider-jwks.mts';
+import {
+  assertExactActiveFamily,
+  detectAccountClassColumn,
+  detectIdentityImmutabilityReady,
+  detectProviderSchemaReady,
+} from './staging-access-token.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
 import { createStagingTournamentHandler } from './staging-tournament.mts';
 import { writerDenialDiagnostic } from '../tournament/auth/tournament-http.mts';
 import { pathToFileURL } from 'node:url';
 import pg from 'pg';
+
+function csvAudiences(value: string | undefined): string[] {
+  if (!value) return [];
+  return value.split(',').map((part) => part.trim()).filter((part) => part.length > 0 && part.length <= 256);
+}
 
 /** Route diagnostic reports through the same verified guest/session handler as ranked moves. */
 export function isStagingRankedRoute(url: string | undefined, method: string | undefined): boolean {
@@ -52,7 +66,12 @@ export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
   if (guestAuthEnabled && (!keyPath || !keyPath.startsWith('/') || !keyId || !/^[A-Za-z0-9_-]{1,128}$/.test(keyId))) {
     throw new Error('Staging guest auth requires absolute private key path and pinned kid');
   }
-  return { host, port, databaseUrl, guestAuthEnabled, guestRetryEnabled, keyPath, keyId };
+  const appleAudiences = csvAudiences(env.PZD_STAGING_APPLE_AUDIENCES);
+  const googleAudiences = csvAudiences(env.PZD_STAGING_GOOGLE_AUDIENCES);
+  return {
+    host, port, databaseUrl, guestAuthEnabled, guestRetryEnabled, keyPath, keyId,
+    appleAudiences, googleAudiences,
+  };
 }
 
 export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
@@ -79,6 +98,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       }
     };
     let guestHandler: ReturnType<typeof createGuestAuthHttpHandler> | undefined;
+    let providerHandler: ReturnType<typeof createProviderAuthHttpHandler> | undefined;
     let tournamentHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     let sessionHandler: ((req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>) | undefined;
     if (config.guestAuthEnabled) {
@@ -102,14 +122,55 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         );
         if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
       }
+      const accountClassEnabled = await detectAccountClassColumn(pool);
       guestHandler = createGuestAuthHttpHandler(
-        new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
+        new PostgresStagingGuestAuth(
+          pool, privateKey, config.keyId!, config.guestRetryEnabled, accountClassEnabled,
+        ),
       );
       const verifier = new PinnedRs256JwtVerifier({
         issuer: GUEST_ISSUER, audience: GUEST_AUDIENCE,
         keys: [{ keyId: config.keyId!, rsaPublicKeyPem: createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString() }],
         maxTokenAgeSeconds: 900, allowStagingGuestClaims: true,
       });
+      const authorizeExactFamily = async (
+        playerId: string,
+        familyId: string | undefined,
+        expectedAccountType: 'guest' | 'verified',
+      ): Promise<boolean> => {
+        if (!familyId) return false;
+        try {
+          await assertExactActiveFamily({
+            pool,
+            playerId,
+            familyId,
+            expectedAccountType,
+            accountClassEnabled,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      // Short-circuit: never probe immutability triggers until 0005/0006 tables exist.
+      const providerSchemaReady = await detectProviderSchemaReady(pool);
+      const identityImmutabilityReady = providerSchemaReady
+        ? await detectIdentityImmutabilityReady(pool)
+        : false;
+      if (providerSchemaReady && identityImmutabilityReady) {
+        providerHandler = createProviderAuthHttpHandler({
+          pool,
+          identity: new PostgresProviderIdentityAuth(pool, privateKey, config.keyId!),
+          jwks: new ProviderJwks(),
+          config: {
+            appleAudiences: config.appleAudiences,
+            googleAudiences: config.googleAudiences,
+          },
+          guestVerifier: verifier,
+          requireExactActiveGuestFamily: async (playerId, familyId) =>
+            authorizeExactFamily(playerId, familyId, 'guest'),
+        });
+      }
       const sessions = new PostgresVerifiedIdentitySessionStore(pool);
       for (const table of ['tournament_verified_identity', 'tournament_auth_session']) {
         const result = await pool.query<{ exists: string | null }>('SELECT to_regclass($1) AS exists', [table]);
@@ -122,11 +183,9 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           let identity;
           try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
           catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-          const active = await pool.query(
-            'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
-            [identity.subject],
-          );
-          if (!active.rowCount) {
+          const accountType = identity.accountType;
+          if (!accountType ||
+              !(await authorizeExactFamily(identity.subject, identity.familyId, accountType))) {
             res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
           }
           await rankedHandler(req, res);
@@ -159,11 +218,9 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         let identity;
         try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
         catch { trace('jwt_verification_rejected'); res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-        const active = await pool.query(
-          'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
-          [identity.subject],
-        );
-        if (!active.rowCount) {
+        const accountType = identity.accountType;
+        if (!accountType ||
+            !(await authorizeExactFamily(identity.subject, identity.familyId, accountType))) {
           trace('guest_family_inactive');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }
@@ -209,7 +266,9 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             operation: req.url?.split('?', 1)[0] === '/v1/diagnostics/reports'
               ? 'diagnostic_report' : 'tournament_http',
             route: diagnosticRoute(req.url),
-            errorCode: guestAuthDiagnosticReason(res) ?? res.getHeader('x-pzd-error-code'),
+            errorCode: providerAuthDiagnosticReason(res)
+              ?? guestAuthDiagnosticReason(res)
+              ?? res.getHeader('x-pzd-error-code'),
             writerDenial: writerDenialDiagnostic(res),
             method: req.method ?? 'OTHER',
             status: res.statusCode,
@@ -234,6 +293,20 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           if (!res.headersSent) {
             res.writeHead(503); res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
           } else { res.destroy(); }
+        });
+        return;
+      }
+      if (providerHandler && req.url?.startsWith('/v1/auth/providers/')) {
+        void providerHandler(req, res).then(handled => {
+          if (!handled && !res.headersSent) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ error: 'NOT_FOUND' }));
+          }
+        }).catch(() => {
+          if (!res.headersSent) {
+            res.writeHead(503);
+            res.end(JSON.stringify({ error: 'AUTH_UNAVAILABLE' }));
+          }
         });
         return;
       }
