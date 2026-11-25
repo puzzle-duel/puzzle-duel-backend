@@ -162,17 +162,27 @@ export class PostgresProviderIdentityAuth {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // Exact authenticated guest family first — stale/revoked/upgraded proof fails closed.
+      // Exact authenticated guest family first — stale/revoked/upgraded/expired proof fails closed.
       await lockGuestFamily(client, input.guestFamilyId);
-      const guest = await client.query<{ player_id: string; account_class: string }>(
-        `SELECT a.player_id, a.account_class
+      const guest = await client.query<{
+        player_id: string;
+        account_class: string;
+        active_refresh: boolean;
+      }>(
+        `SELECT a.player_id, a.account_class,
+            EXISTS (
+              SELECT 1 FROM public.pzd_guest_refresh r
+              WHERE r.family_id = f.family_id
+                AND r.used_at IS NULL
+                AND r.expires_at > clock_timestamp()
+            ) AS active_refresh
          FROM public.pzd_guest_accounts a
          JOIN public.pzd_guest_families f ON f.player_id = a.player_id
          WHERE a.player_id=$1 AND f.family_id=$2 AND f.revoked_at IS NULL`,
         [input.guestPlayerId, input.guestFamilyId],
       );
       if (guest.rowCount !== 1) throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
-      if (guest.rows[0]!.account_class !== 'guest') {
+      if (guest.rows[0]!.account_class !== 'guest' || !guest.rows[0]!.active_refresh) {
         throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
       }
       await consumeProviderChallenge(client, scope, input.nonce);

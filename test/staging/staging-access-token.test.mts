@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import {
   accountClassForPlayer,
+  detectIdentityImmutabilityReady,
   isFamilyId,
   linkChallengeBinding,
   mintStagingAccessJwt,
@@ -46,4 +47,18 @@ test('accountClassForPlayer uses schema readiness flag instead of catching undef
   assert.deepEqual(queries, []);
   assert.equal(await accountClassForPlayer(client as never, 'p', true), 'verified');
   assert.equal(queries.length, 1);
+});
+
+test('detectIdentityImmutabilityReady uses to_regclass only (no constant regclass cast)', async () => {
+  let sql = '';
+  const pool = {
+    async query(text: string) {
+      sql = text;
+      return { rows: [{ ready: false }], rowCount: 1 };
+    },
+  };
+  assert.equal(await detectIdentityImmutabilityReady(pool as never), false);
+  assert.match(sql, /to_regclass\('public\.pzd_identity_links'\)/);
+  assert.doesNotMatch(sql, /'public\.pzd_identity_links'::regclass/);
+  assert.match(sql, /tgenabled <> 'D'/);
 });

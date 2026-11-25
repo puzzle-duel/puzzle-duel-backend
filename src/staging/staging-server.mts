@@ -15,6 +15,7 @@ import {
   assertExactActiveFamily,
   detectAccountClassColumn,
   detectIdentityImmutabilityReady,
+  detectProviderSchemaReady,
 } from './staging-access-token.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
@@ -151,18 +152,12 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           return false;
         }
       };
-      const providerSchemaReady = await pool.query<{ ready: boolean }>(
-        `SELECT (
-           to_regclass('public.pzd_provider_challenges') IS NOT NULL
-           AND to_regclass('public.pzd_identity_links') IS NOT NULL
-           AND EXISTS (
-             SELECT 1 FROM information_schema.columns
-             WHERE table_schema='public' AND table_name='pzd_guest_accounts'
-               AND column_name='account_class')
-         ) AS ready`,
-      );
-      const identityImmutabilityReady = await detectIdentityImmutabilityReady(pool);
-      if (providerSchemaReady.rows[0]?.ready && identityImmutabilityReady) {
+      // Short-circuit: never probe immutability triggers until 0005/0006 tables exist.
+      const providerSchemaReady = await detectProviderSchemaReady(pool);
+      const identityImmutabilityReady = providerSchemaReady
+        ? await detectIdentityImmutabilityReady(pool)
+        : false;
+      if (providerSchemaReady && identityImmutabilityReady) {
         providerHandler = createProviderAuthHttpHandler({
           pool,
           identity: new PostgresProviderIdentityAuth(pool, privateKey, config.keyId!),

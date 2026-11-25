@@ -29,23 +29,44 @@ export async function detectAccountClassColumn(pool: pg.Pool): Promise<boolean> 
   return result.rows[0]?.present === true;
 }
 
-/** Provider routes require 0007 identity immutability triggers. */
+/**
+ * Provider routes require 0007 identity immutability triggers.
+ * Uses only `to_regclass` — never `'…'::regclass` — so pre-0006 schemas
+ * return false without raising undefined_table (42P01).
+ */
 export async function detectIdentityImmutabilityReady(pool: pg.Pool): Promise<boolean> {
   const result = await pool.query<{ ready: boolean }>(
     `SELECT (
        to_regclass('public.pzd_identity_links') IS NOT NULL
        AND EXISTS (
-         SELECT 1 FROM pg_trigger
-         WHERE tgrelid = 'public.pzd_identity_links'::regclass
-           AND tgname = 'pzd_identity_links_immutable_upd'
-           AND NOT tgisinternal
+         SELECT 1 FROM pg_trigger t
+         WHERE t.tgrelid = to_regclass('public.pzd_identity_links')
+           AND t.tgname = 'pzd_identity_links_immutable_upd'
+           AND NOT t.tgisinternal
+           AND t.tgenabled <> 'D'
        )
        AND EXISTS (
-         SELECT 1 FROM pg_trigger
-         WHERE tgrelid = 'public.pzd_identity_links'::regclass
-           AND tgname = 'pzd_identity_links_immutable_del'
-           AND NOT tgisinternal
+         SELECT 1 FROM pg_trigger t
+         WHERE t.tgrelid = to_regclass('public.pzd_identity_links')
+           AND t.tgname = 'pzd_identity_links_immutable_del'
+           AND NOT t.tgisinternal
+           AND t.tgenabled <> 'D'
        )
+     ) AS ready`,
+  );
+  return result.rows[0]?.ready === true;
+}
+
+/** Base provider tables + account_class without requiring 0007 triggers. */
+export async function detectProviderSchemaReady(pool: pg.Pool): Promise<boolean> {
+  const result = await pool.query<{ ready: boolean }>(
+    `SELECT (
+       to_regclass('public.pzd_provider_challenges') IS NOT NULL
+       AND to_regclass('public.pzd_identity_links') IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema='public' AND table_name='pzd_guest_accounts'
+           AND column_name='account_class')
      ) AS ready`,
   );
   return result.rows[0]?.ready === true;

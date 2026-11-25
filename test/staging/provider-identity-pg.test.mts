@@ -370,6 +370,51 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
     );
   });
 
+  await t.test('barrier: refresh expires under lock while link waits; link rejects before challenge consume', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-barrier-expire',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    const barrier = await runtimePool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await lockGuestFamily(barrier, familyId);
+      const linkPromise = auth.link({
+        provider: 'google', idToken: token, nonce,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      });
+      await waitForWaitingFamilyLock(familyId);
+      await barrier.query(
+        `UPDATE pzd_guest_refresh SET expires_at = clock_timestamp() - interval '1 second'
+         WHERE family_id=$1 AND used_at IS NULL`,
+        [familyId],
+      );
+      await barrier.query('COMMIT');
+      await assert.rejects(
+        () => linkPromise,
+        (error: unknown) => error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED',
+      );
+      const challenge = await runtimePool.query<{ consumed_at: Date | null }>(
+        `SELECT consumed_at FROM pzd_provider_challenges
+         WHERE nonce_digest=$1`,
+        [challengeDigestForTests(nonce)],
+      );
+      assert.equal(challenge.rows[0]?.consumed_at, null);
+    } finally {
+      try { await barrier.query('ROLLBACK'); } catch { /* committed */ }
+      barrier.release();
+    }
+  });
+
   await t.test('barrier: logout commits while link waits; link then rejects revoked family', async () => {
     const guest = await guestAuth.create(new Date());
     const claims = claimsFromJwt(guest.accessToken);
