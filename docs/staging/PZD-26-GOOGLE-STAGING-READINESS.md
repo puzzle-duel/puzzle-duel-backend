@@ -89,3 +89,4 @@ curl -sS -i -X POST https://84-13-66-211.sslip.io/v1/auth/providers/challenge \
 - No production deploy.
 - No weakening of nonce / signature / issuer / audience / azp / expiry checks.
 - No Apple enrollment requirement for Google-only staging UAT.
+
