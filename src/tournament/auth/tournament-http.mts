@@ -42,10 +42,20 @@ import {
 } from './ranked-feature-gate.mts';
 
 const MAX_BODY = 16_384;
+export const RANKED_AUTH_REQUIRED_ERROR = 'RANKED_AUTH_REQUIRED' as const;
 const writerDiagnostics = new WeakMap<ServerResponse, WriterDenialCategory>();
 /** Staging ingress reads this for correlated privacy-safe HTTP diagnostics only. */
 export function writerDenialDiagnostic(res: ServerResponse): WriterDenialCategory | undefined {
   return writerDiagnostics.get(res);
+}
+
+/** Official ranked mutations require verified Apple/Google identity (PZD-26). */
+export function rankedRouteRequiresVerifiedAccount(path: string): boolean {
+  if (path === '/v1/diagnostics/reports') return false;
+  if (path.startsWith('/v1/tournament/leaderboards/')) return false;
+  if (path === '/v1/tournament/me/badges') return false;
+  if (path.startsWith('/v1/tournament/manifests/')) return false;
+  return path.startsWith('/v1/tournament/');
 }
 
 
@@ -197,6 +207,12 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       }
       if (!checkRate(session.playerId)) {
         send(res, 429, { error: 'RATE_LIMITED' });
+        return;
+      }
+      // Reject staging guest bearers before claim/writer/gameplay mutation.
+      // Non-staging verifiers omit accountType and already reject guest claims.
+      if (identity.accountType === 'guest' && rankedRouteRequiresVerifiedAccount(path)) {
+        send(res, 403, { error: RANKED_AUTH_REQUIRED_ERROR });
         return;
       }
 

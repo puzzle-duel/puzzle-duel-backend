@@ -31,6 +31,8 @@ export interface VerifiedJwtIdentity {
   readonly issuedAt: number;
   readonly expiresAt: number;
   readonly keyId: string;
+  /** Present for staging issuer tokens; undefined for non-staging verifiers. */
+  readonly accountType?: 'guest' | 'verified';
 }
 
 export class JwtVerificationError extends Error {
@@ -68,6 +70,12 @@ function isGuestClaims(claims: Claims): boolean {
   if (claims.amr === 'guest') return true;
   if (Array.isArray(claims.amr) && claims.amr.includes('guest')) return true;
   return false;
+}
+
+function stagingAccountType(claims: Claims): 'guest' | 'verified' | null {
+  if (claims.account_type === 'guest' || claims.accountType === 'guest') return 'guest';
+  if (claims.account_type === 'verified' || claims.accountType === 'verified') return 'verified';
+  return null;
 }
 
 function loadRsaKey(pem: string): KeyObject {
@@ -190,7 +198,9 @@ export class PinnedRs256JwtVerifier {
       claims.sub.length < 1 ||
       claims.sub.length > 255 ||
       /^\s*$/.test(claims.sub) ||
-      (this.#allowStagingGuestClaims ? claims.account_type !== 'guest' : isGuestClaims(claims)) ||
+      (this.#allowStagingGuestClaims
+        ? stagingAccountType(claims) === null
+        : isGuestClaims(claims)) ||
       !positiveInt(claims.exp) ||
       !positiveInt(claims.iat) ||
       claims.exp <= nowSeconds ||
@@ -203,12 +213,16 @@ export class PinnedRs256JwtVerifier {
     ) {
       throw new JwtVerificationError();
     }
+    const accountType = this.#allowStagingGuestClaims
+      ? stagingAccountType(claims) ?? undefined
+      : undefined;
     return Object.freeze({
       issuer: this.#issuer,
       subject: claims.sub,
       issuedAt: claims.iat,
       expiresAt: claims.exp,
       keyId: protectedHeader.kid,
+      ...(accountType ? { accountType } : {}),
     });
   }
 }

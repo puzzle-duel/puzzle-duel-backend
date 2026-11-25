@@ -38,16 +38,42 @@ function digest(token: string): string {
 function opaqueToken(): string {
   return randomBytes(48).toString('base64url');
 }
-function accessJwt(privateKey: KeyObject, kid: string, playerId: string, now: Date): string {
+function accessJwt(
+  privateKey: KeyObject,
+  kid: string,
+  playerId: string,
+  now: Date,
+  accountType: 'guest' | 'verified' = 'guest',
+): string {
   const iat = Math.floor(now.getTime() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid })).toString('base64url');
-  // The tournament verifier must explicitly opt in to this issuer's guest claims.
+  // Staging issuer may mint guest or verified account_type. Ranked HTTP must
+  // still reject guest independently of this token mint.
   const payload = Buffer.from(JSON.stringify({
     iss: GUEST_ISSUER, aud: GUEST_AUDIENCE, sub: playerId,
-    account_type: 'guest', iat, exp: iat + ACCESS_SECONDS,
+    account_type: accountType, iat, exp: iat + ACCESS_SECONDS,
   })).toString('base64url');
   const message = `${header}.${payload}`;
   return `${message}.${sign('RSA-SHA256', Buffer.from(message), privateKey).toString('base64url')}`;
+}
+
+async function accountClassFor(
+  client: { query: pg.Pool['query'] },
+  playerId: string,
+): Promise<'guest' | 'verified'> {
+  try {
+    const result = await client.query<{ account_class?: string }>(
+      `SELECT account_class FROM public.pzd_guest_accounts WHERE player_id=$1`,
+      [playerId],
+    );
+    return result.rows[0]?.account_class === 'verified' ? 'verified' : 'guest';
+  } catch (error) {
+    // Pre-0006 staging DBs lack account_class; keep minting guest tokens.
+    if (typeof error === 'object' && error && (error as { code?: string }).code === '42703') {
+      return 'guest';
+    }
+    throw error;
+  }
 }
 
 export class PostgresStagingGuestAuth {
@@ -144,9 +170,10 @@ export class PostgresStagingGuestAuth {
             [familyId, digest(sameNextToken)],
           );
           if (successor.rowCount === 1 && successor.rows[0]?.used_at === null) {
+            const accountType = await accountClassFor(client, row.player_id);
             await client.query('COMMIT');
             return {
-              accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now),
+              accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now, accountType),
               refreshToken: sameNextToken,
               expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
             };
@@ -178,9 +205,10 @@ export class PostgresStagingGuestAuth {
          VALUES ($1, $2, $3, $4)`,
         [familyId, row.player_id, digest(nextToken), new Date(now.getTime() + REFRESH_DAYS * 86400000)],
       );
+      const accountType = await accountClassFor(client, row.player_id);
       await client.query('COMMIT');
       return {
-        accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now),
+        accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now, accountType),
         refreshToken: nextToken, expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
       };
     } catch (error) {

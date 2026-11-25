@@ -59,6 +59,9 @@ class FakePool {
       family.revoked_at = v[1] as Date;
       return { rows: [], rowCount: 1 };
     }
+    if (sql.includes('SELECT account_class FROM public.pzd_guest_accounts')) {
+      return { rows: [{ account_class: 'guest' }], rowCount: 1 };
+    }
     throw new Error('Unhandled SQL');
   }
 }
