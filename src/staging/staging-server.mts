@@ -14,6 +14,7 @@ import { ProviderJwks } from './provider-jwks.mts';
 import {
   assertExactActiveFamily,
   detectAccountClassColumn,
+  detectIdentityImmutabilityReady,
 } from './staging-access-token.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
@@ -134,7 +135,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
       const authorizeExactFamily = async (
         playerId: string,
         familyId: string | undefined,
-        expectedAccountType?: 'guest' | 'verified',
+        expectedAccountType: 'guest' | 'verified',
       ): Promise<boolean> => {
         if (!familyId) return false;
         try {
@@ -160,7 +161,8 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
                AND column_name='account_class')
          ) AS ready`,
       );
-      if (providerSchemaReady.rows[0]?.ready) {
+      const identityImmutabilityReady = await detectIdentityImmutabilityReady(pool);
+      if (providerSchemaReady.rows[0]?.ready && identityImmutabilityReady) {
         providerHandler = createProviderAuthHttpHandler({
           pool,
           identity: new PostgresProviderIdentityAuth(pool, privateKey, config.keyId!),
@@ -186,7 +188,9 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           let identity;
           try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
           catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-          if (!(await authorizeExactFamily(identity.subject, identity.familyId))) {
+          const accountType = identity.accountType;
+          if (!accountType ||
+              !(await authorizeExactFamily(identity.subject, identity.familyId, accountType))) {
             res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
           }
           await rankedHandler(req, res);
@@ -219,7 +223,9 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         let identity;
         try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
         catch { trace('jwt_verification_rejected'); res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-        if (!(await authorizeExactFamily(identity.subject, identity.familyId))) {
+        const accountType = identity.accountType;
+        if (!accountType ||
+            !(await authorizeExactFamily(identity.subject, identity.familyId, accountType))) {
           trace('guest_family_inactive');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }

@@ -1,6 +1,9 @@
 /**
  * Staging access JWT claims shared by guest and verified credential minting.
  * Access tokens bind to an exact refresh family (`fid`), never "any family".
+ *
+ * Family mutations (link / refresh / logout) share `lockGuestFamily` advisory
+ * locks so they mutually serialize across transactions.
  */
 import { createHash, sign, type KeyObject } from 'node:crypto';
 import type pg from 'pg';
@@ -24,6 +27,28 @@ export async function detectAccountClassColumn(pool: pg.Pool): Promise<boolean> 
      ) AS present`,
   );
   return result.rows[0]?.present === true;
+}
+
+/** Provider routes require 0007 identity immutability triggers. */
+export async function detectIdentityImmutabilityReady(pool: pg.Pool): Promise<boolean> {
+  const result = await pool.query<{ ready: boolean }>(
+    `SELECT (
+       to_regclass('public.pzd_identity_links') IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgrelid = 'public.pzd_identity_links'::regclass
+           AND tgname = 'pzd_identity_links_immutable_upd'
+           AND NOT tgisinternal
+       )
+       AND EXISTS (
+         SELECT 1 FROM pg_trigger
+         WHERE tgrelid = 'public.pzd_identity_links'::regclass
+           AND tgname = 'pzd_identity_links_immutable_del'
+           AND NOT tgisinternal
+       )
+     ) AS ready`,
+  );
+  return result.rows[0]?.ready === true;
 }
 
 export function mintStagingAccessJwt(input: {
@@ -68,36 +93,59 @@ export async function accountClassForPlayer(
   return result.rows[0]?.account_class === 'verified' ? 'verified' : 'guest';
 }
 
-/** Authorize the exact family named by the access JWT. */
+/**
+ * Authorize the exact family named by the access JWT.
+ * Requires: ownership, not revoked, matching account class (when enabled),
+ * and at least one non-expired unused refresh credential for that family.
+ */
 export async function assertExactActiveFamily(input: {
   pool: pg.Pool;
   playerId: string;
   familyId: string;
-  expectedAccountType?: 'guest' | 'verified';
+  /** JWT account_type must match DB account_class when the column exists. */
+  expectedAccountType: 'guest' | 'verified';
   accountClassEnabled: boolean;
+  now?: Date;
 }): Promise<void> {
   if (!isFamilyId(input.familyId) || !/^[0-9a-f-]{36}$/i.test(input.playerId)) {
     throw new Error('UNAUTHENTICATED');
   }
+  const now = input.now ?? new Date();
   const result = await input.pool.query<{
     revoked_at: Date | null;
     account_class: string | null;
+    active_refresh: boolean;
   }>(
     input.accountClassEnabled
-      ? `SELECT f.revoked_at, a.account_class
+      ? `SELECT f.revoked_at, a.account_class,
+            EXISTS (
+              SELECT 1 FROM public.pzd_guest_refresh r
+              WHERE r.family_id = f.family_id
+                AND r.used_at IS NULL
+                AND r.expires_at > $3
+            ) AS active_refresh
          FROM public.pzd_guest_families f
          JOIN public.pzd_guest_accounts a ON a.player_id = f.player_id
          WHERE f.family_id=$1 AND f.player_id=$2`
-      : `SELECT f.revoked_at, NULL::text AS account_class
+      : `SELECT f.revoked_at, NULL::text AS account_class,
+            EXISTS (
+              SELECT 1 FROM public.pzd_guest_refresh r
+              WHERE r.family_id = f.family_id
+                AND r.used_at IS NULL
+                AND r.expires_at > $3
+            ) AS active_refresh
          FROM public.pzd_guest_families f
          WHERE f.family_id=$1 AND f.player_id=$2`,
-    [input.familyId, input.playerId],
+    [input.familyId, input.playerId, now],
   );
   const row = result.rows[0];
-  if (!row || row.revoked_at) throw new Error('UNAUTHENTICATED');
-  if (input.expectedAccountType && input.accountClassEnabled) {
+  if (!row || row.revoked_at || !row.active_refresh) throw new Error('UNAUTHENTICATED');
+  if (input.accountClassEnabled) {
     const actual = row.account_class === 'verified' ? 'verified' : 'guest';
     if (actual !== input.expectedAccountType) throw new Error('UNAUTHENTICATED');
+  } else if (input.expectedAccountType !== 'guest') {
+    // Pre-0006 schema is guest-only.
+    throw new Error('UNAUTHENTICATED');
   }
 }
 
@@ -129,6 +177,7 @@ export async function lockIdentitySubject(
   await client.query('SELECT pg_advisory_xact_lock($1, $2)', [keys[0], keys[1]]);
 }
 
+/** Shared family lock for link, refresh, and logout. */
 export async function lockGuestFamily(
   client: pg.PoolClient,
   familyId: string,

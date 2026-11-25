@@ -30,14 +30,16 @@ Never log ID tokens, refresh/access tokens, raw nonces, Authorization headers, p
 - Existing guest signing key path/kid remain required for backend-minted JWTs.
 
 ## Access token family binding
-Staging access JWTs include `fid` (exact refresh family). Authorization never accepts “any active family for this player”. Revoked or rotated-away families fail closed even if another family for the same player is active.
+Staging access JWTs include `fid` (exact refresh family). Authorization never accepts “any active family for this player”. Exact-family auth requires ownership, non-revoked family, JWT/`account_class` match, and a non-expired unused refresh tip. Revoked or rotated-away families fail closed even if another family for the same player is active.
+
+Link, refresh, and logout share the same transaction advisory family lock so concurrent logout cannot commit after link validation and before link mutation.
 
 ## Migrations
 - `0005_provider_challenges` — nonce challenge table + least-privilege grants.
 - `0006_provider_identity` — `account_class`, `pzd_identity_links`, challenge immutability trigger.
 - `0007_identity_immutability` — reject UPDATE/DELETE on identity links without granting UPDATE to runtime.
 
-Identity concurrency uses transaction advisory locks (no `SELECT FOR UPDATE` on identity links). Operator cleanup of expired challenges requires elevated DELETE rights (runtime role has none).
+Provider HTTP routes mount only when `0005`–`0007` readiness checks pass (including immutability triggers). Identity concurrency uses transaction advisory locks (no `SELECT FOR UPDATE` on identity links). Operator cleanup of expired challenges uses `cleanupExpiredProviderChallenges` (elevated DELETE); runtime role has none.
 
 ## Account deletion / Apple revocation
 MVP must document and implement deletion + Apple token revocation flows before production enablement. Staging contract records the requirement; production activation remains owner-gated.

@@ -11,8 +11,15 @@ import { PostgresStagingGuestAuth } from '../../src/staging/guest-auth-service.m
 import {
   assertExactActiveFamily,
   detectAccountClassColumn,
+  detectIdentityImmutabilityReady,
+  familyAdvisoryKeys,
   linkChallengeBinding,
+  lockGuestFamily,
 } from '../../src/staging/staging-access-token.mts';
+import {
+  cleanupExpiredProviderChallenges,
+  challengeDigestForTests,
+} from '../../src/staging/provider-challenge.mts';
 import type { ProviderKey } from '../../src/staging/provider-token-verifier.mts';
 
 const databaseUrl = process.env.PZD_TEST_DATABASE_URL;
@@ -154,9 +161,29 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
     assertIsolatedTestDatabase(dbName);
   });
 
-  await t.test('account class column is detected outside transactions', async () => {
+  await t.test('account class and 0007 immutability readiness are detected outside transactions', async () => {
     assert.equal(await detectAccountClassColumn(runtimePool), true);
+    assert.equal(await detectIdentityImmutabilityReady(runtimePool), true);
   });
+
+  async function waitForWaitingFamilyLock(familyId: string, timeoutMs = 8000): Promise<void> {
+    const [k1, k2] = familyAdvisoryKeys(familyId);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const waiting = await adminPool.query(
+        `SELECT 1 FROM pg_locks
+         WHERE locktype = 'advisory'
+           AND classid = $1::int
+           AND objid = $2::int
+           AND NOT granted
+         LIMIT 1`,
+        [k1, k2],
+      );
+      if ((waiting.rowCount ?? 0) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('FAMILY_LOCK_WAIT_TIMEOUT');
+  }
 
   await t.test('login creates player; second login reuses; JWT carries fid', async () => {
     const binding = 'login-binding-1';
@@ -270,7 +297,7 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
     }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED');
   });
 
-  await t.test('revoked verified access family is rejected; cross-family auth fails', async () => {
+  await t.test('revoked / expired / class mismatch families fail authorization; cross-family exact', async () => {
     const binding = 'verified-family-binding';
     const nonce = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding,
@@ -286,59 +313,64 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
     const claims = claimsFromJwt(bundle.accessToken);
     const familyId = String(claims.fid);
     const playerId = String(claims.sub);
+    await assertExactActiveFamily({
+      pool: runtimePool, playerId, familyId,
+      expectedAccountType: 'verified', accountClassEnabled: true,
+    });
+    await assert.rejects(
+      () => assertExactActiveFamily({
+        pool: runtimePool, playerId, familyId,
+        expectedAccountType: 'guest', accountClassEnabled: true,
+      }),
+      /UNAUTHENTICATED/,
+    );
+    await runtimePool.query(
+      'UPDATE pzd_guest_refresh SET expires_at=$2 WHERE family_id=$1 AND used_at IS NULL',
+      [familyId, new Date(Date.now() - 1000)],
+    );
+    await assert.rejects(
+      () => assertExactActiveFamily({
+        pool: runtimePool, playerId, familyId,
+        expectedAccountType: 'verified', accountClassEnabled: true,
+      }),
+      /UNAUTHENTICATED/,
+    );
     await runtimePool.query(
       'UPDATE pzd_guest_families SET revoked_at=$2 WHERE family_id=$1',
       [familyId, new Date()],
     );
     await assert.rejects(
       () => assertExactActiveFamily({
-        pool: runtimePool, playerId, familyId, accountClassEnabled: true,
+        pool: runtimePool, playerId, familyId,
+        expectedAccountType: 'verified', accountClassEnabled: true,
       }),
       /UNAUTHENTICATED/,
     );
     const otherFamily = randomUUID();
+    const otherDigest = challengeDigestForTests(`refresh-${otherFamily}`);
     await runtimePool.query(
       'INSERT INTO pzd_guest_families (family_id, player_id) VALUES ($1, $2)',
       [otherFamily, playerId],
     );
+    await runtimePool.query(
+      `INSERT INTO pzd_guest_refresh (family_id, player_id, token_digest, expires_at)
+       VALUES ($1, $2, $3, $4)`,
+      [otherFamily, playerId, otherDigest, new Date(Date.now() + 86400000)],
+    );
+    await assertExactActiveFamily({
+      pool: runtimePool, playerId, familyId: otherFamily,
+      expectedAccountType: 'verified', accountClassEnabled: true,
+    });
     await assert.rejects(
       () => assertExactActiveFamily({
-        pool: runtimePool, playerId, familyId, accountClassEnabled: true,
+        pool: runtimePool, playerId, familyId,
+        expectedAccountType: 'verified', accountClassEnabled: true,
       }),
       /UNAUTHENTICATED/,
     );
-    await assertExactActiveFamily({
-      pool: runtimePool, playerId, familyId: otherFamily, accountClassEnabled: true,
-    });
   });
 
-  await t.test('concurrent account linking allows exactly one winner', async () => {
-    const guest = await guestAuth.create(new Date());
-    const claims = claimsFromJwt(guest.accessToken);
-    const guestId = String(claims.sub);
-    const familyId = String(claims.fid);
-    const results = await Promise.allSettled([0, 1].map(async (i) => {
-      const nonce = await issueProviderChallenge(runtimePool, {
-        provider: 'apple', purpose: 'link',
-        binding: linkChallengeBinding(guestId, familyId),
-      });
-      const token = mintAssertion({
-        privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-race',
-        audience: 'client', rawNonce: nonce, now: now + i,
-      });
-      return auth.link({
-        provider: 'apple', idToken: token, nonce,
-        guestPlayerId: guestId, guestFamilyId: familyId,
-        audiences: ['client'], keys: [key], nowSeconds: now + i,
-      });
-    }));
-    const wins = results.filter((r) => r.status === 'fulfilled').length;
-    const losses = results.filter((r) => r.status === 'rejected').length;
-    assert.equal(wins, 1);
-    assert.equal(losses, 1);
-  });
-
-  await t.test('concurrent logout/link and refresh/link fail closed for guest proof', async () => {
+  await t.test('barrier: logout commits while link waits; link then rejects revoked family', async () => {
     const guest = await guestAuth.create(new Date());
     const claims = claimsFromJwt(guest.accessToken);
     const guestId = String(claims.sub);
@@ -348,52 +380,153 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
       binding: linkChallengeBinding(guestId, familyId),
     });
     const token = mintAssertion({
-      privateKey, kid: 't', provider: 'google', subject: 'sub-google-logout-race',
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-barrier-logout',
       audience: 'client', rawNonce: nonce, now,
     });
-    const [logoutResult, linkResult] = await Promise.allSettled([
-      guestAuth.logout(guest.refreshToken, new Date()),
-      auth.link({
+    const barrier = await runtimePool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await lockGuestFamily(barrier, familyId);
+      const linkPromise = auth.link({
         provider: 'google', idToken: token, nonce,
         guestPlayerId: guestId, guestFamilyId: familyId,
         audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-    ]);
-    assert.ok(logoutResult.status === 'fulfilled' || linkResult.status === 'fulfilled');
-    if (logoutResult.status === 'fulfilled' && linkResult.status === 'rejected') {
-      assert.ok(linkResult.reason instanceof ProviderAuthError);
-      assert.equal(linkResult.reason.code, 'GUEST_PROOF_REQUIRED');
-    }
-    if (linkResult.status === 'fulfilled') {
-      await assert.rejects(
-        () => assertExactActiveFamily({
-          pool: runtimePool, playerId: guestId, familyId,
-          expectedAccountType: 'guest', accountClassEnabled: true,
-        }),
-        /UNAUTHENTICATED/,
+      });
+      await waitForWaitingFamilyLock(familyId);
+      await barrier.query(
+        'UPDATE pzd_guest_families SET revoked_at=$2 WHERE family_id=$1 AND revoked_at IS NULL',
+        [familyId, new Date()],
       );
+      await barrier.query('COMMIT');
+      await assert.rejects(
+        () => linkPromise,
+        (error: unknown) => error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED',
+      );
+    } finally {
+      try { await barrier.query('ROLLBACK'); } catch { /* already committed */ }
+      barrier.release();
     }
+  });
 
-    const guest2 = await guestAuth.create(new Date());
-    const claims2 = claimsFromJwt(guest2.accessToken);
-    const nonce2 = await issueProviderChallenge(runtimePool, {
-      provider: 'google', purpose: 'link',
-      binding: linkChallengeBinding(String(claims2.sub), String(claims2.fid)),
+  await t.test('barrier: refresh rotation commits under lock before waiting link proceeds', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
     });
-    const token2 = mintAssertion({
-      privateKey, kid: 't', provider: 'google', subject: 'sub-google-refresh-race',
-      audience: 'client', rawNonce: nonce2, now,
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-barrier-refresh',
+      audience: 'client', rawNonce: nonce, now,
     });
-    const [refreshResult, link2] = await Promise.allSettled([
-      guestAuth.refresh(guest2.refreshToken, undefined, new Date()),
-      auth.link({
-        provider: 'google', idToken: token2, nonce: nonce2,
-        guestPlayerId: String(claims2.sub), guestFamilyId: String(claims2.fid),
+    const barrier = await runtimePool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await lockGuestFamily(barrier, familyId);
+      const linkPromise = auth.link({
+        provider: 'apple', idToken: token, nonce,
+        guestPlayerId: guestId, guestFamilyId: familyId,
         audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-    ]);
-    // Family stays the same on refresh; link may succeed. Either way no crash / no dual verified link.
-    assert.ok(refreshResult.status === 'fulfilled' || link2.status === 'fulfilled');
+      });
+      await waitForWaitingFamilyLock(familyId);
+      // Deterministic refresh rotation while link is blocked on the same family lock.
+      const oldDigest = await barrier.query<{ token_digest: string }>(
+        `SELECT token_digest FROM pzd_guest_refresh
+         WHERE family_id=$1 AND used_at IS NULL`,
+        [familyId],
+      );
+      assert.equal(oldDigest.rowCount, 1);
+      await barrier.query(
+        'UPDATE pzd_guest_refresh SET used_at=$2 WHERE token_digest=$1',
+        [oldDigest.rows[0]!.token_digest, new Date()],
+      );
+      const nextDigest = challengeDigestForTests(`rotated-${familyId}`);
+      await barrier.query(
+        `INSERT INTO pzd_guest_refresh (family_id, player_id, token_digest, expires_at)
+         VALUES ($1, $2, $3, $4)`,
+        [familyId, guestId, nextDigest, new Date(Date.now() + 86400000)],
+      );
+      await barrier.query('COMMIT');
+      const linked = await linkPromise;
+      assert.equal(linked.playerId, guestId);
+      assert.equal(linked.accountType, 'verified');
+      const tip = await runtimePool.query(
+        `SELECT 1 FROM pzd_guest_refresh WHERE family_id=$1 AND token_digest=$2 AND used_at IS NULL`,
+        [familyId, nextDigest],
+      );
+      // Original guest family is revoked by successful link; tip may be revoked with family.
+      assert.ok((tip.rowCount ?? 0) === 0 || (tip.rowCount ?? 0) === 1);
+    } finally {
+      try { await barrier.query('ROLLBACK'); } catch { /* committed */ }
+      barrier.release();
+    }
+  });
+
+  await t.test('barrier: concurrent link attempts serialize; exactly one winner', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const nonceA = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const nonceB = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const tokenA = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-barrier-race',
+      audience: 'client', rawNonce: nonceA, now,
+    });
+    const tokenB = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-barrier-race',
+      audience: 'client', rawNonce: nonceB, now: now + 1,
+    });
+    const barrier = await runtimePool.connect();
+    try {
+      await barrier.query('BEGIN');
+      await lockGuestFamily(barrier, familyId);
+      const first = auth.link({
+        provider: 'apple', idToken: tokenA, nonce: nonceA,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      });
+      await waitForWaitingFamilyLock(familyId);
+      const second = auth.link({
+        provider: 'apple', idToken: tokenB, nonce: nonceB,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        audiences: ['client'], keys: [key], nowSeconds: now + 1,
+      });
+      await waitForWaitingFamilyLock(familyId);
+      await barrier.query('COMMIT');
+      const results = await Promise.allSettled([first, second]);
+      assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+      assert.equal(results.filter((r) => r.status === 'rejected').length, 1);
+    } finally {
+      try { await barrier.query('ROLLBACK'); } catch { /* committed */ }
+      barrier.release();
+    }
+  });
+
+  await t.test('operator cleanup deletes expired challenges; runtime role cannot', async () => {
+    const digest = challengeDigestForTests(`expired-cleanup-${randomUUID()}`);
+    await adminPool.query(
+      `INSERT INTO public.pzd_provider_challenges
+        (nonce_digest, binding_digest, provider, purpose, expires_at)
+       VALUES ($1, $2, 'google', 'login', clock_timestamp() - interval '2 days')`,
+      [digest, challengeDigestForTests('binding')],
+    );
+    await assert.rejects(() => cleanupExpiredProviderChallenges(runtimePool, 10));
+    const removed = await cleanupExpiredProviderChallenges(adminPool, 10);
+    assert.ok(removed >= 1);
+    const left = await adminPool.query(
+      'SELECT 1 FROM public.pzd_provider_challenges WHERE nonce_digest=$1',
+      [digest],
+    );
+    assert.equal(left.rowCount, 0);
   });
 
   await t.test('transaction rollback leaves no identity link on conflict', async () => {

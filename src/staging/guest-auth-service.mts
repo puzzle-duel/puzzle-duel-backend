@@ -1,6 +1,9 @@
 /**
  * PZD-49 staging guest credentials. Not mounted on public HTTP until the
  * migration, TLS reverse proxy, rate limits and tournament verifier are ready.
+ *
+ * Refresh and logout take the same family advisory lock as provider linking so
+ * concurrent link/logout/refresh mutually serialize.
  */
 import { createHash, createHmac, randomBytes, randomUUID, type KeyObject } from 'node:crypto';
 import type pg from 'pg';
@@ -8,6 +11,7 @@ import {
   accountClassForPlayer,
   GUEST_AUDIENCE,
   GUEST_ISSUER,
+  lockGuestFamily,
   mintStagingAccessJwt,
 } from './staging-access-token.mts';
 
@@ -103,14 +107,30 @@ export class PostgresStagingGuestAuth {
     if (!/^[A-Za-z0-9_-]{64}$/.test(refreshToken)) {
       throw new GuestCredentialError('INVALID_REFRESH');
     }
-    const result = await this.pool.query(
-      `UPDATE pzd_guest_families SET revoked_at = $2
-       WHERE family_id = (
-         SELECT family_id FROM pzd_guest_refresh WHERE token_digest = $1
-       ) AND revoked_at IS NULL`,
-      [digest(refreshToken), now],
-    );
-    if (result.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH');
+    const tokenDigest = digest(refreshToken);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const found = await client.query<{ family_id: string }>(
+        'SELECT family_id FROM pzd_guest_refresh WHERE token_digest = $1',
+        [tokenDigest],
+      );
+      const familyId = found.rows[0]?.family_id;
+      if (!familyId) throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_NOT_FOUND');
+      await lockGuestFamily(client, familyId);
+      const result = await client.query(
+        `UPDATE pzd_guest_families SET revoked_at = $2
+         WHERE family_id = $1 AND revoked_at IS NULL`,
+        [familyId, now],
+      );
+      if (result.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH', 'FAMILY_REVOKED');
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async refresh(refreshToken: string, rotationId?: string, now = new Date()) {
@@ -128,7 +148,12 @@ export class PostgresStagingGuestAuth {
       );
       const familyId = found.rows[0]?.family_id;
       if (!familyId) throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_NOT_FOUND');
-      const familyLock = await client.query('SELECT family_id FROM pzd_guest_families WHERE family_id = $1 FOR UPDATE', [familyId]);
+      // Same advisory domain as provider link / logout.
+      await lockGuestFamily(client, familyId);
+      const familyLock = await client.query(
+        'SELECT family_id FROM pzd_guest_families WHERE family_id = $1',
+        [familyId],
+      );
       if (familyLock.rowCount !== 1) throw new GuestCredentialError('INVALID_REFRESH', 'FAMILY_MISSING');
       const current = await client.query<{
         player_id: string; used_at: Date | null; revoked_at: Date | null; expires_at: Date;
