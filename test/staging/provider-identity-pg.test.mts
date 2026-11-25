@@ -614,6 +614,84 @@ describePg('provider identity PostgreSQL integration (runtime role)', async (t) 
     assert.equal(links.rowCount, 0);
   });
 
+  await t.test('recover restores linked player; unknown/wrong subject never creates', async () => {
+    const guest = await guestAuth.create(new Date());
+    const guestClaims = claimsFromJwt(guest.accessToken);
+    const guestId = String(guestClaims.sub);
+    const familyId = String(guestClaims.fid);
+    const linkNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const linkToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-recover',
+      audience: 'client', rawNonce: linkNonce, now,
+    });
+    const linked = await auth.link({
+      provider: 'apple', idToken: linkToken, nonce: linkNonce,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(linked.playerId, guestId);
+
+    const accountsBefore = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_guest_accounts');
+    const linksBefore = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_identity_links');
+    const familiesBefore = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_guest_families');
+
+    const recoverBinding = 'recover-binding-ok';
+    const recoverNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding: recoverBinding,
+    });
+    const recoverToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-recover',
+      audience: 'client', rawNonce: recoverNonce, now: now + 2,
+    });
+    const recovered = await auth.recover({
+      provider: 'apple', idToken: recoverToken, nonce: recoverNonce,
+      binding: recoverBinding, expectedPlayerId: guestId,
+      audiences: ['client'], keys: [key], nowSeconds: now + 2,
+    });
+    assert.equal(recovered.playerId, guestId);
+    assert.equal(recovered.accountType, 'verified');
+    assert.notEqual(recovered.refreshToken, linked.refreshToken);
+
+    const unknownBinding = 'recover-binding-unknown';
+    const unknownNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'login', binding: unknownBinding,
+    });
+    const unknownToken = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-never-linked',
+      audience: 'client', rawNonce: unknownNonce, now: now + 3,
+    });
+    await assert.rejects(() => auth.recover({
+      provider: 'google', idToken: unknownToken, nonce: unknownNonce,
+      binding: unknownBinding, expectedPlayerId: guestId,
+      audiences: ['client'], keys: [key], nowSeconds: now + 3,
+    }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'RECOVERY_NOT_LINKED');
+
+    const wrongBinding = 'recover-binding-wrong';
+    const wrongNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding: wrongBinding,
+    });
+    const wrongToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-recover',
+      audience: 'client', rawNonce: wrongNonce, now: now + 4,
+    });
+    await assert.rejects(() => auth.recover({
+      provider: 'apple', idToken: wrongToken, nonce: wrongNonce,
+      binding: wrongBinding, expectedPlayerId: randomUUID(),
+      audiences: ['client'], keys: [key], nowSeconds: now + 4,
+    }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'ACCOUNT_CONFLICT');
+
+    const accountsAfter = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_guest_accounts');
+    const linksAfter = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_identity_links');
+    // One successful recover issues a family; accounts/links must not grow from failures.
+    assert.equal(accountsAfter.rows[0]!.n, accountsBefore.rows[0]!.n);
+    assert.equal(linksAfter.rows[0]!.n, linksBefore.rows[0]!.n);
+    const familiesAfter = await runtimePool.query('SELECT COUNT(*)::int AS n FROM pzd_guest_families');
+    assert.equal(familiesAfter.rows[0]!.n, familiesBefore.rows[0]!.n + 1);
+  });
+
   await t.test('runtime role cannot UPDATE/DELETE identity links; concurrent nonce one winner', async () => {
     const existing = await runtimePool.query<{ provider: string; provider_subject: string }>(
       `SELECT provider, provider_subject FROM public.pzd_identity_links LIMIT 1`,

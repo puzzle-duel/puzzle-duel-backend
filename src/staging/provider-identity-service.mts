@@ -29,13 +29,16 @@ export class ProviderAuthError extends Error {
     | 'INVALID_PROVIDER_CHALLENGE'
     | 'ACCOUNT_CONFLICT'
     | 'GUEST_PROOF_REQUIRED'
-    | 'AUTH_UNAVAILABLE';
+    | 'AUTH_UNAVAILABLE'
+    /** Provider subject is not linked; recovery must never create a player. */
+    | 'RECOVERY_NOT_LINKED';
   constructor(code:
     | 'INVALID_PROVIDER_ASSERTION'
     | 'INVALID_PROVIDER_CHALLENGE'
     | 'ACCOUNT_CONFLICT'
     | 'GUEST_PROOF_REQUIRED'
     | 'AUTH_UNAVAILABLE'
+    | 'RECOVERY_NOT_LINKED'
   ) {
     super(code);
     this.code = code;
@@ -126,6 +129,68 @@ export class PostgresProviderIdentityAuth {
           [playerId],
         );
       }
+      const bundle = await this.#issueVerifiedFamily(client, playerId, now);
+      await client.query('COMMIT');
+      return bundle;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw mapError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Identity-preserving recovery after uncertain guest→verified link.
+   * Never creates a player, identity link, or session family until the
+   * verified provider subject already maps to [expectedPlayerId].
+   * expectedPlayerId is a filter only — never proof of ownership.
+   * Uses the same login challenge purpose/binding (no schema migration).
+   */
+  async recover(input: {
+    provider: Provider;
+    idToken: string;
+    nonce: string;
+    binding: string;
+    expectedPlayerId: string;
+    audiences: readonly string[];
+    keys: readonly ProviderKey[];
+    nowSeconds: number;
+    now?: Date;
+  }): Promise<ProviderCredentialBundle> {
+    if (!/^[0-9a-f-]{36}$/i.test(input.expectedPlayerId)) {
+      throw new ProviderAuthError('INVALID_PROVIDER_CHALLENGE');
+    }
+    const identity = this.#verify(input);
+    const scope: ChallengeScope = {
+      provider: input.provider,
+      purpose: 'login',
+      binding: input.binding,
+    };
+    const now = input.now ?? new Date();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await consumeProviderChallenge(client, scope, input.nonce);
+      await lockIdentitySubject(client, identity.provider, identity.subject);
+      const existing = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_identity_links
+         WHERE provider=$1 AND provider_subject=$2`,
+        [identity.provider, identity.subject],
+      );
+      if (existing.rowCount !== 1) {
+        throw new ProviderAuthError('RECOVERY_NOT_LINKED');
+      }
+      const playerId = existing.rows[0]!.player_id;
+      if (playerId !== input.expectedPlayerId) {
+        throw new ProviderAuthError('ACCOUNT_CONFLICT');
+      }
+      await client.query(
+        `UPDATE public.pzd_guest_accounts
+         SET account_class='verified'
+         WHERE player_id=$1 AND account_class='guest'`,
+        [playerId],
+      );
       const bundle = await this.#issueVerifiedFamily(client, playerId, now);
       await client.query('COMMIT');
       return bundle;

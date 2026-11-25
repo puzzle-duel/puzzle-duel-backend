@@ -25,6 +25,7 @@ const PATHS = new Set([
   '/v1/auth/providers/challenge',
   '/v1/auth/providers/login',
   '/v1/auth/providers/link',
+  '/v1/auth/providers/recover',
 ]);
 
 export function createProviderAuthHttpHandler(deps: {
@@ -87,13 +88,17 @@ export function createProviderAuthHttpHandler(deps: {
       if (path === '/v1/auth/providers/login') {
         return await handleLogin(deps, data, reply);
       }
+      if (path === '/v1/auth/providers/recover') {
+        return await handleRecover(deps, data, reply);
+      }
       return await handleLink(deps, data, req, reply);
     } catch (error) {
       if (error instanceof ProviderAuthError) {
         const status = error.code === 'ACCOUNT_CONFLICT' ? 409
           : error.code === 'AUTH_UNAVAILABLE' ? 503
             : error.code === 'GUEST_PROOF_REQUIRED' ? 401
-              : 401;
+              : error.code === 'RECOVERY_NOT_LINKED' ? 401
+                : 401;
         reply(status, { error: error.code }, error.code);
       } else {
         reply(503, { error: 'AUTH_UNAVAILABLE' }, 'AUTH_UNAVAILABLE');
@@ -196,6 +201,47 @@ async function handleLogin(
     keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
     nowSeconds: Math.floor(Date.now() / 1000),
   }), 'AUTH_LOGIN_SUCCESS');
+  return true;
+}
+
+async function handleRecover(
+  deps: {
+    identity: PostgresProviderIdentityAuth;
+    jwks: ProviderJwks;
+    config: ProviderAuthConfig;
+  },
+  data: Record<string, unknown>,
+  reply: (status: number, data: object, reason?: string) => void,
+): Promise<boolean> {
+  const provider = parseProvider(data.provider);
+  if (!provider ||
+      typeof data.idToken !== 'string' ||
+      typeof data.nonce !== 'string' ||
+      typeof data.binding !== 'string' ||
+      typeof data.expectedPlayerId !== 'string' ||
+      Object.keys(data).length !== 5) {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  if (!/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  const audiences = audiencesFor(deps.config, provider);
+  if (!audiences.length) {
+    reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
+    return true;
+  }
+  reply(201, await deps.identity.recover({
+    provider,
+    idToken: data.idToken,
+    nonce: data.nonce,
+    binding: data.binding,
+    expectedPlayerId: data.expectedPlayerId,
+    audiences,
+    keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
+    nowSeconds: Math.floor(Date.now() / 1000),
+  }), 'AUTH_RECOVERY_SUCCESS');
   return true;
 }
 

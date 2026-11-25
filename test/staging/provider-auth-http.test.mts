@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createProviderAuthHttpHandler } from '../../src/staging/provider-auth-http.mts';
 import { ProviderAuthError } from '../../src/staging/provider-identity-service.mts';
 import { PinnedRs256JwtVerifier } from '../../src/tournament/auth/pinned-jwt-verifier.mts';
@@ -17,7 +17,6 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
     maxTokenAgeSeconds: 900,
     allowStagingGuestClaims: true,
   });
-  const issued: unknown[] = [];
   const handler = createProviderAuthHttpHandler({
     pool: {
       async query() { return { rows: [], rowCount: 0 }; },
@@ -25,6 +24,7 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
     identity: {
       async login() { throw new ProviderAuthError('ACCOUNT_CONFLICT'); },
       async link() { throw new ProviderAuthError('GUEST_PROOF_REQUIRED'); },
+      async recover() { throw new ProviderAuthError('RECOVERY_NOT_LINKED'); },
     } as never,
     jwks: {
       async keys() { return []; },
@@ -33,8 +33,6 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
     guestVerifier: verifier,
     requireExactActiveGuestFamily: async () => true,
   });
-  // Patch issue path via challenge using real issueProviderChallenge would need DB;
-  // exercise login conflict mapping and HTTPS gate instead.
   const server = createServer((req, res) => { void handler(req, res); });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -64,7 +62,73 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
     });
     // kid parse / JWKS empty fails closed before identity; either 401 assertion or 503
     assert.ok([401, 503].includes(conflict.status));
-    issued.push(conflict.status);
+
+    const recoverSchema = await fetch(base + '/v1/auth/providers/recover', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({
+        provider: 'apple',
+        idToken: 'a.b.c',
+        nonce: 'n',
+        binding: 'b',
+        // missing expectedPlayerId
+      }),
+    });
+    assert.equal(recoverSchema.status, 400);
+
+    const recoverCalls: string[] = [];
+    const recoverHandler = createProviderAuthHttpHandler({
+      pool: { async query() { return { rows: [], rowCount: 0 }; } } as never,
+      identity: {
+        async login() { throw new Error('login-must-not-run'); },
+        async link() { throw new Error('link-must-not-run'); },
+        async recover(input: { expectedPlayerId: string }) {
+          recoverCalls.push(input.expectedPlayerId);
+          throw new ProviderAuthError('RECOVERY_NOT_LINKED');
+        },
+      } as never,
+      jwks: {
+        async keys() { return []; },
+      } as never,
+      config: { appleAudiences: ['app.apple'], googleAudiences: [] },
+      guestVerifier: verifier,
+      requireExactActiveGuestFamily: async () => true,
+    });
+    const recoverServer = createServer((req, res) => { void recoverHandler(req, res); });
+    await new Promise<void>((resolve) => recoverServer.listen(0, '127.0.0.1', resolve));
+    try {
+      const recoverAddress = recoverServer.address();
+      if (!recoverAddress || typeof recoverAddress === 'string') throw new Error('No port');
+      const recoverBase = `http://127.0.0.1:${recoverAddress.port}`;
+      const expectedPlayerId = randomUUID();
+      const header = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'k' })).toString('base64url');
+      const payload = Buffer.from(JSON.stringify({ sub: 'x' })).toString('base64url');
+      const idToken = `${header}.${payload}.sig`;
+      const notLinked = await fetch(recoverBase + '/v1/auth/providers/recover', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-forwarded-proto': 'https',
+        },
+        body: JSON.stringify({
+          provider: 'apple',
+          idToken,
+          nonce: 'n',
+          binding: 'b',
+          expectedPlayerId,
+        }),
+      });
+      assert.equal(notLinked.status, 401);
+      const body = await notLinked.json() as { error?: string };
+      assert.equal(body.error, 'RECOVERY_NOT_LINKED');
+      assert.deepEqual(recoverCalls, [expectedPlayerId]);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        recoverServer.close((error) => error ? reject(error) : resolve()));
+    }
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => error ? reject(error) : resolve()));
