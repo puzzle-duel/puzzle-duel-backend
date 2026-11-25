@@ -31,7 +31,7 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
     } as never,
     config: { appleAudiences: ['app.apple'], googleAudiences: [] },
     guestVerifier: verifier,
-    requireActiveGuestFamily: async () => true,
+    requireExactActiveGuestFamily: async () => true,
   });
   // Patch issue path via challenge using real issueProviderChallenge would need DB;
   // exercise login conflict mapping and HTTPS gate instead.

@@ -11,6 +11,10 @@ import { PostgresStagingGuestAuth, GUEST_ISSUER, GUEST_AUDIENCE } from './guest-
 import { createProviderAuthHttpHandler, providerAuthDiagnosticReason } from './provider-auth-http.mts';
 import { PostgresProviderIdentityAuth } from './provider-identity-service.mts';
 import { ProviderJwks } from './provider-jwks.mts';
+import {
+  assertExactActiveFamily,
+  detectAccountClassColumn,
+} from './staging-access-token.mts';
 import { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import { PostgresVerifiedIdentitySessionStore } from '../tournament/auth/postgres-verified-sessions.mts';
 import { createStagingTournamentHandler } from './staging-tournament.mts';
@@ -116,14 +120,36 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         );
         if (ready.rows[0]?.present !== true) throw new Error('Guest retry schema is not ready');
       }
+      const accountClassEnabled = await detectAccountClassColumn(pool);
       guestHandler = createGuestAuthHttpHandler(
-        new PostgresStagingGuestAuth(pool, privateKey, config.keyId!, config.guestRetryEnabled),
+        new PostgresStagingGuestAuth(
+          pool, privateKey, config.keyId!, config.guestRetryEnabled, accountClassEnabled,
+        ),
       );
       const verifier = new PinnedRs256JwtVerifier({
         issuer: GUEST_ISSUER, audience: GUEST_AUDIENCE,
         keys: [{ keyId: config.keyId!, rsaPublicKeyPem: createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString() }],
         maxTokenAgeSeconds: 900, allowStagingGuestClaims: true,
       });
+      const authorizeExactFamily = async (
+        playerId: string,
+        familyId: string | undefined,
+        expectedAccountType?: 'guest' | 'verified',
+      ): Promise<boolean> => {
+        if (!familyId) return false;
+        try {
+          await assertExactActiveFamily({
+            pool,
+            playerId,
+            familyId,
+            expectedAccountType,
+            accountClassEnabled,
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      };
       const providerSchemaReady = await pool.query<{ ready: boolean }>(
         `SELECT (
            to_regclass('public.pzd_provider_challenges') IS NOT NULL
@@ -144,13 +170,8 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
             googleAudiences: config.googleAudiences,
           },
           guestVerifier: verifier,
-          requireActiveGuestFamily: async (playerId) => {
-            const active = await pool.query(
-              'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
-              [playerId],
-            );
-            return (active.rowCount ?? 0) > 0;
-          },
+          requireExactActiveGuestFamily: async (playerId, familyId) =>
+            authorizeExactFamily(playerId, familyId, 'guest'),
         });
       }
       const sessions = new PostgresVerifiedIdentitySessionStore(pool);
@@ -165,11 +186,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
           let identity;
           try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
           catch { res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-          const active = await pool.query(
-            'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
-            [identity.subject],
-          );
-          if (!active.rowCount) {
+          if (!(await authorizeExactFamily(identity.subject, identity.familyId))) {
             res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
           }
           await rankedHandler(req, res);
@@ -202,11 +219,7 @@ export async function startStagingServer(env: NodeJS.ProcessEnv = process.env) {
         let identity;
         try { identity = verifier.verifyAuthorizationHeader(req.headers.authorization); }
         catch { trace('jwt_verification_rejected'); res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return; }
-        const active = await pool.query(
-          'SELECT 1 FROM pzd_guest_families WHERE player_id=$1 AND revoked_at IS NULL LIMIT 1',
-          [identity.subject],
-        );
-        if (!active.rowCount) {
+        if (!(await authorizeExactFamily(identity.subject, identity.familyId))) {
           trace('guest_family_inactive');
           res.writeHead(401); res.end(JSON.stringify({ error: 'UNAUTHENTICATED' })); return;
         }

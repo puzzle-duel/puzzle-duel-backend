@@ -33,6 +33,8 @@ export interface VerifiedJwtIdentity {
   readonly keyId: string;
   /** Present for staging issuer tokens; undefined for non-staging verifiers. */
   readonly accountType?: 'guest' | 'verified';
+  /** Exact refresh family bound into staging access JWTs (`fid`). */
+  readonly familyId?: string;
 }
 
 export class JwtVerificationError extends Error {
@@ -76,6 +78,14 @@ function stagingAccountType(claims: Claims): 'guest' | 'verified' | null {
   if (claims.account_type === 'guest' || claims.accountType === 'guest') return 'guest';
   if (claims.account_type === 'verified' || claims.accountType === 'verified') return 'verified';
   return null;
+}
+
+const STAGING_FAMILY_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function stagingFamilyId(claims: Claims): string | null {
+  if (typeof claims.fid !== 'string' || !STAGING_FAMILY_ID.test(claims.fid)) return null;
+  return claims.fid;
 }
 
 function loadRsaKey(pem: string): KeyObject {
@@ -199,7 +209,7 @@ export class PinnedRs256JwtVerifier {
       claims.sub.length > 255 ||
       /^\s*$/.test(claims.sub) ||
       (this.#allowStagingGuestClaims
-        ? stagingAccountType(claims) === null
+        ? stagingAccountType(claims) === null || stagingFamilyId(claims) === null
         : isGuestClaims(claims)) ||
       !positiveInt(claims.exp) ||
       !positiveInt(claims.iat) ||
@@ -216,6 +226,9 @@ export class PinnedRs256JwtVerifier {
     const accountType = this.#allowStagingGuestClaims
       ? stagingAccountType(claims) ?? undefined
       : undefined;
+    const familyId = this.#allowStagingGuestClaims
+      ? stagingFamilyId(claims) ?? undefined
+      : undefined;
     return Object.freeze({
       issuer: this.#issuer,
       subject: claims.sub,
@@ -223,6 +236,7 @@ export class PinnedRs256JwtVerifier {
       expiresAt: claims.exp,
       keyId: protectedHeader.kid,
       ...(accountType ? { accountType } : {}),
+      ...(familyId ? { familyId } : {}),
     });
   }
 }

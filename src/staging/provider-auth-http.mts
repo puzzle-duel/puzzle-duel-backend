@@ -7,6 +7,7 @@ import {
 } from './provider-identity-service.mts';
 import { ProviderJwks } from './provider-jwks.mts';
 import type { Provider } from './provider-token-verifier.mts';
+import { linkChallengeBinding } from './staging-access-token.mts';
 import type { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import type pg from 'pg';
 
@@ -32,7 +33,8 @@ export function createProviderAuthHttpHandler(deps: {
   jwks: ProviderJwks;
   config: ProviderAuthConfig;
   guestVerifier: PinnedRs256JwtVerifier;
-  requireActiveGuestFamily: (playerId: string) => Promise<boolean>;
+  /** Exact guest family from access JWT `fid` — never "any family for player". */
+  requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
 }) {
   const attempts = new Map<string, { count: number; resetAt: number }>();
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
@@ -101,11 +103,37 @@ export function createProviderAuthHttpHandler(deps: {
   };
 }
 
+async function requireGuestLinkProof(
+  deps: {
+    guestVerifier: PinnedRs256JwtVerifier;
+    requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
+  },
+  req: IncomingMessage,
+  reply: (status: number, data: object, reason?: string) => void,
+): Promise<{ subject: string; familyId: string } | null> {
+  let identity;
+  try {
+    identity = deps.guestVerifier.verifyAuthorizationHeader(req.headers.authorization);
+  } catch {
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return null;
+  }
+  if (identity.accountType !== 'guest' || !identity.familyId) {
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return null;
+  }
+  if (!(await deps.requireExactActiveGuestFamily(identity.subject, identity.familyId))) {
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return null;
+  }
+  return { subject: identity.subject, familyId: identity.familyId };
+}
+
 async function handleChallenge(
   deps: {
     pool: pg.Pool;
     guestVerifier: PinnedRs256JwtVerifier;
-    requireActiveGuestFamily: (playerId: string) => Promise<boolean>;
+    requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
     config: ProviderAuthConfig;
   },
   data: Record<string, unknown>,
@@ -128,18 +156,9 @@ async function handleChallenge(
     reply(201, { provider, purpose, nonce, binding }, 'AUTH_CHALLENGE_ISSUED');
     return true;
   }
-  let identity;
-  try {
-    identity = deps.guestVerifier.verifyAuthorizationHeader(req.headers.authorization);
-  } catch {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return true;
-  }
-  if (!(await deps.requireActiveGuestFamily(identity.subject))) {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return true;
-  }
-  const binding = `link:${identity.subject}`;
+  const guest = await requireGuestLinkProof(deps, req, reply);
+  if (!guest) return true;
+  const binding = linkChallengeBinding(guest.subject, guest.familyId);
   const nonce = await issueProviderChallenge(deps.pool, { provider, purpose, binding });
   reply(201, { provider, purpose, nonce }, 'AUTH_CHALLENGE_ISSUED');
   return true;
@@ -186,7 +205,7 @@ async function handleLink(
     jwks: ProviderJwks;
     config: ProviderAuthConfig;
     guestVerifier: PinnedRs256JwtVerifier;
-    requireActiveGuestFamily: (playerId: string) => Promise<boolean>;
+    requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
   },
   data: Record<string, unknown>,
   req: IncomingMessage,
@@ -200,17 +219,8 @@ async function handleLink(
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
-  let identity;
-  try {
-    identity = deps.guestVerifier.verifyAuthorizationHeader(req.headers.authorization);
-  } catch {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return true;
-  }
-  if (!(await deps.requireActiveGuestFamily(identity.subject))) {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return true;
-  }
+  const guest = await requireGuestLinkProof(deps, req, reply);
+  if (!guest) return true;
   const audiences = audiencesFor(deps.config, provider);
   if (!audiences.length) {
     reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
@@ -220,7 +230,8 @@ async function handleLink(
     provider,
     idToken: data.idToken,
     nonce: data.nonce,
-    guestPlayerId: identity.subject,
+    guestPlayerId: guest.subject,
+    guestFamilyId: guest.familyId,
     audiences,
     keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
     nowSeconds: Math.floor(Date.now() / 1000),

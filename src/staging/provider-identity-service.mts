@@ -1,11 +1,19 @@
 /**
  * PZD-26 provider login/link against staging guest credential tables.
  * Firebase Auth is intentionally not used. Email is never an identity key.
+ *
+ * Identity rows are INSERT-only for the runtime role (no UPDATE grant).
+ * Concurrency uses transaction advisory locks, not SELECT FOR UPDATE.
  */
-import { createHash, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, type KeyObject } from 'node:crypto';
 import type pg from 'pg';
 import { consumeProviderChallenge, type ChallengeScope } from './provider-challenge.mts';
-import { GUEST_AUDIENCE, GUEST_ISSUER } from './guest-auth-service.mts';
+import {
+  linkChallengeBinding,
+  lockGuestFamily,
+  lockIdentitySubject,
+  mintStagingAccessJwt,
+} from './staging-access-token.mts';
 import {
   verifyProviderAssertion,
   type Provider,
@@ -39,26 +47,6 @@ function digest(token: string): string {
 }
 function opaqueToken(): string {
   return randomBytes(48).toString('base64url');
-}
-function accessJwt(
-  privateKey: KeyObject,
-  kid: string,
-  playerId: string,
-  accountType: 'guest' | 'verified',
-  now: Date,
-): string {
-  const iat = Math.floor(now.getTime() / 1000);
-  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid })).toString('base64url');
-  const payload = Buffer.from(JSON.stringify({
-    iss: GUEST_ISSUER,
-    aud: GUEST_AUDIENCE,
-    sub: playerId,
-    account_type: accountType,
-    iat,
-    exp: iat + ACCESS_SECONDS,
-  })).toString('base64url');
-  const message = `${header}.${payload}`;
-  return `${message}.${sign('RSA-SHA256', Buffer.from(message), privateKey).toString('base64url')}`;
 }
 
 export type ProviderCredentialBundle = {
@@ -106,9 +94,10 @@ export class PostgresProviderIdentityAuth {
     try {
       await client.query('BEGIN');
       await consumeProviderChallenge(client, scope, input.nonce);
+      await lockIdentitySubject(client, identity.provider, identity.subject);
       const existing = await client.query<{ player_id: string }>(
         `SELECT player_id FROM public.pzd_identity_links
-         WHERE provider=$1 AND provider_subject=$2 FOR UPDATE`,
+         WHERE provider=$1 AND provider_subject=$2`,
         [identity.provider, identity.subject],
       );
       let playerId = existing.rows[0]?.player_id;
@@ -153,41 +142,44 @@ export class PostgresProviderIdentityAuth {
     idToken: string;
     nonce: string;
     guestPlayerId: string;
+    guestFamilyId: string;
     audiences: readonly string[];
     keys: readonly ProviderKey[];
     nowSeconds: number;
     now?: Date;
   }): Promise<ProviderCredentialBundle> {
-    if (!/^[0-9a-f-]{36}$/i.test(input.guestPlayerId)) {
+    if (!/^[0-9a-f-]{36}$/i.test(input.guestPlayerId) ||
+        !/^[0-9a-f-]{36}$/i.test(input.guestFamilyId)) {
       throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
     }
     const identity = this.#verify(input);
     const scope: ChallengeScope = {
       provider: input.provider,
       purpose: 'link',
-      binding: `link:${input.guestPlayerId}`,
+      binding: linkChallengeBinding(input.guestPlayerId, input.guestFamilyId),
     };
     const now = input.now ?? new Date();
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      // Exact authenticated guest family first — stale/revoked/upgraded proof fails closed.
+      await lockGuestFamily(client, input.guestFamilyId);
       const guest = await client.query<{ player_id: string; account_class: string }>(
-        `SELECT player_id, account_class FROM public.pzd_guest_accounts
-         WHERE player_id=$1 FOR UPDATE`,
-        [input.guestPlayerId],
+        `SELECT a.player_id, a.account_class
+         FROM public.pzd_guest_accounts a
+         JOIN public.pzd_guest_families f ON f.player_id = a.player_id
+         WHERE a.player_id=$1 AND f.family_id=$2 AND f.revoked_at IS NULL`,
+        [input.guestPlayerId, input.guestFamilyId],
       );
       if (guest.rowCount !== 1) throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
-      const activeFamily = await client.query(
-        `SELECT 1 FROM public.pzd_guest_families
-         WHERE player_id=$1 AND revoked_at IS NULL
-         LIMIT 1 FOR UPDATE`,
-        [input.guestPlayerId],
-      );
-      if (activeFamily.rowCount !== 1) throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+      if (guest.rows[0]!.account_class !== 'guest') {
+        throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+      }
       await consumeProviderChallenge(client, scope, input.nonce);
+      await lockIdentitySubject(client, identity.provider, identity.subject);
       const occupied = await client.query<{ player_id: string }>(
         `SELECT player_id FROM public.pzd_identity_links
-         WHERE provider=$1 AND provider_subject=$2 FOR UPDATE`,
+         WHERE provider=$1 AND provider_subject=$2`,
         [identity.provider, identity.subject],
       );
       if (occupied.rowCount === 1 && occupied.rows[0]!.player_id !== input.guestPlayerId) {
@@ -272,7 +264,14 @@ export class PostgresProviderIdentityAuth {
     return {
       playerId,
       accountType: 'verified',
-      accessToken: accessJwt(this.privateKey, this.keyId, playerId, 'verified', now),
+      accessToken: mintStagingAccessJwt({
+        privateKey: this.privateKey,
+        keyId: this.keyId,
+        playerId,
+        familyId,
+        accountType: 'verified',
+        now,
+      }),
       refreshToken,
       expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
       linkedProviders: linked.rows.map((row) => row.provider),

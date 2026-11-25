@@ -7,17 +7,41 @@ import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { issueProviderChallenge, consumeProviderChallenge } from '../../src/staging/provider-challenge.mts';
 import { PostgresProviderIdentityAuth, ProviderAuthError } from '../../src/staging/provider-identity-service.mts';
+import { PostgresStagingGuestAuth } from '../../src/staging/guest-auth-service.mts';
+import {
+  assertExactActiveFamily,
+  detectAccountClassColumn,
+  linkChallengeBinding,
+} from '../../src/staging/staging-access-token.mts';
 import type { ProviderKey } from '../../src/staging/provider-token-verifier.mts';
 
 const databaseUrl = process.env.PZD_TEST_DATABASE_URL;
 const describePg = databaseUrl ? test : test.skip;
-
+const ROLE_PASSWORD = 'pzd-provider-auth-test-only-not-a-secret';
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
-async function applySql(client: pg.PoolClient, relativePath: string): Promise<void> {
+/** Destructive setup must never run against staging/production. */
+function assertIsolatedTestDatabase(name: string): void {
+  if (!name || name === 'pzd_staging' || /(?:^|_)(?:prod|production|live|staging)(?:$|_)/i.test(name)) {
+    throw new Error(`REFUSING_DESTRUCTIVE_TEST_SETUP:${name}`);
+  }
+  if (!/^pzd_[a-z0-9_]*test[a-z0-9_]*$/i.test(name) && name !== 'pzd_ci') {
+    throw new Error(`REFUSING_DESTRUCTIVE_TEST_SETUP:${name}`);
+  }
+}
+
+function roleUrl(role: string): string {
+  const url = new URL(databaseUrl!);
+  url.username = role;
+  url.password = ROLE_PASSWORD;
+  return url.toString();
+}
+
+async function applySql(client: pg.PoolClient, relativePath: string, dbName: string): Promise<void> {
+  const escaped = dbName.replace(/'/g, "''");
   const sql = readFileSync(join(root, relativePath), 'utf8')
-    .replace(/current_database\(\) <> 'pzd_staging'/g, 'false')
-    .replace(/current_database\(\)='pzd_staging'/g, 'true');
+    .replace(/current_database\(\) <> 'pzd_staging'/g, `current_database() <> '${escaped}'`)
+    .replace(/current_database\(\)='pzd_staging'/g, `current_database()='${escaped}'`);
   await client.query(sql);
 }
 
@@ -45,10 +69,19 @@ function mintAssertion(input: {
   return msg + '.' + sign('RSA-SHA256', Buffer.from(msg), input.privateKey).toString('base64url');
 }
 
-describePg('provider identity PostgreSQL integration', async (t) => {
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
-  const admin = await pool.connect();
+function claimsFromJwt(token: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as Record<string, unknown>;
+}
+
+describePg('provider identity PostgreSQL integration (runtime role)', async (t) => {
+  const adminPool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+  const admin = await adminPool.connect();
+  let dbName = '';
   try {
+    const db = await admin.query<{ current_database: string }>('SELECT current_database()');
+    dbName = db.rows[0]!.current_database;
+    assertIsolatedTestDatabase(dbName);
+
     await admin.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
     await admin.query(`
       DROP TABLE IF EXISTS public.pzd_identity_links CASCADE;
@@ -57,8 +90,9 @@ describePg('provider identity PostgreSQL integration', async (t) => {
       DROP TABLE IF EXISTS public.pzd_guest_families CASCADE;
       DROP TABLE IF EXISTS public.pzd_guest_accounts CASCADE;
       DROP FUNCTION IF EXISTS public.pzd_provider_challenge_immutable CASCADE;
+      DROP FUNCTION IF EXISTS public.pzd_identity_links_immutable CASCADE;
       DO $$ BEGIN
-        CREATE ROLE pzd_app_runtime;
+        CREATE ROLE pzd_app_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
       EXCEPTION WHEN duplicate_object THEN NULL;
       END $$;
     `);
@@ -81,26 +115,52 @@ describePg('provider identity PostgreSQL integration', async (t) => {
         used_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT now()
       );
+      GRANT SELECT, INSERT ON public.pzd_guest_accounts TO pzd_app_runtime;
+      GRANT SELECT, INSERT, UPDATE ON public.pzd_guest_families TO pzd_app_runtime;
+      GRANT SELECT, INSERT, UPDATE ON public.pzd_guest_refresh TO pzd_app_runtime;
+      GRANT USAGE ON SCHEMA public TO pzd_app_runtime;
     `);
-    await applySql(admin, 'migrations/staging/0005_provider_challenges.sql');
-    await applySql(admin, 'migrations/staging/0006_provider_identity.sql');
+    await applySql(admin, 'migrations/staging/0005_provider_challenges.sql', dbName);
+    await applySql(admin, 'migrations/staging/0006_provider_identity.sql', dbName);
+    await applySql(admin, 'migrations/staging/0007_identity_immutability.sql', dbName);
+    await admin.query(`ALTER ROLE pzd_app_runtime LOGIN PASSWORD '${ROLE_PASSWORD}'`);
   } finally {
     admin.release();
   }
 
+  const runtimePool = new pg.Pool({ connectionString: roleUrl('pzd_app_runtime'), max: 4 });
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const jwk = publicKey.export({ format: 'jwk' });
   const key: ProviderKey = { kid: 't', kty: 'RSA', n: jwk.n!, e: jwk.e! };
-  const auth = new PostgresProviderIdentityAuth(pool, privateKey, 't');
+  const auth = new PostgresProviderIdentityAuth(runtimePool, privateKey, 't');
+  const guestAuth = new PostgresStagingGuestAuth(runtimePool, privateKey, 't', false, true);
   const now = Math.floor(Date.now() / 1000);
 
   t.after(async () => {
-    await pool.end();
+    await runtimePool.end();
+    const cleanup = await adminPool.connect();
+    try {
+      await cleanup.query('ALTER ROLE pzd_app_runtime NOLOGIN PASSWORD NULL');
+    } finally {
+      cleanup.release();
+      await adminPool.end();
+    }
   });
 
-  await t.test('login creates player; second login reuses; concurrent link conflicts', async () => {
+  await t.test('refuses destructive setup outside isolated test database names', () => {
+    assert.throws(() => assertIsolatedTestDatabase('pzd_staging'), /REFUSING_DESTRUCTIVE_TEST_SETUP/);
+    assert.throws(() => assertIsolatedTestDatabase('pzd_production'), /REFUSING_DESTRUCTIVE_TEST_SETUP/);
+    assert.throws(() => assertIsolatedTestDatabase('postgres'), /REFUSING_DESTRUCTIVE_TEST_SETUP/);
+    assertIsolatedTestDatabase(dbName);
+  });
+
+  await t.test('account class column is detected outside transactions', async () => {
+    assert.equal(await detectAccountClassColumn(runtimePool), true);
+  });
+
+  await t.test('login creates player; second login reuses; JWT carries fid', async () => {
     const binding = 'login-binding-1';
-    const nonce = await issueProviderChallenge(pool, {
+    const nonce = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding,
     });
     const token = mintAssertion({
@@ -112,10 +172,12 @@ describePg('provider identity PostgreSQL integration', async (t) => {
       audiences: ['client'], keys: [key], nowSeconds: now,
     });
     assert.equal(first.accountType, 'verified');
-    assert.match(first.playerId, /^[0-9a-f-]{36}$/i);
+    const claims = claimsFromJwt(first.accessToken);
+    assert.equal(claims.account_type, 'verified');
+    assert.match(String(claims.fid), /^[0-9a-f-]{36}$/i);
 
     const binding2 = 'login-binding-2';
-    const nonce2 = await issueProviderChallenge(pool, {
+    const nonce2 = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: binding2,
     });
     const token2 = mintAssertion({
@@ -129,36 +191,40 @@ describePg('provider identity PostgreSQL integration', async (t) => {
     assert.equal(second.playerId, first.playerId);
   });
 
-  await t.test('guest link preserves player id and rejects occupied provider subject', async () => {
-    const guestId = randomUUID();
-    const familyId = randomUUID();
-    await pool.query('INSERT INTO pzd_guest_accounts (player_id) VALUES ($1)', [guestId]);
-    await pool.query(
-      'INSERT INTO pzd_guest_families (family_id, player_id) VALUES ($1, $2)',
-      [familyId, guestId],
-    );
-    const nonce = await issueProviderChallenge(pool, {
-      provider: 'apple', purpose: 'link', binding: `link:${guestId}`,
+  await t.test('guest link preserves player id, binds family, rejects occupied subject', async () => {
+    const guest = await guestAuth.create(new Date());
+    const guestClaims = claimsFromJwt(guest.accessToken);
+    const guestId = String(guestClaims.sub);
+    const familyId = String(guestClaims.fid);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
     });
     const token = mintAssertion({
       privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-1',
       audience: 'client', rawNonce: nonce, now,
     });
     const linked = await auth.link({
-      provider: 'apple', idToken: token, nonce, guestPlayerId: guestId,
+      provider: 'apple', idToken: token, nonce,
+      guestPlayerId: guestId, guestFamilyId: familyId,
       audiences: ['client'], keys: [key], nowSeconds: now,
     });
     assert.equal(linked.playerId, guestId);
     assert.deepEqual(linked.linkedProviders, ['apple']);
 
-    const otherGuest = randomUUID();
-    await pool.query('INSERT INTO pzd_guest_accounts (player_id) VALUES ($1)', [otherGuest]);
-    await pool.query(
-      'INSERT INTO pzd_guest_families (family_id, player_id) VALUES ($1, $2)',
-      [randomUUID(), otherGuest],
+    await assert.rejects(
+      () => assertExactActiveFamily({
+        pool: runtimePool, playerId: guestId, familyId,
+        expectedAccountType: 'guest', accountClassEnabled: true,
+      }),
+      /UNAUTHENTICATED/,
     );
-    const conflictNonce = await issueProviderChallenge(pool, {
-      provider: 'apple', purpose: 'link', binding: `link:${otherGuest}`,
+
+    const other = await guestAuth.create(new Date());
+    const otherClaims = claimsFromJwt(other.accessToken);
+    const conflictNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(String(otherClaims.sub), String(otherClaims.fid)),
     });
     const conflictToken = mintAssertion({
       privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-1',
@@ -166,16 +232,234 @@ describePg('provider identity PostgreSQL integration', async (t) => {
     });
     await assert.rejects(() => auth.link({
       provider: 'apple', idToken: conflictToken, nonce: conflictNonce,
-      guestPlayerId: otherGuest, audiences: ['client'], keys: [key], nowSeconds: now,
+      guestPlayerId: String(otherClaims.sub), guestFamilyId: String(otherClaims.fid),
+      audiences: ['client'], keys: [key], nowSeconds: now,
     }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'ACCOUNT_CONFLICT');
   });
 
-  await t.test('concurrent nonce consumption allows exactly one winner', async () => {
-    const binding = 'race-binding';
-    const nonce = await issueProviderChallenge(pool, {
+  await t.test('stale guest access token cannot authorize after upgrade', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-stale',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    await auth.link({
+      provider: 'google', idToken: token, nonce,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    const secondNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const secondToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-stale',
+      audience: 'client', rawNonce: secondNonce, now,
+    });
+    await assert.rejects(() => auth.link({
+      provider: 'apple', idToken: secondToken, nonce: secondNonce,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED');
+  });
+
+  await t.test('revoked verified access family is rejected; cross-family auth fails', async () => {
+    const binding = 'verified-family-binding';
+    const nonce = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding,
     });
-    const clients = await Promise.all([pool.connect(), pool.connect()]);
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-revoked',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    const bundle = await auth.login({
+      provider: 'google', idToken: token, nonce, binding,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    const claims = claimsFromJwt(bundle.accessToken);
+    const familyId = String(claims.fid);
+    const playerId = String(claims.sub);
+    await runtimePool.query(
+      'UPDATE pzd_guest_families SET revoked_at=$2 WHERE family_id=$1',
+      [familyId, new Date()],
+    );
+    await assert.rejects(
+      () => assertExactActiveFamily({
+        pool: runtimePool, playerId, familyId, accountClassEnabled: true,
+      }),
+      /UNAUTHENTICATED/,
+    );
+    const otherFamily = randomUUID();
+    await runtimePool.query(
+      'INSERT INTO pzd_guest_families (family_id, player_id) VALUES ($1, $2)',
+      [otherFamily, playerId],
+    );
+    await assert.rejects(
+      () => assertExactActiveFamily({
+        pool: runtimePool, playerId, familyId, accountClassEnabled: true,
+      }),
+      /UNAUTHENTICATED/,
+    );
+    await assertExactActiveFamily({
+      pool: runtimePool, playerId, familyId: otherFamily, accountClassEnabled: true,
+    });
+  });
+
+  await t.test('concurrent account linking allows exactly one winner', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const results = await Promise.allSettled([0, 1].map(async (i) => {
+      const nonce = await issueProviderChallenge(runtimePool, {
+        provider: 'apple', purpose: 'link',
+        binding: linkChallengeBinding(guestId, familyId),
+      });
+      const token = mintAssertion({
+        privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-race',
+        audience: 'client', rawNonce: nonce, now: now + i,
+      });
+      return auth.link({
+        provider: 'apple', idToken: token, nonce,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        audiences: ['client'], keys: [key], nowSeconds: now + i,
+      });
+    }));
+    const wins = results.filter((r) => r.status === 'fulfilled').length;
+    const losses = results.filter((r) => r.status === 'rejected').length;
+    assert.equal(wins, 1);
+    assert.equal(losses, 1);
+  });
+
+  await t.test('concurrent logout/link and refresh/link fail closed for guest proof', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-logout-race',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    const [logoutResult, linkResult] = await Promise.allSettled([
+      guestAuth.logout(guest.refreshToken, new Date()),
+      auth.link({
+        provider: 'google', idToken: token, nonce,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      }),
+    ]);
+    assert.ok(logoutResult.status === 'fulfilled' || linkResult.status === 'fulfilled');
+    if (logoutResult.status === 'fulfilled' && linkResult.status === 'rejected') {
+      assert.ok(linkResult.reason instanceof ProviderAuthError);
+      assert.equal(linkResult.reason.code, 'GUEST_PROOF_REQUIRED');
+    }
+    if (linkResult.status === 'fulfilled') {
+      await assert.rejects(
+        () => assertExactActiveFamily({
+          pool: runtimePool, playerId: guestId, familyId,
+          expectedAccountType: 'guest', accountClassEnabled: true,
+        }),
+        /UNAUTHENTICATED/,
+      );
+    }
+
+    const guest2 = await guestAuth.create(new Date());
+    const claims2 = claimsFromJwt(guest2.accessToken);
+    const nonce2 = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'link',
+      binding: linkChallengeBinding(String(claims2.sub), String(claims2.fid)),
+    });
+    const token2 = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'sub-google-refresh-race',
+      audience: 'client', rawNonce: nonce2, now,
+    });
+    const [refreshResult, link2] = await Promise.allSettled([
+      guestAuth.refresh(guest2.refreshToken, undefined, new Date()),
+      auth.link({
+        provider: 'google', idToken: token2, nonce: nonce2,
+        guestPlayerId: String(claims2.sub), guestFamilyId: String(claims2.fid),
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      }),
+    ]);
+    // Family stays the same on refresh; link may succeed. Either way no crash / no dual verified link.
+    assert.ok(refreshResult.status === 'fulfilled' || link2.status === 'fulfilled');
+  });
+
+  await t.test('transaction rollback leaves no identity link on conflict', async () => {
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const binding = 'login-occupy';
+    const occupyNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding,
+    });
+    const occupyToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-rollback',
+      audience: 'client', rawNonce: occupyNonce, now,
+    });
+    await auth.login({
+      provider: 'apple', idToken: occupyToken, nonce: occupyNonce, binding,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'link',
+      binding: linkChallengeBinding(guestId, familyId),
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'sub-apple-rollback',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    await assert.rejects(() => auth.link({
+      provider: 'apple', idToken: token, nonce,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    }), (error: unknown) => error instanceof ProviderAuthError && error.code === 'ACCOUNT_CONFLICT');
+    const account = await runtimePool.query<{ account_class: string }>(
+      'SELECT account_class FROM pzd_guest_accounts WHERE player_id=$1', [guestId],
+    );
+    assert.equal(account.rows[0]?.account_class, 'guest');
+    const links = await runtimePool.query(
+      'SELECT 1 FROM pzd_identity_links WHERE player_id=$1', [guestId],
+    );
+    assert.equal(links.rowCount, 0);
+  });
+
+  await t.test('runtime role cannot UPDATE/DELETE identity links; concurrent nonce one winner', async () => {
+    const existing = await runtimePool.query<{ provider: string; provider_subject: string }>(
+      `SELECT provider, provider_subject FROM public.pzd_identity_links LIMIT 1`,
+    );
+    assert.ok((existing.rowCount ?? 0) >= 1);
+    const row = existing.rows[0]!;
+    await assert.rejects(
+      () => runtimePool.query(
+        `UPDATE public.pzd_identity_links SET player_id=$1
+         WHERE provider=$2 AND provider_subject=$3`,
+        [randomUUID(), row.provider, row.provider_subject],
+      ),
+    );
+    await assert.rejects(
+      () => runtimePool.query(
+        `DELETE FROM public.pzd_identity_links WHERE provider=$1 AND provider_subject=$2`,
+        [row.provider, row.provider_subject],
+      ),
+    );
+    const binding = 'race-binding';
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'login', binding,
+    });
+    const clients = await Promise.all([runtimePool.connect(), runtimePool.connect()]);
     try {
       const results = await Promise.allSettled(clients.map(async (client) => {
         await client.query('BEGIN');
@@ -190,10 +474,8 @@ describePg('provider identity PostgreSQL integration', async (t) => {
           throw error;
         }
       }));
-      const wins = results.filter((r) => r.status === 'fulfilled').length;
-      const losses = results.filter((r) => r.status === 'rejected').length;
-      assert.equal(wins, 1);
-      assert.equal(losses, 1);
+      assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+      assert.equal(results.filter((r) => r.status === 'rejected').length, 1);
     } finally {
       for (const client of clients) client.release();
     }

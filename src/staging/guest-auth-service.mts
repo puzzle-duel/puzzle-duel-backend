@@ -2,11 +2,16 @@
  * PZD-49 staging guest credentials. Not mounted on public HTTP until the
  * migration, TLS reverse proxy, rate limits and tournament verifier are ready.
  */
-import { createHash, createHmac, randomBytes, randomUUID, sign, type KeyObject } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, type KeyObject } from 'node:crypto';
 import type pg from 'pg';
+import {
+  accountClassForPlayer,
+  GUEST_AUDIENCE,
+  GUEST_ISSUER,
+  mintStagingAccessJwt,
+} from './staging-access-token.mts';
 
-export const GUEST_ISSUER = 'https://staging.puzzle-duel.app';
-export const GUEST_AUDIENCE = 'puzzle-duel-api';
+export { GUEST_AUDIENCE, GUEST_ISSUER };
 const ACCESS_SECONDS = 15 * 60;
 const REFRESH_DAYS = 30;
 const ROTATION_RETRY_MS = 10 * 60 * 1000;
@@ -19,7 +24,6 @@ function retryableSuccessor(previous: string, rotationId: string): string {
     .update('PZD-GUEST-ROTATION-V1\n' + rotationId, 'utf8')
     .digest().subarray(0, 48).toString('base64url');
 }
-
 
 export class GuestCredentialError extends Error {
   readonly code: 'INVALID_REFRESH' | 'REFRESH_REPLAY' | 'REFRESH_EXPIRED';
@@ -38,55 +42,26 @@ function digest(token: string): string {
 function opaqueToken(): string {
   return randomBytes(48).toString('base64url');
 }
-function accessJwt(
-  privateKey: KeyObject,
-  kid: string,
-  playerId: string,
-  now: Date,
-  accountType: 'guest' | 'verified' = 'guest',
-): string {
-  const iat = Math.floor(now.getTime() / 1000);
-  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid })).toString('base64url');
-  // Staging issuer may mint guest or verified account_type. Ranked HTTP must
-  // still reject guest independently of this token mint.
-  const payload = Buffer.from(JSON.stringify({
-    iss: GUEST_ISSUER, aud: GUEST_AUDIENCE, sub: playerId,
-    account_type: accountType, iat, exp: iat + ACCESS_SECONDS,
-  })).toString('base64url');
-  const message = `${header}.${payload}`;
-  return `${message}.${sign('RSA-SHA256', Buffer.from(message), privateKey).toString('base64url')}`;
-}
-
-async function accountClassFor(
-  client: { query: pg.Pool['query'] },
-  playerId: string,
-): Promise<'guest' | 'verified'> {
-  try {
-    const result = await client.query<{ account_class?: string }>(
-      `SELECT account_class FROM public.pzd_guest_accounts WHERE player_id=$1`,
-      [playerId],
-    );
-    return result.rows[0]?.account_class === 'verified' ? 'verified' : 'guest';
-  } catch (error) {
-    // Pre-0006 staging DBs lack account_class; keep minting guest tokens.
-    if (typeof error === 'object' && error && (error as { code?: string }).code === '42703') {
-      return 'guest';
-    }
-    throw error;
-  }
-}
 
 export class PostgresStagingGuestAuth {
   private readonly pool: pg.Pool;
   private readonly privateKey: KeyObject;
   private readonly keyId: string;
   private readonly retryableRotation: boolean;
-  constructor(pool: pg.Pool, privateKey: KeyObject, keyId: string, retryableRotation = false) {
+  private readonly accountClassEnabled: boolean;
+  constructor(
+    pool: pg.Pool,
+    privateKey: KeyObject,
+    keyId: string,
+    retryableRotation = false,
+    accountClassEnabled = false,
+  ) {
     if (!keyId || keyId.length > 128) throw new Error('Invalid signing key ID');
     this.pool = pool;
     this.privateKey = privateKey;
     this.keyId = keyId;
     this.retryableRotation = retryableRotation;
+    this.accountClassEnabled = accountClassEnabled;
   }
 
   async create(now = new Date()) {
@@ -105,8 +80,16 @@ export class PostgresStagingGuestAuth {
       );
       await client.query('COMMIT');
       return {
-        accessToken: accessJwt(this.privateKey, this.keyId, playerId, now),
-        refreshToken, expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
+        accessToken: mintStagingAccessJwt({
+          privateKey: this.privateKey,
+          keyId: this.keyId,
+          playerId,
+          familyId,
+          accountType: 'guest',
+          now,
+        }),
+        refreshToken,
+        expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
       };
     } catch (error) {
       await client.query('ROLLBACK');
@@ -131,7 +114,6 @@ export class PostgresStagingGuestAuth {
   }
 
   async refresh(refreshToken: string, rotationId?: string, now = new Date()) {
-    // Prevent enabled clients from silently rotating without retry guarantees.
     if (rotationId !== undefined && !this.retryableRotation) throw new Error('GUEST_RETRY_NOT_READY');
     if (rotationId !== undefined && !ROTATION_ID.test(rotationId)) {
       throw new GuestCredentialError('INVALID_REFRESH', 'TOKEN_FORMAT_INVALID');
@@ -141,7 +123,6 @@ export class PostgresStagingGuestAuth {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // Serialize every rotation within a family, including concurrent replay.
       const found = await client.query<{ family_id: string }>(
         'SELECT family_id FROM pzd_guest_refresh WHERE token_digest = $1', [tokenDigest],
       );
@@ -170,17 +151,23 @@ export class PostgresStagingGuestAuth {
             [familyId, digest(sameNextToken)],
           );
           if (successor.rowCount === 1 && successor.rows[0]?.used_at === null) {
-            const accountType = await accountClassFor(client, row.player_id);
+            const accountType = await accountClassForPlayer(
+              client, row.player_id, this.accountClassEnabled,
+            );
             await client.query('COMMIT');
             return {
-              accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now, accountType),
+              accessToken: mintStagingAccessJwt({
+                privateKey: this.privateKey,
+                keyId: this.keyId,
+                playerId: row.player_id,
+                familyId,
+                accountType,
+                now,
+              }),
               refreshToken: sameNextToken,
               expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
             };
           }
-          // The exact previous request already succeeded, but its successor
-          // has since been spent. A delayed duplicate is stale, not new proof
-          // of theft. Reject without revealing successor or revoking family.
           if (successor.rowCount === 1 && successor.rows[0]?.used_at !== null) {
             throw new GuestCredentialError('INVALID_REFRESH');
           }
@@ -205,14 +192,23 @@ export class PostgresStagingGuestAuth {
          VALUES ($1, $2, $3, $4)`,
         [familyId, row.player_id, digest(nextToken), new Date(now.getTime() + REFRESH_DAYS * 86400000)],
       );
-      const accountType = await accountClassFor(client, row.player_id);
+      const accountType = await accountClassForPlayer(
+        client, row.player_id, this.accountClassEnabled,
+      );
       await client.query('COMMIT');
       return {
-        accessToken: accessJwt(this.privateKey, this.keyId, row.player_id, now, accountType),
-        refreshToken: nextToken, expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
+        accessToken: mintStagingAccessJwt({
+          privateKey: this.privateKey,
+          keyId: this.keyId,
+          playerId: row.player_id,
+          familyId,
+          accountType,
+          now,
+        }),
+        refreshToken: nextToken,
+        expiresAt: new Date(now.getTime() + ACCESS_SECONDS * 1000).toISOString(),
       };
     } catch (error) {
-      // Replay revocation was already committed; do not undo it.
       if (!(error instanceof GuestCredentialError && error.code === 'REFRESH_REPLAY')) {
         await client.query('ROLLBACK');
       }
