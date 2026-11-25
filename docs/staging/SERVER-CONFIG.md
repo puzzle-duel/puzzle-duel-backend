@@ -173,8 +173,16 @@ See `puzzle-duel-client/docs/staging/SERVER-CONFIG.md` on `version/0.0.2`.
 - Do not call this setup externally healthy until real DNS/IP HTTPS TLS, iOS guest auth, and tournament/leaderboard requests are verified end-to-end.
 - **Still unverified from repo/observed outputs:** live `/etc/caddy/Caddyfile`, TLS certificate/SNI configuration, public domain ownership, OCI inbound firewall rules, configured HTTPS external origin, and exact secret values. Inspect on Oracle; do not invent.
 
-## 8. Change log
+## 8. Provider auth / Google staging (2026-11-25)
 
+- Deployed code SHA **`b340f7d1cc63bab2cbdc96dd1c5907f267a697ec`** (PR #74 CD run `45605645083`) — **verified** via `readlink` on Oracle.
+- Guest auth remains healthy (`POST /v1/auth/guest` → 201).
+- Provider routes **not mounted**: migrations `0005`/`0006`/`0007` not applied; `PZD_STAGING_GOOGLE_AUDIENCES` missing → challenge returns **404**.
+- Exact owner plan: `docs/staging/PZD-26-GOOGLE-STAGING-READINESS.md`. Do not apply migrations or edit `staging.env` without owner approval.
+
+## 9. Change log
+
+- **2026-11-25:** PZD-26/27 Google staging readiness inspection; provider schema + audiences still pending owner apply.
 - **2026-11-22:** `version/0.0.1` backend Oracle CD success: SHA `1508771188487802d7e9ec53c22dfb6eece0bdad`, run `45003330165`.
 - **2026-11-22:** `version/0.0.2` backend Oracle CD success: SHA `a3b0d34b685c73e582c2a7ebd945d935c1c9f574`, run `45003923513`.
 - **2026-11-22:** Client Mac DNS failure and Oracle public HTTPS TLS handshake failure observed; ingress unresolved.
