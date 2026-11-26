@@ -44,3 +44,27 @@ test('recovery migration is transactional via host wrapper and never backfills h
   assert.match(verification, /BEGIN READ ONLY/);
   assert.match(verification, /THEN 'PASS' ELSE 'BLOCKED'/);
 });
+
+const verify0007 = readFileSync('migrations/staging/0007_identity_immutability.verify.sql', 'utf8');
+
+test('0007 verify SQL matches migration runner PASS/BLOCKED contract', () => {
+  assert.match(runner, /\[\[ "\$verify_result" == PASS \]\]/);
+  assert.match(verify0007, /^BEGIN READ ONLY;/m);
+  assert.match(verify0007, /THEN 'PASS' ELSE 'BLOCKED'/);
+  assert.match(verify0007, /ROLLBACK;/);
+  assert.match(verify0007, /pzd_identity_links_immutable_upd/);
+  assert.match(verify0007, /pzd_identity_links_immutable_del/);
+  assert.match(verify0007, /tgenabled = 'O'/);
+  assert.match(verify0007, /NOT has_table_privilege\('pzd_app_runtime','public\.pzd_identity_links','UPDATE'\)/);
+  assert.match(verify0007, /NOT has_table_privilege\('pzd_app_runtime','public\.pzd_identity_links','DELETE'\)/);
+  assert.doesNotMatch(verify0007, /\\/);
+});
+
+test('migration runner accepts only exact PASS from verify output', () => {
+  const accept = (verify_result: string) => verify_result === 'PASS';
+  assert.equal(accept('PASS'), true);
+  assert.equal(accept('BLOCKED'), false);
+  assert.equal(accept('PASS\nBLOCKED'), false);
+  assert.equal(accept('pass'), false);
+  assert.equal(accept(' PASS '), false);
+});

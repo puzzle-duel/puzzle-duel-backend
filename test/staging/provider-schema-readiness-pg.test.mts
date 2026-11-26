@@ -122,4 +122,40 @@ describePg('provider schema readiness across migration stages', async (t) => {
     await pool.query('ALTER TABLE public.pzd_identity_links ENABLE TRIGGER pzd_identity_links_immutable_upd');
     assert.equal(await detectIdentityImmutabilityReady(pool), true);
   });
+
+  await t.test('0007 verify.sql returns PASS when ready and BLOCKED when a trigger is disabled', async () => {
+    // Runner uses psql -At -f verify.sql; node-pg needs the SELECT only (BEGIN/ROLLBACK
+    // are asserted in staging-migration-workflow.test.mts).
+    const verifySql = readFileSync(
+      join(root, 'migrations/staging/0007_identity_immutability.verify.sql'),
+      'utf8',
+    )
+      .replace(/^BEGIN READ ONLY;\s*/i, '')
+      .replace(/\s*ROLLBACK;\s*$/i, '');
+    const scalar = (result: pg.QueryResult): string =>
+      String(Object.values(result.rows[0] ?? {})[0] ?? '');
+    // Mirror ops/staging/migrations/run.sh: [[ "$verify_result" == PASS ]]
+    const runnerAccepts = (verify_result: string): boolean => verify_result === 'PASS';
+
+    const client = await pool.connect();
+    try {
+      const passResult = scalar(await client.query(verifySql));
+      assert.equal(passResult, 'PASS');
+      assert.equal(runnerAccepts(passResult), true);
+
+      await client.query(
+        'ALTER TABLE public.pzd_identity_links DISABLE TRIGGER pzd_identity_links_immutable_upd',
+      );
+      const blockedResult = scalar(await client.query(verifySql));
+      assert.equal(blockedResult, 'BLOCKED');
+      assert.equal(runnerAccepts(blockedResult), false);
+
+      await client.query(
+        'ALTER TABLE public.pzd_identity_links ENABLE TRIGGER pzd_identity_links_immutable_upd',
+      );
+      assert.equal(scalar(await client.query(verifySql)), 'PASS');
+    } finally {
+      client.release();
+    }
+  });
 });
