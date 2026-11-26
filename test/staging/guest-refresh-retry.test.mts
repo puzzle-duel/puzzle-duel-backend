@@ -134,3 +134,28 @@ test('late duplicate of same rotation proof cannot revoke an already advanced fa
   );
   assert.equal([...pool.families.values()][0]!.revoked_at, null);
 });
+
+test('used-token replay without rotation proof revokes; retryable same-id does not', async () => {
+  // Documents the UAT-shaped failure: presenting a used refresh without a
+  // matching rotation proof must revoke. Same-id retry within the window must not.
+  const pool = new FakePool();
+  const guest = new PostgresStagingGuestAuth(pool as never, privateKey, 'test', true);
+  const t = new Date('2026-11-22T16:49:19.000Z');
+  const initial = await guest.create(t);
+  const rotationId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const first = await guest.refresh(initial.refreshToken, rotationId, t);
+  // Lost-response retry with the same durable rotation proof.
+  const again = await guest.refresh(
+    initial.refreshToken,
+    rotationId,
+    new Date(t.getTime() + 5_000),
+  );
+  assert.equal(again.refreshToken, first.refreshToken);
+  assert.equal([...pool.families.values()][0]!.revoked_at, null);
+  // Bare used-token replay (no / wrong proof) revokes — never loosen this.
+  await assert.rejects(
+    () => guest.refresh(initial.refreshToken, undefined, new Date(t.getTime() + 10_000)),
+    (e: unknown) => e instanceof GuestCredentialError && e.code === 'REFRESH_REPLAY',
+  );
+  assert.ok([...pool.families.values()][0]!.revoked_at);
+});
