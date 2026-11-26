@@ -35,12 +35,23 @@
 - ~2.3h after last successful rotation; unused successor row existed → client likely presented the **previous** used token (lost persist or stale vault) without a successful retry proof.
 - **Conclusion:** Normal happy-path refresh with rotation retry enabled does **not** revoke. Revocation requires used-token reuse without valid retry proof (bug/race on client persist, or intentional replay).
 
+## Oracle staging retry flag (read-only, 2026-11-26)
+
+Probed live staging process env (no mutation):
+
+| Key | Oracle runtime |
+| --- | --- |
+| `PZD_STAGING_GUEST_RETRY_ENABLED` | **`<unset>`** (treated as OFF; server requires `=== 'true'`) |
+| Client dart-define `PZD_GUEST_RETRY_ENABLED` | Default **false**; `ios_staging_google_uat.sh` intentionally omits it |
+
+**Parity rule:** Keep client retry OFF until Oracle `PZD_STAGING_GUEST_RETRY_ENABLED=true` is confirmed. Do **not** enable client retry against an OFF server (lost-response retries become plain used-token replays → `REFRESH_REPLAY` + family revoke). Do **not** loosen replay revoke semantics to paper over a flag mismatch.
+
 ## Product / security decision
 
 - **Do not** reactivate revoked families.
 - **Do not** loosen `REFRESH_REPLAY` revoke semantics.
 - Explicit guest recovery (client) offers confirmed **new guest** mint; old player/family/score rows remain on the server.
-- Backend change for this investigation: **none required** beyond documenting + keeping existing retry regressions green. If a future fix is needed, prefer client vault durability / rotation intent — not server replay weakening.
+- Backend change for this investigation: **none required** beyond documenting Oracle retry OFF + keeping existing retry regressions green. If a future fix is needed, prefer client vault durability / rotation intent — not server replay weakening.
 
 ## Tests to keep green
 
