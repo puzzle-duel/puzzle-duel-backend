@@ -34,6 +34,8 @@ export class ProviderAuthError extends Error {
     | 'AUTH_UNAVAILABLE'
     /** Provider subject is not linked; recovery must never create a player. */
     | 'RECOVERY_NOT_LINKED'
+    /** Unified recoverLinked: identity linked but no committed continue/confirm receipt. */
+    | 'RECOVERY_OPERATION_INCOMPLETE'
     | 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED'
     | 'INVALID_CONTINUATION';
   readonly continuationToken?: string;
@@ -48,6 +50,7 @@ export class ProviderAuthError extends Error {
       | 'GUEST_PROOF_REQUIRED'
       | 'AUTH_UNAVAILABLE'
       | 'RECOVERY_NOT_LINKED'
+      | 'RECOVERY_OPERATION_INCOMPLETE'
       | 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED'
       | 'INVALID_CONTINUATION',
     extras?: {
@@ -415,6 +418,9 @@ export class PostgresProviderIdentityAuth {
             [input.guestPlayerId, now],
           );
           const bundle = await this.#issueVerifiedFamily(client, input.guestPlayerId!, now);
+          await this.#recordAuthReceipt(
+            client, identity.provider, identity.subject, input.guestPlayerId!, 'link_guest', now,
+          );
           await client.query('COMMIT');
           success = { ...bundle, resolution: 'link_guest' };
         } else {
@@ -435,6 +441,9 @@ export class PostgresProviderIdentityAuth {
             throw error;
           }
           const bundle = await this.#issueVerifiedFamily(client, playerId, now);
+          await this.#recordAuthReceipt(
+            client, identity.provider, identity.subject, playerId, 'created_account', now,
+          );
           await client.query('COMMIT');
           success = { ...bundle, resolution: 'created_account' };
         }
@@ -454,6 +463,9 @@ export class PostgresProviderIdentityAuth {
             [targetPlayerId, now],
           );
           const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+          await this.#recordAuthReceipt(
+            client, identity.provider, identity.subject, targetPlayerId, 'same_account', now,
+          );
           await client.query('COMMIT');
           success = { ...bundle, resolution: 'same_account' };
         } else if (hasGuest) {
@@ -481,6 +493,7 @@ export class PostgresProviderIdentityAuth {
                 expiresAt,
               ],
             );
+            // No auth receipt — confirmation not committed; recoverLinked must fail closed.
             await client.query('COMMIT');
             switchConfirmation = new ProviderAuthError('ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', {
               continuationToken: continuation,
@@ -495,6 +508,9 @@ export class PostgresProviderIdentityAuth {
               [targetPlayerId],
             );
             const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+            await this.#recordAuthReceipt(
+              client, identity.provider, identity.subject, targetPlayerId, 'existing_account', now,
+            );
             await client.query('COMMIT');
             success = { ...bundle, resolution: 'existing_account' };
           }
@@ -507,6 +523,9 @@ export class PostgresProviderIdentityAuth {
             [targetPlayerId],
           );
           const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+          await this.#recordAuthReceipt(
+            client, identity.provider, identity.subject, targetPlayerId, 'existing_account', now,
+          );
           await client.query('COMMIT');
           success = { ...bundle, resolution: 'existing_account' };
         }
@@ -603,6 +622,9 @@ export class PostgresProviderIdentityAuth {
         [targetPlayerId],
       );
       const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+      await this.#recordAuthReceipt(
+        client, row.provider, row.provider_subject, targetPlayerId, 'switch_confirmed', now,
+      );
       await client.query('COMMIT');
       return { ...bundle, resolution: 'existing_account' };
     } catch (error) {
@@ -614,9 +636,9 @@ export class PostgresProviderIdentityAuth {
   }
 
   /**
-   * Create-forbidden recovery that resolves the linked player from verified
-   * provider evidence alone. Used for unified continue lost-response recovery
-   * where the source guest id must not be treated as the expected target.
+   * Create-forbidden recovery that resolves a *committed* unified continue/confirm.
+   * An existing identity link alone is insufficient — a server receipt proves the
+   * mutating operation completed (unconfirmed switches have no receipt).
    */
   async recoverLinked(input: {
     provider: Provider;
@@ -649,6 +671,14 @@ export class PostgresProviderIdentityAuth {
         throw new ProviderAuthError('RECOVERY_NOT_LINKED');
       }
       const playerId = existing.rows[0]!.player_id;
+      const receipt = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_provider_auth_receipts
+         WHERE provider=$1 AND provider_subject=$2`,
+        [identity.provider, identity.subject],
+      );
+      if (receipt.rowCount !== 1 || receipt.rows[0]!.player_id !== playerId) {
+        throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+      }
       await client.query(
         `UPDATE public.pzd_guest_accounts
          SET account_class='verified'
@@ -664,6 +694,31 @@ export class PostgresProviderIdentityAuth {
     } finally {
       client.release();
     }
+  }
+
+  async #recordAuthReceipt(
+    client: pg.PoolClient,
+    provider: Provider,
+    subject: string,
+    playerId: string,
+    resolution:
+      | 'link_guest'
+      | 'existing_account'
+      | 'created_account'
+      | 'same_account'
+      | 'switch_confirmed',
+    now: Date,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO public.pzd_provider_auth_receipts
+         (provider, provider_subject, player_id, resolution, committed_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (provider, provider_subject) DO UPDATE SET
+         player_id = EXCLUDED.player_id,
+         resolution = EXCLUDED.resolution,
+         committed_at = EXCLUDED.committed_at`,
+      [provider, subject, playerId, resolution, now],
+    );
   }
 
   async #requireActiveGuest(

@@ -92,6 +92,7 @@ describePg('unified provider continue PostgreSQL (0005–0008)', async (t) => {
 
     await admin.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
     await admin.query(`
+      DROP TABLE IF EXISTS public.pzd_provider_auth_receipts CASCADE;
       DROP TABLE IF EXISTS public.pzd_provider_continuations CASCADE;
       DROP TABLE IF EXISTS public.pzd_identity_links CASCADE;
       DROP TABLE IF EXISTS public.pzd_provider_challenges CASCADE;
@@ -141,6 +142,7 @@ describePg('unified provider continue PostgreSQL (0005–0008)', async (t) => {
     assert.equal(await detectProviderContinueSchemaReady(adminPool), false);
     await applySql(admin, 'migrations/staging/0008_provider_continue.sql', dbName);
     assert.equal(await detectProviderContinueSchemaReady(adminPool), true);
+    await applySql(admin, 'migrations/staging/0009_provider_auth_receipts.sql', dbName);
     await admin.query(`ALTER ROLE pzd_app_runtime LOGIN PASSWORD '${ROLE_PASSWORD}'`);
   } finally {
     admin.release();
@@ -392,7 +394,7 @@ describePg('unified provider continue PostgreSQL (0005–0008)', async (t) => {
     assert.equal(links.rowCount, 0);
   });
 
-  await t.test('recoverLinked resolves committed target; never uses source guest id', async () => {
+  await t.test('recoverLinked requires committed continue receipt; unconfirmed switch fails', async () => {
     const bindingLogin = 'cont-recover-login';
     const nonceLogin = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: bindingLogin,
@@ -405,6 +407,42 @@ describePg('unified provider continue PostgreSQL (0005–0008)', async (t) => {
       provider: 'google', idToken: tokenLogin, nonce: nonceLogin, binding: bindingLogin,
       audiences: ['client'], keys: [key], nowSeconds: now,
     });
+
+    // Link alone (login) is insufficient without a continue/confirm receipt.
+    const preBinding = 'cont-recover-pre';
+    const preNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'login', binding: preBinding,
+    });
+    const preToken = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'cont-recover-google',
+      audience: 'client', rawNonce: preNonce, now,
+    });
+    await assert.rejects(
+      () => auth.recoverLinked({
+        provider: 'google', idToken: preToken, nonce: preNonce, binding: preBinding,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      }),
+      (error: unknown) =>
+        error instanceof ProviderAuthError && error.code === 'RECOVERY_OPERATION_INCOMPLETE',
+    );
+
+    // Empty guest continue commits existing_account + receipt.
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const binding = continueChallengeBinding(String(claims.sub), String(claims.fid));
+    const nonceCont = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'continue', binding,
+    });
+    const tokenCont = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'cont-recover-google',
+      audience: 'client', rawNonce: nonceCont, now,
+    });
+    const continued = await auth.continue({
+      provider: 'google', idToken: tokenCont, nonce: nonceCont, binding,
+      guestPlayerId: String(claims.sub), guestFamilyId: String(claims.fid),
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(continued.playerId, original.playerId);
 
     const recoverBinding = 'cont-recover-binding';
     const nonce = await issueProviderChallenge(runtimePool, {
@@ -435,6 +473,83 @@ describePg('unified provider continue PostgreSQL (0005–0008)', async (t) => {
       }),
       (error: unknown) => error instanceof ProviderAuthError && error.code === 'RECOVERY_NOT_LINKED',
     );
+  });
+
+  await t.test('confirmation-required writes no receipt; confirm writes receipt for recovery', async () => {
+    const bindingLogin = 'cont-consent-login';
+    const nonceLogin = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding: bindingLogin,
+    });
+    const tokenLogin = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
+      audience: 'client', rawNonce: nonceLogin, now,
+    });
+    const original = await auth.login({
+      provider: 'apple', idToken: tokenLogin, nonce: nonceLogin, binding: bindingLogin,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const binding = continueChallengeBinding(guestId, familyId);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'continue', binding,
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    let continuation = '';
+    await assert.rejects(
+      () => auth.continue({
+        provider: 'apple', idToken: token, nonce, binding,
+        guestPlayerId: guestId, guestFamilyId: familyId,
+        localProgressProtected: true,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof ProviderAuthError)) return false;
+        continuation = error.continuationToken ?? '';
+        return error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED';
+      },
+    );
+
+    const incompleteBinding = 'cont-consent-incomplete';
+    const incompleteNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding: incompleteBinding,
+    });
+    const incompleteToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
+      audience: 'client', rawNonce: incompleteNonce, now,
+    });
+    await assert.rejects(
+      () => auth.recoverLinked({
+        provider: 'apple', idToken: incompleteToken, nonce: incompleteNonce,
+        binding: incompleteBinding,
+        audiences: ['client'], keys: [key], nowSeconds: now,
+      }),
+      (error: unknown) =>
+        error instanceof ProviderAuthError && error.code === 'RECOVERY_OPERATION_INCOMPLETE',
+    );
+
+    const switched = await auth.confirmContinue({ continuationToken: continuation });
+    assert.equal(switched.playerId, original.playerId);
+
+    const okBinding = 'cont-consent-ok';
+    const okNonce = await issueProviderChallenge(runtimePool, {
+      provider: 'apple', purpose: 'login', binding: okBinding,
+    });
+    const okToken = mintAssertion({
+      privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
+      audience: 'client', rawNonce: okNonce, now,
+    });
+    const recovered = await auth.recoverLinked({
+      provider: 'apple', idToken: okToken, nonce: okNonce, binding: okBinding,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(recovered.playerId, original.playerId);
   });
 
   await t.test('concurrent continue registration does not duplicate players', async () => {

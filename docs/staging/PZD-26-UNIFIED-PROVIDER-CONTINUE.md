@@ -73,17 +73,24 @@ is required. Never trust a client claim that server progression is empty.
 
 Client must persist a durable unified pending marker **before** the first mutating
 `continue` / `confirm` request. Recovery uses `recoveryKind=provider_linked`
-(create-forbidden). Never treat the source guest id as the expected target for an
-account switch. If the provider subject is not linked, fail closed (`RECOVERY_NOT_LINKED`).
+(create-forbidden) and requires a **server auth receipt** proving the mutating
+operation committed. An existing identity link alone is insufficient — unconfirmed
+or cancelled account switches leave no receipt (`RECOVERY_OPERATION_INCOMPLETE`).
+
+Client pending kinds:
+- `continue|…` — mutating continue in flight
+- `awaiting|…` — confirmation required; user has **not** approved (recovery clears, keeps guest)
+- `confirm|…` — user approved; confirm mutate may be in flight (receipt-backed recovery only)
+
+Never treat the source guest id as the expected target for an account switch.
 
 ## Migration
 
-- `0008_provider_continue` (+ `0008_provider_continue.verify.sql`) — purpose CHECK
-  includes `continue`; `pzd_provider_continuations`; least-privilege runtime grants
-  (SELECT/INSERT/UPDATE consumed_at; no DELETE).
-- Register with the staging migration workflow as migration id `0008_provider_continue`.
-- Apply only with owner approval on staging (`pzd_staging`): plan then
-  `APPLY pzd_staging 0008_provider_continue`.
+- `0008_provider_continue` (+ verify) — purpose CHECK includes `continue`;
+  `pzd_provider_continuations`; least-privilege runtime grants.
+- `0009_provider_auth_receipts` (+ verify) — upserted on credential-issuing
+  continue/confirm; required by `recoverLinked`.
+- Apply only with owner approval: `0008` then `0009` on `pzd_staging`.
 - Prerequisites: `0005` → `0006` → `0007` already applied.
 
 ## Rollout

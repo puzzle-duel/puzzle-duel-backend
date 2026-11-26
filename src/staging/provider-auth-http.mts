@@ -118,7 +118,8 @@ export function createProviderAuthHttpHandler(deps: {
         const status = error.code === 'ACCOUNT_CONFLICT' ? 409
           : error.code === 'AUTH_UNAVAILABLE' ? 503
             : error.code === 'GUEST_PROOF_REQUIRED' ? 401
-              : error.code === 'RECOVERY_NOT_LINKED' ? 401
+              : error.code === 'RECOVERY_NOT_LINKED' ||
+                error.code === 'RECOVERY_OPERATION_INCOMPLETE' ? 401
                 : error.code === 'INVALID_CONTINUATION' ? 401
                   : 401;
         reply(status, { error: error.code }, error.code);
