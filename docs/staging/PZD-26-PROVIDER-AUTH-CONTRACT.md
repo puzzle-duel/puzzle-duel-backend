@@ -15,10 +15,12 @@ Owner decisions: Jira PZD-26 comments 10597 / 10589; PZD-27 recovery review #106
 ## HTTP surface
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/auth/providers/challenge` | Body `{ provider, purpose }`. `purpose=login` returns `{ nonce, binding }`. `purpose=link` requires guest Bearer bound to exact `fid`; challenge binding is `link:{playerId}:{familyId}`. |
+| POST | `/v1/auth/providers/challenge` | Body `{ provider, purpose }`. `purpose=login` returns `{ nonce, binding }`. `purpose=link` requires guest Bearer bound to exact `fid`; challenge binding is `link:{playerId}:{familyId}`. `purpose=continue` (unified UX) — see `PZD-26-UNIFIED-PROVIDER-CONTINUE.md`. |
 | POST | `/v1/auth/providers/login` | Body `{ provider, idToken, nonce, binding }` → verified access/refresh with `fid`. Unknown subject creates a new player. |
 | POST | `/v1/auth/providers/link` | Guest Bearer (`account_type=guest` + exact `fid`) + `{ provider, idToken, nonce }` → same `player_id`, new verified family; prior guest families revoked. |
 | POST | `/v1/auth/providers/recover` | Body `{ provider, idToken, nonce, binding, expectedPlayerId }`. Reuses **login** challenge purpose/binding. Resolves existing provider identity; requires `player_id === expectedPlayerId` **before** issuing a family. `expectedPlayerId` is never ownership proof. Unknown subject → `RECOVERY_NOT_LINKED` (no create). Wrong linked player → `ACCOUNT_CONFLICT`. |
+| POST | `/v1/auth/providers/continue` | Unified continue — see `PZD-26-UNIFIED-PROVIDER-CONTINUE.md`. |
+| POST | `/v1/auth/providers/continue/confirm` | Single-use account-switch confirmation — see addendum. |
 | POST | `/v1/auth/refresh` | Existing shared refresh (mints `account_type` from DB `account_class` and exact `fid`). |
 | POST | `/v1/auth/logout` | Existing logout. |
 

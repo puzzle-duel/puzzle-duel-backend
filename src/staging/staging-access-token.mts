@@ -174,6 +174,19 @@ export function linkChallengeBinding(playerId: string, familyId: string): string
   return `link:${playerId}:${familyId}`;
 }
 
+/** Unified continue challenge bound to exact guest family when a guest is present. */
+export function continueChallengeBinding(playerId: string, familyId: string): string {
+  return `continue:${playerId}:${familyId}`;
+}
+
+/** 0008 continue/continuation tables ready. */
+export async function detectProviderContinueSchemaReady(pool: pg.Pool): Promise<boolean> {
+  const result = await pool.query<{ ready: boolean }>(
+    `SELECT (to_regclass('public.pzd_provider_continuations') IS NOT NULL) AS ready`,
+  );
+  return result.rows[0]?.ready === true;
+}
+
 export function identityAdvisoryKey(provider: string, subject: string): string {
   return `pzd-id:${provider}:${subject}`;
 }
