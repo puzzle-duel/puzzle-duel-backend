@@ -13,9 +13,10 @@ login vs link locally.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/auth/providers/challenge` | New `purpose=continue`. Guest Bearer optional. With valid guest → binding `continue:{playerId}:{familyId}` returned. Without guest → high-entropy `binding` like login. |
-| POST | `/v1/auth/providers/continue` | Body `{ provider, idToken, nonce, binding, localProgressProtected? }`. Optional guest Bearer. |
-| POST | `/v1/auth/providers/continue/confirm` | Body `{ continuationToken }` — single-use switch commit. No provider token. |
+| POST | `/v1/auth/providers/challenge` | New `purpose=continue`. **Absent** Authorization → guestless binding. **Valid guest** → `continue:{playerId}:{familyId}`. **Present but invalid/revoked** Authorization → `401 GUEST_PROOF_REQUIRED` (never guestless). |
+| POST | `/v1/auth/providers/continue` | Body `{ provider, idToken, nonce, binding, localProgressProtected? }`. Guest-bound binding requires matching active guest; invalid Authorization never downgrades to account creation. |
+| POST | `/v1/auth/providers/continue/confirm` | Body `{ continuationToken }` — single-use switch commit. Revalidates source guest family when present. No provider token. |
+| POST | `/v1/auth/providers/recover` | Legacy: `{ …, expectedPlayerId }`. Unified lost-response: `{ …, recoveryKind: "provider_linked" }` — create-forbidden resolve by verified `(provider, subject)` only. |
 
 ### Success (201)
 
@@ -32,11 +33,20 @@ Same credential fields as login/link, plus `resolution`:
 {
   "error": "ACCOUNT_SWITCH_CONFIRMATION_REQUIRED",
   "continuationToken": "<opaque>",
-  "expiresAt": "<iso>"
+  "expiresAt": "<iso>",
+  "targetPlayerId": "<uuid>"
 }
 ```
 
-No credential mutation until `/continue/confirm`. Cancel = do nothing.
+`targetPlayerId` is an opaque recovery hint (not proof). No credential mutation until
+`/continue/confirm`. Cancel = do nothing.
+
+### Confirm authorization
+
+Before consume: lock `source_family_id` (when set), `#requireActiveGuest` (class,
+revocation, active refresh), re-check `expires_at`, then single-use consume + issue.
+Logout/revoke of the source guest fails closed with `GUEST_PROOF_REQUIRED` and does
+**not** consume the continuation (transaction rolls back).
 
 ## Guest progression predicate
 
@@ -59,18 +69,31 @@ is required. Never trust a client claim that server progression is empty.
 - Confirm re-locks identity subject, re-checks immutable link → target.
 - No nonce reuse; no provider token persistence; never log continuation secrets.
 
+## Lost-response recovery
+
+Client must persist a durable unified pending marker **before** the first mutating
+`continue` / `confirm` request. Recovery uses `recoveryKind=provider_linked`
+(create-forbidden). Never treat the source guest id as the expected target for an
+account switch. If the provider subject is not linked, fail closed (`RECOVERY_NOT_LINKED`).
+
 ## Migration
 
-- `0008_provider_continue` — purpose CHECK includes `continue`; `pzd_provider_continuations`.
-- Apply only with owner approval on staging (`pzd_staging`).
+- `0008_provider_continue` (+ `0008_provider_continue.verify.sql`) — purpose CHECK
+  includes `continue`; `pzd_provider_continuations`; least-privilege runtime grants
+  (SELECT/INSERT/UPDATE consumed_at; no DELETE).
+- Register with the staging migration workflow as migration id `0008_provider_continue`.
+- Apply only with owner approval on staging (`pzd_staging`): plan then
+  `APPLY pzd_staging 0008_provider_continue`.
+- Prerequisites: `0005` → `0006` → `0007` already applied.
 
 ## Rollout
 
 1. Apply `0008` on staging (owner).
 2. Deploy backend with continue routes.
-3. Deploy client that calls continue (two-button sheet).
+3. Deploy client that calls continue (two-button sheet) with durable pending recovery.
 4. Legacy endpoints stay for older builds.
 
 ## Compatibility
 
-Existing `/login`, `/link`, `/recover`, `/refresh`, `/logout` contracts unchanged.
+Existing `/login`, `/link`, `/recover` (expectedPlayerId), `/refresh`, `/logout`
+contracts unchanged. `recoveryKind=provider_linked` is additive.

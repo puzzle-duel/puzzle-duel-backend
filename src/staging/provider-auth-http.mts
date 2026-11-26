@@ -10,6 +10,7 @@ import type { Provider } from './provider-token-verifier.mts';
 import {
   continueChallengeBinding,
   linkChallengeBinding,
+  parseContinueGuestBinding,
 } from './staging-access-token.mts';
 import type { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import type pg from 'pg';
@@ -110,6 +111,7 @@ export function createProviderAuthHttpHandler(deps: {
             error: error.code,
             continuationToken: error.continuationToken,
             expiresAt: error.expiresAt,
+            targetPlayerId: error.targetPlayerId,
           }, error.code);
           return true;
         }
@@ -128,6 +130,11 @@ export function createProviderAuthHttpHandler(deps: {
   };
 }
 
+type GuestAuthorization =
+  | { status: 'absent' }
+  | { status: 'invalid' }
+  | { status: 'ok'; subject: string; familyId: string };
+
 async function requireGuestLinkProof(
   deps: {
     guestVerifier: PinnedRs256JwtVerifier;
@@ -136,34 +143,42 @@ async function requireGuestLinkProof(
   req: IncomingMessage,
   reply: (status: number, data: object, reason?: string) => void,
 ): Promise<{ subject: string; familyId: string } | null> {
-  const guest = await tryGuestLinkProof(deps, req);
-  if (!guest) {
+  const guest = await resolveGuestAuthorization(deps, req);
+  if (guest.status !== 'ok') {
     reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
     return null;
   }
-  return guest;
+  return { subject: guest.subject, familyId: guest.familyId };
 }
 
-async function tryGuestLinkProof(
+/**
+ * Distinguish missing Authorization (guestless path allowed for continue)
+ * from present-but-invalid Authorization (fail closed — never downgrade to create).
+ */
+async function resolveGuestAuthorization(
   deps: {
     guestVerifier: PinnedRs256JwtVerifier;
     requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
   },
   req: IncomingMessage,
-): Promise<{ subject: string; familyId: string } | null> {
+): Promise<GuestAuthorization> {
+  const header = req.headers.authorization;
+  if (header === undefined) {
+    return { status: 'absent' };
+  }
   let identity;
   try {
-    identity = deps.guestVerifier.verifyAuthorizationHeader(req.headers.authorization);
+    identity = deps.guestVerifier.verifyAuthorizationHeader(header);
   } catch {
-    return null;
+    return { status: 'invalid' };
   }
   if (identity.accountType !== 'guest' || !identity.familyId) {
-    return null;
+    return { status: 'invalid' };
   }
   if (!(await deps.requireExactActiveGuestFamily(identity.subject, identity.familyId))) {
-    return null;
+    return { status: 'invalid' };
   }
-  return { subject: identity.subject, familyId: identity.familyId };
+  return { status: 'ok', subject: identity.subject, familyId: identity.familyId };
 }
 
 async function handleContinue(
@@ -194,14 +209,28 @@ async function handleContinue(
     reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
     return true;
   }
-  const guest = await tryGuestLinkProof(deps, req);
+  const guestAuth = await resolveGuestAuthorization(deps, req);
+  const guestBound = parseContinueGuestBinding(data.binding);
+  if (guestBound) {
+    if (guestAuth.status !== 'ok') {
+      reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+      return true;
+    }
+  } else if (guestAuth.status === 'invalid') {
+    // Present but invalid Authorization must not fall through to account creation.
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return true;
+  } else if (guestAuth.status === 'ok') {
+    reply(401, { error: 'INVALID_PROVIDER_CHALLENGE' }, 'INVALID_PROVIDER_CHALLENGE');
+    return true;
+  }
   const bundle = await deps.identity.continue({
     provider,
     idToken: data.idToken,
     nonce: data.nonce,
     binding: data.binding,
-    guestPlayerId: guest?.subject,
-    guestFamilyId: guest?.familyId,
+    guestPlayerId: guestAuth.status === 'ok' ? guestAuth.subject : undefined,
+    guestFamilyId: guestAuth.status === 'ok' ? guestAuth.familyId : undefined,
     localProgressProtected: data.localProgressProtected === true,
     audiences,
     keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
@@ -276,13 +305,13 @@ async function handleChallenge(
     return true;
   }
   if (purpose === 'continue') {
-    // Optional guest: when present, bind to exact family; otherwise mint login-like binding.
-    const optionalGuest = await tryGuestLinkProof(deps, req);
-    if (optionalGuest) {
-      const binding = continueChallengeBinding(
-        optionalGuest.subject,
-        optionalGuest.familyId,
-      );
+    const guestAuth = await resolveGuestAuthorization(deps, req);
+    if (guestAuth.status === 'invalid') {
+      reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+      return true;
+    }
+    if (guestAuth.status === 'ok') {
+      const binding = continueChallengeBinding(guestAuth.subject, guestAuth.familyId);
       const nonce = await issueProviderChallenge(deps.pool, { provider, purpose, binding });
       reply(201, { provider, purpose, nonce, binding }, 'AUTH_CHALLENGE_ISSUED');
       return true;
@@ -349,18 +378,34 @@ async function handleRecover(
       typeof data.idToken !== 'string' ||
       typeof data.nonce !== 'string' ||
       typeof data.binding !== 'string' ||
-      typeof data.expectedPlayerId !== 'string' ||
       Object.keys(data).length !== 5) {
-    reply(400, { error: 'INVALID_REQUEST' });
-    return true;
-  }
-  if (!/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
   const audiences = audiencesFor(deps.config, provider);
   if (!audiences.length) {
     reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
+    return true;
+  }
+  const keys = await deps.jwks.keys(provider, kidFromToken(data.idToken));
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  // Unified lost-response recovery: resolve linked player from provider evidence.
+  // Never creates. Does not accept a client-chosen target player id.
+  if (data.recoveryKind === 'provider_linked') {
+    reply(201, await deps.identity.recoverLinked({
+      provider,
+      idToken: data.idToken,
+      nonce: data.nonce,
+      binding: data.binding,
+      audiences,
+      keys,
+      nowSeconds,
+    }), 'AUTH_RECOVERY_LINKED_SUCCESS');
+    return true;
+  }
+  if (typeof data.expectedPlayerId !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
+    reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
   reply(201, await deps.identity.recover({
@@ -370,8 +415,8 @@ async function handleRecover(
     binding: data.binding,
     expectedPlayerId: data.expectedPlayerId,
     audiences,
-    keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
-    nowSeconds: Math.floor(Date.now() / 1000),
+    keys,
+    nowSeconds,
   }), 'AUTH_RECOVERY_SUCCESS');
   return true;
 }

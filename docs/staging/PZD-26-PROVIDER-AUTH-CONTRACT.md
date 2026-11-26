@@ -42,6 +42,7 @@ Link, refresh, and logout share the same transaction advisory family lock so con
 - `0005_provider_challenges` — nonce challenge table + least-privilege grants.
 - `0006_provider_identity` — `account_class`, `pzd_identity_links`, challenge immutability trigger.
 - `0007_identity_immutability` — reject UPDATE/DELETE on identity links without granting UPDATE to runtime.
+- `0008_provider_continue` — unified `purpose=continue` + `pzd_provider_continuations` (see `PZD-26-UNIFIED-PROVIDER-CONTINUE.md`).
 
 Provider HTTP routes mount only when `0005`–`0007` readiness checks pass (including immutability triggers). Identity concurrency uses transaction advisory locks (no `SELECT FOR UPDATE` on identity links). Operator cleanup of expired challenges uses `cleanupExpiredProviderChallenges` (elevated DELETE); runtime role has none.
 

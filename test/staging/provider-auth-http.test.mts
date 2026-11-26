@@ -29,9 +29,11 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
         throw new ProviderAuthError('ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', {
           continuationToken: 'tok',
           expiresAt: new Date().toISOString(),
+          targetPlayerId: randomUUID(),
         });
       },
       async confirmContinue() { throw new ProviderAuthError('INVALID_CONTINUATION'); },
+      async recoverLinked() { throw new ProviderAuthError('RECOVERY_NOT_LINKED'); },
     } as never,
     jwks: {
       async keys() { return []; },
@@ -96,6 +98,7 @@ test('provider auth HTTP requires HTTPS, schema, and config; maps conflicts', as
           recoverCalls.push(input.expectedPlayerId);
           throw new ProviderAuthError('RECOVERY_NOT_LINKED');
         },
+        async recoverLinked() { throw new Error('recover-linked-must-not-run'); },
         async continue() { throw new Error('continue-must-not-run'); },
         async confirmContinue() { throw new Error('confirm-must-not-run'); },
       } as never,
@@ -168,11 +171,13 @@ test('unified continue maps confirmation and invalid continuation', async () => 
         throw new ProviderAuthError('ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', {
           continuationToken: 'switch-tok',
           expiresAt: '2030-01-01T00:00:00.000Z',
+          targetPlayerId: '11111111-1111-1111-1111-111111111111',
         });
       },
       async confirmContinue() {
         throw new ProviderAuthError('INVALID_CONTINUATION');
       },
+      async recoverLinked() { throw new Error('recover-linked-must-not-run'); },
     } as never,
     jwks: {
       async keys() {

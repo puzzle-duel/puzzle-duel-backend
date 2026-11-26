@@ -47,6 +47,7 @@ From GitHub Actions → [PZD Reusable Staging Database Migration](https://github
 1. `0005_provider_challenges`
 2. `0006_provider_identity`
 3. `0007_identity_immutability`
+4. `0008_provider_continue` (unified continue / account-switch continuation; after 0007)
 
 ### B. Apply migrations (mutating; separate approvals)
 
