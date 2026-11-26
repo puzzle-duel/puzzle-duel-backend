@@ -53,8 +53,9 @@ Logout/revoke of the source guest fails closed with `GUEST_PROOF_REQUIRED` and d
 **Server meaningful progression** (any true ⇒ protect):
 
 - Row in `tournament_daily_claim` for guest `player_id`, or
-- Row in `tournament_on_time_badge`, or
-- Row in `tournament_daily_series_completion`
+- Row in `tournament_daily_series_completion` for guest `player_id`, or
+- Row in `tournament_on_time_badge` joined via `tournament_daily_series_completion`
+  (badge has no `player_id` column in F2 schema — never query it with `WHERE player_id`)
 
 Tables absent ⇒ treated as no server progression.
 

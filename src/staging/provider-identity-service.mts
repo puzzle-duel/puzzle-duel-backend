@@ -42,6 +42,11 @@ export class ProviderAuthError extends Error {
   readonly expiresAt?: string;
   /** Opaque target player for confirmation UX / durable recovery — never proof. */
   readonly targetPlayerId?: string;
+  /**
+   * Privacy-safe diagnostic reason (e.g. AUTH_SQLSTATE_42703).
+   * Never contains SQL text, parameters, subjects, or tokens.
+   */
+  readonly diagnosticReason?: string;
   constructor(
     code:
       | 'INVALID_PROVIDER_ASSERTION'
@@ -57,6 +62,7 @@ export class ProviderAuthError extends Error {
       continuationToken?: string;
       expiresAt?: string;
       targetPlayerId?: string;
+      diagnosticReason?: string;
     },
   ) {
     super(code);
@@ -64,6 +70,7 @@ export class ProviderAuthError extends Error {
     this.continuationToken = extras?.continuationToken;
     this.expiresAt = extras?.expiresAt;
     this.targetPlayerId = extras?.targetPlayerId;
+    this.diagnosticReason = extras?.diagnosticReason;
   }
 }
 
@@ -894,32 +901,76 @@ export class PostgresProviderIdentityAuth {
    * Server-owned progression for the guest player.
    * Practice is client-local — never treat absence of these rows as proof
    * that the guest is empty when localProgressProtected is true.
+   *
+   * Staging F2 shape: `tournament_on_time_badge` has no `player_id` column —
+   * never query it with WHERE player_id (that raised SQLSTATE 42703 → 503).
    */
   async #guestHasServerProgression(
     client: pg.PoolClient,
     playerId: string,
   ): Promise<boolean> {
-    // Resolve table presence first. A single SQL CASE still analyzes every
-    // FROM-clause relation and fails if optional tournament tables are absent.
-    const candidates = [
-      'public.tournament_daily_claim',
-      'public.tournament_on_time_badge',
-      'public.tournament_daily_series_completion',
-    ] as const;
-    for (const table of candidates) {
-      const present = await client.query<{ ok: boolean }>(
-        'SELECT to_regclass($1) IS NOT NULL AS ok',
-        [table],
-      );
-      if (present.rows[0]?.ok !== true) continue;
-      // Identifier is a fixed allowlisted literal — never client input.
+    // Compare via ::text so both staging F2 (text) and uuid-typed stubs work.
+    if (await this.#relationHasColumn(client, 'tournament_daily_claim', 'player_id')) {
       const hit = await client.query(
-        `SELECT 1 FROM ${table} WHERE player_id=$1 LIMIT 1`,
+        `SELECT 1 FROM public.tournament_daily_claim
+         WHERE player_id::text = $1::text LIMIT 1`,
+        [playerId],
+      );
+      if ((hit.rowCount ?? 0) > 0) return true;
+    }
+    if (await this.#relationHasColumn(
+      client, 'tournament_daily_series_completion', 'player_id',
+    )) {
+      const hit = await client.query(
+        `SELECT 1 FROM public.tournament_daily_series_completion
+         WHERE player_id::text = $1::text LIMIT 1`,
+        [playerId],
+      );
+      if ((hit.rowCount ?? 0) > 0) return true;
+    }
+    // Badge rows bind through series completion identity (no player_id on badge).
+    if (await this.#relationExists(client, 'public.tournament_on_time_badge') &&
+        await this.#relationHasColumn(
+          client, 'tournament_daily_series_completion', 'player_id',
+        )) {
+      const hit = await client.query(
+        `SELECT 1
+         FROM public.tournament_on_time_badge AS badge
+         INNER JOIN public.tournament_daily_series_completion AS completion
+           ON completion.series_id = badge.series_id
+         WHERE completion.player_id::text = $1::text
+         LIMIT 1`,
         [playerId],
       );
       if ((hit.rowCount ?? 0) > 0) return true;
     }
     return false;
+  }
+
+  async #relationExists(client: pg.PoolClient, regclass: string): Promise<boolean> {
+    const present = await client.query<{ ok: boolean }>(
+      'SELECT to_regclass($1) IS NOT NULL AS ok',
+      [regclass],
+    );
+    return present.rows[0]?.ok === true;
+  }
+
+  async #relationHasColumn(
+    client: pg.PoolClient,
+    table: string,
+    column: string,
+  ): Promise<boolean> {
+    if (!(await this.#relationExists(client, `public.${table}`))) return false;
+    const cols = await client.query<{ ok: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = $1
+           AND column_name = $2
+       ) AS ok`,
+      [table, column],
+    );
+    return cols.rows[0]?.ok === true;
   }
 
   #verify(input: {
@@ -987,6 +1038,19 @@ function isUniqueViolation(error: unknown): boolean {
     'code' in error && (error as { code?: string }).code === '23505';
 }
 
+/** PostgreSQL SQLSTATE only — never message, detail, hint, or parameters. */
+export function extractSqlState(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' && /^\d{5}$/.test(code) ? code : undefined;
+}
+
+export function authSqlStateDiagnosticReason(sqlState: string): string {
+  return `AUTH_SQLSTATE_${sqlState}`;
+}
+
 function mapError(error: unknown): Error {
   if (error instanceof ProviderAuthError) return error;
   if (error instanceof Error && error.message === 'INVALID_PROVIDER_CHALLENGE') {
@@ -994,5 +1058,8 @@ function mapError(error: unknown): Error {
   }
   // Surface unique/FK failures as conflict when possible; otherwise fail closed.
   if (isUniqueViolation(error)) return new ProviderAuthError('ACCOUNT_CONFLICT');
-  return new ProviderAuthError('AUTH_UNAVAILABLE');
+  const sqlState = extractSqlState(error);
+  return new ProviderAuthError('AUTH_UNAVAILABLE', {
+    diagnosticReason: sqlState ? authSqlStateDiagnosticReason(sqlState) : undefined,
+  });
 }

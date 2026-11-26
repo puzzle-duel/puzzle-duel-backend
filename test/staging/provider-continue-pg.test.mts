@@ -899,4 +899,75 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       barrier.release();
     }
   });
+
+  await t.test('F2-shaped on_time_badge without player_id must not 503 empty-guest continue', async () => {
+    // Reproduce staging UAT: tournament_on_time_badge exists without player_id.
+    // Pre-fix #guestHasServerProgression queried WHERE player_id → SQLSTATE 42703.
+    await adminPool.query(`
+      DROP TABLE IF EXISTS public.tournament_on_time_badge CASCADE;
+      DROP TABLE IF EXISTS public.tournament_daily_series_completion CASCADE;
+      CREATE TABLE public.tournament_daily_series_completion (
+        series_id uuid PRIMARY KEY,
+        player_id text NOT NULL
+      );
+      CREATE TABLE public.tournament_on_time_badge (
+        series_id uuid PRIMARY KEY
+          REFERENCES public.tournament_daily_series_completion (series_id),
+        awarded boolean NOT NULL DEFAULT true,
+        claim_started_at_ms bigint NOT NULL DEFAULT 0,
+        original_utc_date date NOT NULL DEFAULT CURRENT_DATE
+      );
+      GRANT SELECT ON public.tournament_daily_series_completion TO pzd_app_runtime;
+      GRANT SELECT ON public.tournament_on_time_badge TO pzd_app_runtime;
+    `);
+
+    const bindingLogin = 'cont-f2-badge-login';
+    const nonceLogin = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'login', binding: bindingLogin,
+    });
+    const tokenLogin = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'cont-f2-badge-google',
+      audience: 'client', rawNonce: nonceLogin, now,
+    });
+    const original = await auth.login({
+      provider: 'google', idToken: tokenLogin, nonce: nonceLogin, binding: bindingLogin,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+
+    const guest = await guestAuth.create(new Date());
+    const claims = claimsFromJwt(guest.accessToken);
+    const guestId = String(claims.sub);
+    const familyId = String(claims.fid);
+    const operationId = randomUUID();
+    const binding = continueChallengeBinding(guestId, familyId);
+    const nonce = await issueProviderChallenge(runtimePool, {
+      provider: 'google', purpose: 'continue', binding,
+    });
+    const token = mintAssertion({
+      privateKey, kid: 't', provider: 'google', subject: 'cont-f2-badge-google',
+      audience: 'client', rawNonce: nonce, now,
+    });
+    const continued = await auth.continue({
+      operationId,
+      provider: 'google', idToken: token, nonce, binding,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(continued.resolution, 'existing_account');
+    assert.equal(continued.playerId, original.playerId);
+
+    // Direct runtime-role probe of the legacy buggy predicate must fail closed.
+    await assert.rejects(
+      () => runtimePool.query(
+        'SELECT 1 FROM public.tournament_on_time_badge WHERE player_id=$1 LIMIT 1',
+        [guestId],
+      ),
+      (error: unknown) => {
+        const code = typeof error === 'object' && error && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : '';
+        return code === '42703'; // undefined_column
+      },
+    );
+  });
 });

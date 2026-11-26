@@ -4,6 +4,8 @@ import { issueProviderChallenge } from './provider-challenge.mts';
 import {
   PostgresProviderIdentityAuth,
   ProviderAuthError,
+  authSqlStateDiagnosticReason,
+  extractSqlState,
   parseOperationId,
 } from './provider-identity-service.mts';
 import { ProviderJwks } from './provider-jwks.mts';
@@ -123,9 +125,15 @@ export function createProviderAuthHttpHandler(deps: {
                 error.code === 'RECOVERY_OPERATION_INCOMPLETE' ? 401
                 : error.code === 'INVALID_CONTINUATION' ? 401
                   : 401;
-        reply(status, { error: error.code }, error.code);
+        // Client body stays protocol code; diagnostic reason may carry SQLSTATE.
+        reply(status, { error: error.code }, error.diagnosticReason ?? error.code);
       } else {
-        reply(503, { error: 'AUTH_UNAVAILABLE' }, 'AUTH_UNAVAILABLE');
+        const sqlState = extractSqlState(error);
+        reply(
+          503,
+          { error: 'AUTH_UNAVAILABLE' },
+          sqlState ? authSqlStateDiagnosticReason(sqlState) : 'AUTH_UNAVAILABLE',
+        );
       }
       return true;
     }

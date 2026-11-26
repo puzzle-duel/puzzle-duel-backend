@@ -64,7 +64,27 @@ test('HTTP route classifier never includes series IDs or query strings', () => {
   assert.equal(diagnosticRoute('/v1/tournament/series/secret-series-id/command'), 'tournament_command');
   assert.equal(diagnosticRoute('/v1/tournament/series/secret-series-id'), 'tournament_series');
   assert.equal(diagnosticRoute('/v1/auth/guest'), 'guest_auth');
+  assert.equal(diagnosticRoute('/v1/auth/providers/continue'), 'provider_auth');
+  assert.equal(diagnosticRoute('/v1/auth/providers/challenge'), 'provider_auth');
   assert.equal(diagnosticRoute('/malicious/secret'), 'other');
+});
+
+test('AUTH_SQLSTATE_* diagnostic reasons are privacy-safe allowlisted', () => {
+  assert.equal(safeDiagnosticErrorCode('AUTH_SQLSTATE_42703'), 'AUTH_SQLSTATE_42703');
+  assert.equal(safeDiagnosticErrorCode('AUTH_SQLSTATE_42501'), 'AUTH_SQLSTATE_42501');
+  assert.equal(safeDiagnosticErrorCode('AUTH_SQLSTATE_ABCD'), undefined);
+  assert.equal(safeDiagnosticErrorCode('AUTH_SQLSTATE_42703; DROP'), undefined);
+  const event = buildHttpDiagnostic({
+    requestId: 'abcdef0123456789abcdef0123456789',
+    operation: 'tournament_http',
+    route: 'provider_auth',
+    errorCode: 'AUTH_SQLSTATE_42703',
+    method: 'POST',
+    status: 503,
+    durationMs: 10,
+  });
+  assert.equal(event.errorCode, 'AUTH_SQLSTATE_42703');
+  assert.equal(event.route, 'provider_auth');
 });
 
 test('writer mismatch subtype is emitted only for exact sanctioned writer denials', () => {
