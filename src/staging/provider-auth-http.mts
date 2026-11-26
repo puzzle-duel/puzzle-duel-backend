@@ -4,6 +4,7 @@ import { issueProviderChallenge } from './provider-challenge.mts';
 import {
   PostgresProviderIdentityAuth,
   ProviderAuthError,
+  parseOperationId,
 } from './provider-identity-service.mts';
 import { ProviderJwks } from './provider-jwks.mts';
 import type { Provider } from './provider-token-verifier.mts';
@@ -196,12 +197,19 @@ async function handleContinue(
 ): Promise<boolean> {
   const provider = parseProvider(data.provider);
   const keyCount = Object.keys(data).length;
+  let operationId: string;
+  try {
+    operationId = parseOperationId(data.operationId);
+  } catch {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
   if (!provider ||
       typeof data.idToken !== 'string' ||
       typeof data.nonce !== 'string' ||
       typeof data.binding !== 'string' ||
-      (keyCount !== 4 && keyCount !== 5) ||
-      (keyCount === 5 && typeof data.localProgressProtected !== 'boolean')) {
+      (keyCount !== 5 && keyCount !== 6) ||
+      (keyCount === 6 && typeof data.localProgressProtected !== 'boolean')) {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
@@ -230,6 +238,7 @@ async function handleContinue(
     idToken: data.idToken,
     nonce: data.nonce,
     binding: data.binding,
+    operationId,
     guestPlayerId: guestAuth.status === 'ok' ? guestAuth.subject : undefined,
     guestFamilyId: guestAuth.status === 'ok' ? guestAuth.familyId : undefined,
     localProgressProtected: data.localProgressProtected === true,
@@ -256,12 +265,20 @@ async function handleContinueConfirm(
   data: Record<string, unknown>,
   reply: (status: number, data: object, reason?: string) => void,
 ): Promise<boolean> {
-  if (typeof data.continuationToken !== 'string' || Object.keys(data).length !== 1) {
+  let operationId: string;
+  try {
+    operationId = parseOperationId(data.operationId);
+  } catch {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  if (typeof data.continuationToken !== 'string' || Object.keys(data).length !== 2) {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
   const bundle = await deps.identity.confirmContinue({
     continuationToken: data.continuationToken,
+    operationId,
   });
   reply(201, {
     playerId: bundle.playerId,
@@ -378,8 +395,7 @@ async function handleRecover(
   if (!provider ||
       typeof data.idToken !== 'string' ||
       typeof data.nonce !== 'string' ||
-      typeof data.binding !== 'string' ||
-      Object.keys(data).length !== 5) {
+      typeof data.binding !== 'string') {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
@@ -388,23 +404,56 @@ async function handleRecover(
     reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
     return true;
   }
-  const keys = await deps.jwks.keys(provider, kidFromToken(data.idToken));
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  // Unified lost-response recovery: resolve linked player from provider evidence.
-  // Never creates. Does not accept a client-chosen target player id.
+  const keyCount = Object.keys(data).length;
+  // Unified lost-response recovery: exact operation receipt + verified provider.
+  // Never creates. Client operation id alone is never authorization.
   if (data.recoveryKind === 'provider_linked') {
+    let operationId: string;
+    try {
+      operationId = parseOperationId(data.operationId);
+    } catch {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    const sourceGuestPlayerId = data.sourceGuestPlayerId;
+    const expectedTargetPlayerId = data.expectedTargetPlayerId;
+    if (sourceGuestPlayerId !== undefined &&
+        (typeof sourceGuestPlayerId !== 'string' ||
+         !/^[0-9a-f-]{36}$/i.test(sourceGuestPlayerId))) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    if (expectedTargetPlayerId !== undefined &&
+        (typeof expectedTargetPlayerId !== 'string' ||
+         !/^[0-9a-f-]{36}$/i.test(expectedTargetPlayerId))) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    const allowed =
+      keyCount === 6 ||
+      (keyCount === 7 && (sourceGuestPlayerId !== undefined || expectedTargetPlayerId !== undefined)) ||
+      (keyCount === 8 && sourceGuestPlayerId !== undefined && expectedTargetPlayerId !== undefined);
+    if (!allowed) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
     reply(201, await deps.identity.recoverLinked({
       provider,
       idToken: data.idToken,
       nonce: data.nonce,
       binding: data.binding,
+      operationId,
+      sourceGuestPlayerId: typeof sourceGuestPlayerId === 'string' ? sourceGuestPlayerId : undefined,
+      expectedTargetPlayerId:
+        typeof expectedTargetPlayerId === 'string' ? expectedTargetPlayerId : undefined,
       audiences,
-      keys,
-      nowSeconds,
+      keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
+      nowSeconds: Math.floor(Date.now() / 1000),
     }), 'AUTH_RECOVERY_LINKED_SUCCESS');
     return true;
   }
-  if (typeof data.expectedPlayerId !== 'string' ||
+  if (keyCount !== 5 ||
+      typeof data.expectedPlayerId !== 'string' ||
       !/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
@@ -416,8 +465,8 @@ async function handleRecover(
     binding: data.binding,
     expectedPlayerId: data.expectedPlayerId,
     audiences,
-    keys,
-    nowSeconds,
+    keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
+    nowSeconds: Math.floor(Date.now() / 1000),
   }), 'AUTH_RECOVERY_SUCCESS');
   return true;
 }

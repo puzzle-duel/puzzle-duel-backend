@@ -208,7 +208,7 @@ test('unified continue maps confirmation and invalid continuation', async () => 
     });
     assert.equal(badConfirm.status, 400);
 
-    const confirm = await fetch(base + '/v1/auth/providers/continue/confirm', {
+    const confirmMissingOp = await fetch(base + '/v1/auth/providers/continue/confirm', {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -216,9 +216,38 @@ test('unified continue maps confirmation and invalid continuation', async () => 
       },
       body: JSON.stringify({ continuationToken: 'x' }),
     });
+    assert.equal(confirmMissingOp.status, 400);
+
+    const confirm = await fetch(base + '/v1/auth/providers/continue/confirm', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({
+        continuationToken: 'x',
+        operationId: '11111111-1111-4111-8111-111111111111',
+      }),
+    });
     assert.equal(confirm.status, 401);
     const confirmBody = await confirm.json() as { error?: string };
     assert.equal(confirmBody.error, 'INVALID_CONTINUATION');
+
+    // Continue without operationId is rejected.
+    const contMissingOp = await fetch(base + '/v1/auth/providers/continue', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-forwarded-proto': 'https',
+      },
+      body: JSON.stringify({
+        provider: 'google',
+        idToken,
+        nonce: 'n',
+        binding: 'b',
+      }),
+    });
+    assert.equal(contMissingOp.status, 400);
 
     // Continue without valid assertion fails closed before identity (401/503).
     const cont = await fetch(base + '/v1/auth/providers/continue', {
@@ -232,6 +261,7 @@ test('unified continue maps confirmation and invalid continuation', async () => 
         idToken,
         nonce: 'n',
         binding: 'b',
+        operationId: '11111111-1111-4111-8111-111111111111',
       }),
     });
     assert.ok([401, 409, 503].includes(cont.status));

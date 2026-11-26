@@ -88,8 +88,10 @@ Never treat the source guest id as the expected target for an account switch.
 
 - `0008_provider_continue` (+ verify) — purpose CHECK includes `continue`;
   `pzd_provider_continuations`; least-privilege runtime grants.
-- `0009_provider_auth_receipts` (+ verify) — upserted on credential-issuing
-  continue/confirm; required by `recoverLinked`.
+- `0009_provider_auth_receipts` (+ verify) — insert-once per `operation_id` on
+  credential-issuing continue/confirm (and login); `recoverLinked` requires the
+  exact operation receipt plus verified provider identity — never a historical
+  `(provider, subject)` row alone. Continuations also store `operation_id`.
 - Apply only with owner approval: `0008` then `0009` on `pzd_staging`.
 - Prerequisites: `0005` → `0006` → `0007` already applied.
 
