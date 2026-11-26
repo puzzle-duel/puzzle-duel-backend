@@ -8,6 +8,7 @@ import pg from 'pg';
 import { PostgresStagingGuestAuth } from '../../src/staging/guest-auth-service.mts';
 import {
   detectIdentityImmutabilityReady,
+  detectProviderContinueSchemaReady,
   detectProviderSchemaReady,
 } from '../../src/staging/staging-access-token.mts';
 
@@ -42,6 +43,7 @@ describePg('provider schema readiness across migration stages', async (t) => {
     assertIsolatedTestDatabase(dbName);
 
     await admin.query(`
+      DROP TABLE IF EXISTS public.pzd_provider_continuations CASCADE;
       DROP TABLE IF EXISTS public.pzd_identity_links CASCADE;
       DROP TABLE IF EXISTS public.pzd_provider_challenges CASCADE;
       DROP TABLE IF EXISTS public.pzd_guest_refresh CASCADE;
@@ -121,6 +123,31 @@ describePg('provider schema readiness across migration stages', async (t) => {
     assert.equal(await detectIdentityImmutabilityReady(pool), false);
     await pool.query('ALTER TABLE public.pzd_identity_links ENABLE TRIGGER pzd_identity_links_immutable_upd');
     assert.equal(await detectIdentityImmutabilityReady(pool), true);
+  });
+
+  await t.test('post-0008: continue schema ready + verify PASS', async () => {
+    const client = await pool.connect();
+    try {
+      assert.equal(await detectProviderContinueSchemaReady(pool), false);
+      await applySql(client, 'migrations/staging/0008_provider_continue.sql', dbName);
+    } finally {
+      client.release();
+    }
+    assert.equal(await detectProviderContinueSchemaReady(pool), true);
+    const verifySql = readFileSync(
+      join(root, 'migrations/staging/0008_provider_continue.verify.sql'),
+      'utf8',
+    )
+      .replace(/^BEGIN READ ONLY;\s*/i, '')
+      .replace(/\s*ROLLBACK;\s*$/i, '');
+    const scalar = (result: pg.QueryResult): string =>
+      String(Object.values(result.rows[0] ?? {})[0] ?? '');
+    const verifyClient = await pool.connect();
+    try {
+      assert.equal(scalar(await verifyClient.query(verifySql)), 'PASS');
+    } finally {
+      verifyClient.release();
+    }
   });
 
   await t.test('0007 verify.sql returns PASS when ready and BLOCKED when a trigger is disabled', async () => {

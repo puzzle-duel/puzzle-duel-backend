@@ -4,10 +4,15 @@ import { issueProviderChallenge } from './provider-challenge.mts';
 import {
   PostgresProviderIdentityAuth,
   ProviderAuthError,
+  parseOperationId,
 } from './provider-identity-service.mts';
 import { ProviderJwks } from './provider-jwks.mts';
 import type { Provider } from './provider-token-verifier.mts';
-import { linkChallengeBinding } from './staging-access-token.mts';
+import {
+  continueChallengeBinding,
+  linkChallengeBinding,
+  parseContinueGuestBinding,
+} from './staging-access-token.mts';
 import type { PinnedRs256JwtVerifier } from '../tournament/auth/pinned-jwt-verifier.mts';
 import type pg from 'pg';
 
@@ -26,6 +31,8 @@ const PATHS = new Set([
   '/v1/auth/providers/login',
   '/v1/auth/providers/link',
   '/v1/auth/providers/recover',
+  '/v1/auth/providers/continue',
+  '/v1/auth/providers/continue/confirm',
 ]);
 
 export function createProviderAuthHttpHandler(deps: {
@@ -91,14 +98,31 @@ export function createProviderAuthHttpHandler(deps: {
       if (path === '/v1/auth/providers/recover') {
         return await handleRecover(deps, data, reply);
       }
+      if (path === '/v1/auth/providers/continue') {
+        return await handleContinue(deps, data, req, reply);
+      }
+      if (path === '/v1/auth/providers/continue/confirm') {
+        return await handleContinueConfirm(deps, data, reply);
+      }
       return await handleLink(deps, data, req, reply);
     } catch (error) {
       if (error instanceof ProviderAuthError) {
+        if (error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED') {
+          reply(409, {
+            error: error.code,
+            continuationToken: error.continuationToken,
+            expiresAt: error.expiresAt,
+            targetPlayerId: error.targetPlayerId,
+          }, error.code);
+          return true;
+        }
         const status = error.code === 'ACCOUNT_CONFLICT' ? 409
           : error.code === 'AUTH_UNAVAILABLE' ? 503
             : error.code === 'GUEST_PROOF_REQUIRED' ? 401
-              : error.code === 'RECOVERY_NOT_LINKED' ? 401
-                : 401;
+              : error.code === 'RECOVERY_NOT_LINKED' ||
+                error.code === 'RECOVERY_OPERATION_INCOMPLETE' ? 401
+                : error.code === 'INVALID_CONTINUATION' ? 401
+                  : 401;
         reply(status, { error: error.code }, error.code);
       } else {
         reply(503, { error: 'AUTH_UNAVAILABLE' }, 'AUTH_UNAVAILABLE');
@@ -108,6 +132,11 @@ export function createProviderAuthHttpHandler(deps: {
   };
 }
 
+type GuestAuthorization =
+  | { status: 'absent' }
+  | { status: 'invalid' }
+  | { status: 'ok'; subject: string; familyId: string };
+
 async function requireGuestLinkProof(
   deps: {
     guestVerifier: PinnedRs256JwtVerifier;
@@ -116,22 +145,151 @@ async function requireGuestLinkProof(
   req: IncomingMessage,
   reply: (status: number, data: object, reason?: string) => void,
 ): Promise<{ subject: string; familyId: string } | null> {
+  const guest = await resolveGuestAuthorization(deps, req);
+  if (guest.status !== 'ok') {
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return null;
+  }
+  return { subject: guest.subject, familyId: guest.familyId };
+}
+
+/**
+ * Distinguish missing Authorization (guestless path allowed for continue)
+ * from present-but-invalid Authorization (fail closed — never downgrade to create).
+ */
+async function resolveGuestAuthorization(
+  deps: {
+    guestVerifier: PinnedRs256JwtVerifier;
+    requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
+  },
+  req: IncomingMessage,
+): Promise<GuestAuthorization> {
+  const header = req.headers.authorization;
+  if (header === undefined) {
+    return { status: 'absent' };
+  }
   let identity;
   try {
-    identity = deps.guestVerifier.verifyAuthorizationHeader(req.headers.authorization);
+    identity = deps.guestVerifier.verifyAuthorizationHeader(header);
   } catch {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return null;
+    return { status: 'invalid' };
   }
   if (identity.accountType !== 'guest' || !identity.familyId) {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return null;
+    return { status: 'invalid' };
   }
   if (!(await deps.requireExactActiveGuestFamily(identity.subject, identity.familyId))) {
-    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
-    return null;
+    return { status: 'invalid' };
   }
-  return { subject: identity.subject, familyId: identity.familyId };
+  return { status: 'ok', subject: identity.subject, familyId: identity.familyId };
+}
+
+async function handleContinue(
+  deps: {
+    identity: PostgresProviderIdentityAuth;
+    jwks: ProviderJwks;
+    config: ProviderAuthConfig;
+    guestVerifier: PinnedRs256JwtVerifier;
+    requireExactActiveGuestFamily: (playerId: string, familyId: string) => Promise<boolean>;
+  },
+  data: Record<string, unknown>,
+  req: IncomingMessage,
+  reply: (status: number, data: object, reason?: string) => void,
+): Promise<boolean> {
+  const provider = parseProvider(data.provider);
+  const keyCount = Object.keys(data).length;
+  let operationId: string;
+  try {
+    operationId = parseOperationId(data.operationId);
+  } catch {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  if (!provider ||
+      typeof data.idToken !== 'string' ||
+      typeof data.nonce !== 'string' ||
+      typeof data.binding !== 'string' ||
+      (keyCount !== 5 && keyCount !== 6) ||
+      (keyCount === 6 && typeof data.localProgressProtected !== 'boolean')) {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  const audiences = audiencesFor(deps.config, provider);
+  if (!audiences.length) {
+    reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
+    return true;
+  }
+  const guestAuth = await resolveGuestAuthorization(deps, req);
+  const guestBound = parseContinueGuestBinding(data.binding);
+  if (guestBound) {
+    if (guestAuth.status !== 'ok') {
+      reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+      return true;
+    }
+  } else if (guestAuth.status === 'invalid') {
+    // Present but invalid Authorization must not fall through to account creation.
+    reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+    return true;
+  } else if (guestAuth.status === 'ok') {
+    reply(401, { error: 'INVALID_PROVIDER_CHALLENGE' }, 'INVALID_PROVIDER_CHALLENGE');
+    return true;
+  }
+  const bundle = await deps.identity.continue({
+    provider,
+    idToken: data.idToken,
+    nonce: data.nonce,
+    binding: data.binding,
+    operationId,
+    guestPlayerId: guestAuth.status === 'ok' ? guestAuth.subject : undefined,
+    guestFamilyId: guestAuth.status === 'ok' ? guestAuth.familyId : undefined,
+    localProgressProtected: data.localProgressProtected === true,
+    audiences,
+    keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
+    nowSeconds: Math.floor(Date.now() / 1000),
+  });
+  reply(201, {
+    playerId: bundle.playerId,
+    accountType: bundle.accountType,
+    accessToken: bundle.accessToken,
+    refreshToken: bundle.refreshToken,
+    expiresAt: bundle.expiresAt,
+    linkedProviders: bundle.linkedProviders,
+    resolution: bundle.resolution,
+  }, 'AUTH_CONTINUE_SUCCESS');
+  return true;
+}
+
+async function handleContinueConfirm(
+  deps: {
+    identity: PostgresProviderIdentityAuth;
+  },
+  data: Record<string, unknown>,
+  reply: (status: number, data: object, reason?: string) => void,
+): Promise<boolean> {
+  let operationId: string;
+  try {
+    operationId = parseOperationId(data.operationId);
+  } catch {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  if (typeof data.continuationToken !== 'string' || Object.keys(data).length !== 2) {
+    reply(400, { error: 'INVALID_REQUEST' });
+    return true;
+  }
+  const bundle = await deps.identity.confirmContinue({
+    continuationToken: data.continuationToken,
+    operationId,
+  });
+  reply(201, {
+    playerId: bundle.playerId,
+    accountType: bundle.accountType,
+    accessToken: bundle.accessToken,
+    refreshToken: bundle.refreshToken,
+    expiresAt: bundle.expiresAt,
+    linkedProviders: bundle.linkedProviders,
+    resolution: bundle.resolution,
+  }, 'AUTH_CONTINUE_CONFIRMED');
+  return true;
 }
 
 async function handleChallenge(
@@ -146,7 +304,10 @@ async function handleChallenge(
   reply: (status: number, data: object, reason?: string) => void,
 ): Promise<boolean> {
   const provider = parseProvider(data.provider);
-  const purpose = data.purpose === 'login' || data.purpose === 'link' ? data.purpose : null;
+  const purpose = data.purpose === 'login' || data.purpose === 'link' ||
+      data.purpose === 'continue'
+    ? data.purpose
+    : null;
   if (!provider || !purpose || Object.keys(data).length !== 2) {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
@@ -156,6 +317,23 @@ async function handleChallenge(
     return true;
   }
   if (purpose === 'login') {
+    const binding = randomBytes(32).toString('base64url');
+    const nonce = await issueProviderChallenge(deps.pool, { provider, purpose, binding });
+    reply(201, { provider, purpose, nonce, binding }, 'AUTH_CHALLENGE_ISSUED');
+    return true;
+  }
+  if (purpose === 'continue') {
+    const guestAuth = await resolveGuestAuthorization(deps, req);
+    if (guestAuth.status === 'invalid') {
+      reply(401, { error: 'GUEST_PROOF_REQUIRED' }, 'GUEST_PROOF_REQUIRED');
+      return true;
+    }
+    if (guestAuth.status === 'ok') {
+      const binding = continueChallengeBinding(guestAuth.subject, guestAuth.familyId);
+      const nonce = await issueProviderChallenge(deps.pool, { provider, purpose, binding });
+      reply(201, { provider, purpose, nonce, binding }, 'AUTH_CHALLENGE_ISSUED');
+      return true;
+    }
     const binding = randomBytes(32).toString('base64url');
     const nonce = await issueProviderChallenge(deps.pool, { provider, purpose, binding });
     reply(201, { provider, purpose, nonce, binding }, 'AUTH_CHALLENGE_ISSUED');
@@ -217,19 +395,67 @@ async function handleRecover(
   if (!provider ||
       typeof data.idToken !== 'string' ||
       typeof data.nonce !== 'string' ||
-      typeof data.binding !== 'string' ||
-      typeof data.expectedPlayerId !== 'string' ||
-      Object.keys(data).length !== 5) {
-    reply(400, { error: 'INVALID_REQUEST' });
-    return true;
-  }
-  if (!/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
+      typeof data.binding !== 'string') {
     reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
   const audiences = audiencesFor(deps.config, provider);
   if (!audiences.length) {
     reply(503, { error: 'AUTH_UNAVAILABLE' }, 'PROVIDER_CONFIG_MISSING');
+    return true;
+  }
+  const keyCount = Object.keys(data).length;
+  // Unified lost-response recovery: exact operation receipt + verified provider.
+  // Never creates. Client operation id alone is never authorization.
+  if (data.recoveryKind === 'provider_linked') {
+    let operationId: string;
+    try {
+      operationId = parseOperationId(data.operationId);
+    } catch {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    const sourceGuestPlayerId = data.sourceGuestPlayerId;
+    const expectedTargetPlayerId = data.expectedTargetPlayerId;
+    if (sourceGuestPlayerId !== undefined &&
+        (typeof sourceGuestPlayerId !== 'string' ||
+         !/^[0-9a-f-]{36}$/i.test(sourceGuestPlayerId))) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    if (expectedTargetPlayerId !== undefined &&
+        (typeof expectedTargetPlayerId !== 'string' ||
+         !/^[0-9a-f-]{36}$/i.test(expectedTargetPlayerId))) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    const allowed =
+      keyCount === 6 ||
+      (keyCount === 7 && (sourceGuestPlayerId !== undefined || expectedTargetPlayerId !== undefined)) ||
+      (keyCount === 8 && sourceGuestPlayerId !== undefined && expectedTargetPlayerId !== undefined);
+    if (!allowed) {
+      reply(400, { error: 'INVALID_REQUEST' });
+      return true;
+    }
+    reply(201, await deps.identity.recoverLinked({
+      provider,
+      idToken: data.idToken,
+      nonce: data.nonce,
+      binding: data.binding,
+      operationId,
+      sourceGuestPlayerId: typeof sourceGuestPlayerId === 'string' ? sourceGuestPlayerId : undefined,
+      expectedTargetPlayerId:
+        typeof expectedTargetPlayerId === 'string' ? expectedTargetPlayerId : undefined,
+      audiences,
+      keys: await deps.jwks.keys(provider, kidFromToken(data.idToken)),
+      nowSeconds: Math.floor(Date.now() / 1000),
+    }), 'AUTH_RECOVERY_LINKED_SUCCESS');
+    return true;
+  }
+  if (keyCount !== 5 ||
+      typeof data.expectedPlayerId !== 'string' ||
+      !/^[0-9a-f-]{36}$/i.test(data.expectedPlayerId)) {
+    reply(400, { error: 'INVALID_REQUEST' });
     return true;
   }
   reply(201, await deps.identity.recover({

@@ -9,10 +9,12 @@ import { createHash, randomBytes, randomUUID, type KeyObject } from 'node:crypto
 import type pg from 'pg';
 import { consumeProviderChallenge, type ChallengeScope } from './provider-challenge.mts';
 import {
+  continueChallengeBinding,
   linkChallengeBinding,
   lockGuestFamily,
   lockIdentitySubject,
   mintStagingAccessJwt,
+  parseContinueGuestBinding,
 } from './staging-access-token.mts';
 import {
   verifyProviderAssertion,
@@ -31,25 +33,66 @@ export class ProviderAuthError extends Error {
     | 'GUEST_PROOF_REQUIRED'
     | 'AUTH_UNAVAILABLE'
     /** Provider subject is not linked; recovery must never create a player. */
-    | 'RECOVERY_NOT_LINKED';
-  constructor(code:
-    | 'INVALID_PROVIDER_ASSERTION'
-    | 'INVALID_PROVIDER_CHALLENGE'
-    | 'ACCOUNT_CONFLICT'
-    | 'GUEST_PROOF_REQUIRED'
-    | 'AUTH_UNAVAILABLE'
     | 'RECOVERY_NOT_LINKED'
+    /** Unified recoverLinked: identity linked but no committed continue/confirm receipt. */
+    | 'RECOVERY_OPERATION_INCOMPLETE'
+    | 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED'
+    | 'INVALID_CONTINUATION';
+  readonly continuationToken?: string;
+  readonly expiresAt?: string;
+  /** Opaque target player for confirmation UX / durable recovery — never proof. */
+  readonly targetPlayerId?: string;
+  constructor(
+    code:
+      | 'INVALID_PROVIDER_ASSERTION'
+      | 'INVALID_PROVIDER_CHALLENGE'
+      | 'ACCOUNT_CONFLICT'
+      | 'GUEST_PROOF_REQUIRED'
+      | 'AUTH_UNAVAILABLE'
+      | 'RECOVERY_NOT_LINKED'
+      | 'RECOVERY_OPERATION_INCOMPLETE'
+      | 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED'
+      | 'INVALID_CONTINUATION',
+    extras?: {
+      continuationToken?: string;
+      expiresAt?: string;
+      targetPlayerId?: string;
+    },
   ) {
     super(code);
     this.code = code;
+    this.continuationToken = extras?.continuationToken;
+    this.expiresAt = extras?.expiresAt;
+    this.targetPlayerId = extras?.targetPlayerId;
   }
 }
+
+export type ProviderContinueResolution =
+  | 'link_guest'
+  | 'existing_account'
+  | 'created_account'
+  | 'same_account';
+
+export type ProviderContinueBundle = ProviderCredentialBundle & {
+  resolution: ProviderContinueResolution;
+};
 
 function digest(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 function opaqueToken(): string {
   return randomBytes(48).toString('base64url');
+}
+
+const OPERATION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Client-supplied operation id is a correlation handle — never sole authorization. */
+export function parseOperationId(raw: unknown): string {
+  if (typeof raw !== 'string' || !OPERATION_ID_RE.test(raw)) {
+    throw new ProviderAuthError('INVALID_PROVIDER_CHALLENGE');
+  }
+  return raw.toLowerCase();
 }
 
 export type ProviderCredentialBundle = {
@@ -130,6 +173,17 @@ export class PostgresProviderIdentityAuth {
         );
       }
       const bundle = await this.#issueVerifiedFamily(client, playerId, now);
+      // Historical login receipt — distinct operation id; must not authorize a later continue.
+      await this.#recordAuthReceipt(client, {
+        operationId: randomUUID(),
+        provider: identity.provider,
+        subject: identity.subject,
+        playerId,
+        sourceGuestPlayerId: null,
+        sourceFamilyId: null,
+        resolution: 'login',
+        now,
+      });
       await client.query('COMMIT');
       return bundle;
     } catch (error) {
@@ -294,6 +348,580 @@ export class PostgresProviderIdentityAuth {
     }
   }
 
+  /**
+   * Unified Apple/Google continue. Backend resolves link vs existing account.
+   * Progressed guests with a foreign provider identity require confirmation
+   * (ACCOUNT_SWITCH_CONFIRMATION_REQUIRED) — no silent merge or credential replace.
+   */
+  async continue(input: {
+    provider: Provider;
+    idToken: string;
+    nonce: string;
+    binding: string;
+    /** Client-generated operation id persisted in recovery marker before mutate. */
+    operationId: string;
+    guestPlayerId?: string;
+    guestFamilyId?: string;
+    /** Client-asserted local Practice progression; never trust alone for empty. */
+    localProgressProtected?: boolean;
+    audiences: readonly string[];
+    keys: readonly ProviderKey[];
+    nowSeconds: number;
+    now?: Date;
+  }): Promise<ProviderContinueBundle> {
+    const operationId = parseOperationId(input.operationId);
+    const guestBound = parseContinueGuestBinding(input.binding);
+    const hasGuest = Boolean(input.guestPlayerId && input.guestFamilyId);
+    if (guestBound) {
+      // Guest-bound challenge must never execute on a guestless path.
+      if (!hasGuest ||
+          input.guestPlayerId !== guestBound.playerId ||
+          input.guestFamilyId !== guestBound.familyId) {
+        throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+      }
+      if (!/^[0-9a-f-]{36}$/i.test(input.guestPlayerId!) ||
+          !/^[0-9a-f-]{36}$/i.test(input.guestFamilyId!)) {
+        throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+      }
+    } else if (hasGuest) {
+      // Valid guest session must not authorize a guestless continue challenge.
+      throw new ProviderAuthError('INVALID_PROVIDER_CHALLENGE');
+    } else if (!input.binding || input.binding.length > 1024) {
+      throw new ProviderAuthError('INVALID_PROVIDER_CHALLENGE');
+    }
+    const identity = this.#verify(input);
+    const scope: ChallengeScope = {
+      provider: input.provider,
+      purpose: 'continue',
+      binding: input.binding,
+    };
+    const now = input.now ?? new Date();
+    const client = await this.pool.connect();
+    // Confirmation outcome is raised after COMMIT + client release so a post-commit
+    // ROLLBACK cannot convert it into AUTH_UNAVAILABLE.
+    let switchConfirmation: ProviderAuthError | null = null;
+    let success: ProviderContinueBundle | null = null;
+    try {
+      await client.query('BEGIN');
+      if (hasGuest) {
+        await lockGuestFamily(client, input.guestFamilyId!);
+        const guest = await this.#requireActiveGuest(
+          client,
+          input.guestPlayerId!,
+          input.guestFamilyId!,
+        );
+        if (!guest) throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+      }
+      await consumeProviderChallenge(client, scope, input.nonce);
+      await lockIdentitySubject(client, identity.provider, identity.subject);
+      const occupied = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_identity_links
+         WHERE provider=$1 AND provider_subject=$2`,
+        [identity.provider, identity.subject],
+      );
+
+      // Scenario A / E / F — no foreign link.
+      if (occupied.rowCount !== 1) {
+        if (hasGuest) {
+          try {
+            await client.query(
+              `INSERT INTO public.pzd_identity_links (provider, provider_subject, player_id)
+               VALUES ($1, $2, $3)`,
+              [identity.provider, identity.subject, input.guestPlayerId],
+            );
+          } catch (error) {
+            if (isUniqueViolation(error)) throw new ProviderAuthError('ACCOUNT_CONFLICT');
+            throw error;
+          }
+          await client.query(
+            `UPDATE public.pzd_guest_accounts SET account_class='verified' WHERE player_id=$1`,
+            [input.guestPlayerId],
+          );
+          await client.query(
+            `UPDATE public.pzd_guest_families SET revoked_at=$2
+             WHERE player_id=$1 AND revoked_at IS NULL`,
+            [input.guestPlayerId, now],
+          );
+          const bundle = await this.#issueVerifiedFamily(client, input.guestPlayerId!, now);
+          await this.#recordAuthReceipt(client, {
+            operationId,
+            provider: identity.provider,
+            subject: identity.subject,
+            playerId: input.guestPlayerId!,
+            sourceGuestPlayerId: input.guestPlayerId!,
+            sourceFamilyId: input.guestFamilyId!,
+            resolution: 'link_guest',
+            now,
+          });
+          await client.query('COMMIT');
+          success = { ...bundle, resolution: 'link_guest' };
+        } else {
+          const playerId = randomUUID();
+          await client.query(
+            `INSERT INTO public.pzd_guest_accounts (player_id, account_class)
+             VALUES ($1, 'verified')`,
+            [playerId],
+          );
+          try {
+            await client.query(
+              `INSERT INTO public.pzd_identity_links (provider, provider_subject, player_id)
+               VALUES ($1, $2, $3)`,
+              [identity.provider, identity.subject, playerId],
+            );
+          } catch (error) {
+            if (isUniqueViolation(error)) throw new ProviderAuthError('ACCOUNT_CONFLICT');
+            throw error;
+          }
+          const bundle = await this.#issueVerifiedFamily(client, playerId, now);
+          await this.#recordAuthReceipt(client, {
+            operationId,
+            provider: identity.provider,
+            subject: identity.subject,
+            playerId,
+            sourceGuestPlayerId: null,
+            sourceFamilyId: null,
+            resolution: 'created_account',
+            now,
+          });
+          await client.query('COMMIT');
+          success = { ...bundle, resolution: 'created_account' };
+        }
+      } else {
+        const targetPlayerId = occupied.rows[0]!.player_id;
+        // Scenario F — same player already linked.
+        if (hasGuest && targetPlayerId === input.guestPlayerId) {
+          await client.query(
+            `UPDATE public.pzd_guest_accounts
+             SET account_class='verified'
+             WHERE player_id=$1 AND account_class='guest'`,
+            [targetPlayerId],
+          );
+          await client.query(
+            `UPDATE public.pzd_guest_families SET revoked_at=$2
+             WHERE player_id=$1 AND revoked_at IS NULL`,
+            [targetPlayerId, now],
+          );
+          const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+          await this.#recordAuthReceipt(client, {
+            operationId,
+            provider: identity.provider,
+            subject: identity.subject,
+            playerId: targetPlayerId,
+            sourceGuestPlayerId: input.guestPlayerId!,
+            sourceFamilyId: input.guestFamilyId!,
+            resolution: 'same_account',
+            now,
+          });
+          await client.query('COMMIT');
+          success = { ...bundle, resolution: 'same_account' };
+        } else if (hasGuest) {
+          // Scenario B / C — foreign verified identity.
+          const serverProgress = await this.#guestHasServerProgression(
+            client,
+            input.guestPlayerId!,
+          );
+          const requireConfirm = serverProgress || input.localProgressProtected === true;
+          if (requireConfirm) {
+            const continuation = opaqueToken();
+            const expiresAt = new Date(now.getTime() + 5 * 60_000);
+            try {
+              await client.query(
+                `INSERT INTO public.pzd_provider_continuations (
+                   continuation_digest, provider, provider_subject, target_player_id,
+                   source_guest_player_id, source_family_id, expires_at, operation_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+                [
+                  digest(continuation),
+                  identity.provider,
+                  identity.subject,
+                  targetPlayerId,
+                  input.guestPlayerId,
+                  input.guestFamilyId,
+                  expiresAt,
+                  operationId,
+                ],
+              );
+            } catch (error) {
+              if (isUniqueViolation(error)) throw new ProviderAuthError('ACCOUNT_CONFLICT');
+              throw error;
+            }
+            // No auth receipt — confirmation not committed; recoverLinked must fail closed.
+            await client.query('COMMIT');
+            switchConfirmation = new ProviderAuthError('ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', {
+              continuationToken: continuation,
+              expiresAt: expiresAt.toISOString(),
+              targetPlayerId,
+            });
+          } else {
+            await client.query(
+              `UPDATE public.pzd_guest_accounts
+               SET account_class='verified'
+               WHERE player_id=$1 AND account_class='guest'`,
+              [targetPlayerId],
+            );
+            const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+            await this.#recordAuthReceipt(client, {
+              operationId,
+              provider: identity.provider,
+              subject: identity.subject,
+              playerId: targetPlayerId,
+              sourceGuestPlayerId: input.guestPlayerId!,
+              sourceFamilyId: input.guestFamilyId!,
+              resolution: 'existing_account',
+              now,
+            });
+            await client.query('COMMIT');
+            success = { ...bundle, resolution: 'existing_account' };
+          }
+        } else {
+          // Scenario D — no guest, existing provider.
+          await client.query(
+            `UPDATE public.pzd_guest_accounts
+             SET account_class='verified'
+             WHERE player_id=$1 AND account_class='guest'`,
+            [targetPlayerId],
+          );
+          const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+          await this.#recordAuthReceipt(client, {
+            operationId,
+            provider: identity.provider,
+            subject: identity.subject,
+            playerId: targetPlayerId,
+            sourceGuestPlayerId: null,
+            sourceFamilyId: null,
+            resolution: 'existing_account',
+            now,
+          });
+          await client.query('COMMIT');
+          success = { ...bundle, resolution: 'existing_account' };
+        }
+      }
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw mapError(error);
+    } finally {
+      client.release();
+    }
+    if (switchConfirmation) throw switchConfirmation;
+    if (success) return success;
+    throw new ProviderAuthError('AUTH_UNAVAILABLE');
+  }
+
+  /**
+   * Commit a previously issued account-switch continuation.
+   * Does not transfer guest progression. Does not re-consume provider nonce.
+   * Revalidates source guest family (when present) before issuing credentials.
+   */
+  async confirmContinue(input: {
+    continuationToken: string;
+    /** Must match the operation id bound when the continuation was issued. */
+    operationId: string;
+    now?: Date;
+  }): Promise<ProviderContinueBundle> {
+    if (!input.continuationToken || input.continuationToken.length > 256) {
+      throw new ProviderAuthError('INVALID_CONTINUATION');
+    }
+    const operationId = parseOperationId(input.operationId);
+    const now = input.now ?? new Date();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const pending = await client.query<{
+        provider: Provider;
+        provider_subject: string;
+        target_player_id: string;
+        source_guest_player_id: string | null;
+        source_family_id: string | null;
+        operation_id: string | null;
+        expires_at: Date;
+      }>(
+        `SELECT provider, provider_subject, target_player_id,
+                source_guest_player_id, source_family_id, operation_id, expires_at
+         FROM public.pzd_provider_continuations
+         WHERE continuation_digest=$1
+           AND consumed_at IS NULL`,
+        [digest(input.continuationToken)],
+      );
+      if (pending.rowCount !== 1) {
+        throw new ProviderAuthError('INVALID_CONTINUATION');
+      }
+      const row = pending.rows[0]!;
+      if (!row.operation_id || row.operation_id !== operationId) {
+        throw new ProviderAuthError('INVALID_CONTINUATION');
+      }
+      if (row.expires_at.getTime() <= now.getTime()) {
+        throw new ProviderAuthError('INVALID_CONTINUATION');
+      }
+      // Lock source family before consume so logout/revoke cannot race past validation.
+      if (row.source_family_id && row.source_guest_player_id) {
+        await lockGuestFamily(client, row.source_family_id);
+        const guestOk = await this.#requireActiveGuest(
+          client,
+          row.source_guest_player_id,
+          row.source_family_id,
+        );
+        if (!guestOk) {
+          throw new ProviderAuthError('GUEST_PROOF_REQUIRED');
+        }
+      } else if (row.source_family_id || row.source_guest_player_id) {
+        throw new ProviderAuthError('INVALID_CONTINUATION');
+      }
+      await lockIdentitySubject(client, row.provider, row.provider_subject);
+      const link = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_identity_links
+         WHERE provider=$1 AND provider_subject=$2`,
+        [row.provider, row.provider_subject],
+      );
+      const targetPlayerId = row.target_player_id;
+      if (link.rowCount !== 1 || link.rows[0]!.player_id !== targetPlayerId) {
+        throw new ProviderAuthError('ACCOUNT_CONFLICT');
+      }
+      const consumed = await client.query(
+        `UPDATE public.pzd_provider_continuations
+         SET consumed_at=clock_timestamp()
+         WHERE continuation_digest=$1
+           AND consumed_at IS NULL
+           AND expires_at > clock_timestamp()
+         RETURNING continuation_digest`,
+        [digest(input.continuationToken)],
+      );
+      if (consumed.rowCount !== 1) {
+        throw new ProviderAuthError('INVALID_CONTINUATION');
+      }
+      await client.query(
+        `UPDATE public.pzd_guest_accounts
+         SET account_class='verified'
+         WHERE player_id=$1 AND account_class='guest'`,
+        [targetPlayerId],
+      );
+      const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+      await this.#recordAuthReceipt(client, {
+        operationId,
+        provider: row.provider,
+        subject: row.provider_subject,
+        playerId: targetPlayerId,
+        sourceGuestPlayerId: row.source_guest_player_id,
+        sourceFamilyId: row.source_family_id,
+        resolution: 'switch_confirmed',
+        now,
+      });
+      await client.query('COMMIT');
+      return { ...bundle, resolution: 'existing_account' };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw mapError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Create-forbidden recovery that resolves a *committed* unified continue/confirm.
+   * Requires the exact operation receipt plus verified provider identity.
+   * A historical login/continue receipt for the same provider is never enough.
+   */
+  async recoverLinked(input: {
+    provider: Provider;
+    idToken: string;
+    nonce: string;
+    binding: string;
+    operationId: string;
+    /** Optional source-guest binding from the client recovery marker. */
+    sourceGuestPlayerId?: string;
+    /** Optional resolved-target binding from the client recovery marker. */
+    expectedTargetPlayerId?: string;
+    audiences: readonly string[];
+    keys: readonly ProviderKey[];
+    nowSeconds: number;
+    now?: Date;
+  }): Promise<ProviderCredentialBundle> {
+    const operationId = parseOperationId(input.operationId);
+    if (input.sourceGuestPlayerId !== undefined &&
+        !/^[0-9a-f-]{36}$/i.test(input.sourceGuestPlayerId)) {
+      throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+    }
+    if (input.expectedTargetPlayerId !== undefined &&
+        !/^[0-9a-f-]{36}$/i.test(input.expectedTargetPlayerId)) {
+      throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+    }
+    const identity = this.#verify(input);
+    const scope: ChallengeScope = {
+      provider: input.provider,
+      purpose: 'login',
+      binding: input.binding,
+    };
+    const now = input.now ?? new Date();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await consumeProviderChallenge(client, scope, input.nonce);
+      await lockIdentitySubject(client, identity.provider, identity.subject);
+      const receipt = await client.query<{
+        provider: string;
+        provider_subject: string;
+        player_id: string;
+        source_guest_player_id: string | null;
+        source_family_id: string | null;
+        resolution: string;
+      }>(
+        `SELECT provider, provider_subject, player_id,
+                source_guest_player_id, source_family_id, resolution
+         FROM public.pzd_provider_auth_receipts
+         WHERE operation_id=$1`,
+        [operationId],
+      );
+      if (receipt.rowCount !== 1) {
+        throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+      }
+      const row = receipt.rows[0]!;
+      // Client operation id alone is never authorization — verified subject must match.
+      if (row.provider !== identity.provider ||
+          row.provider_subject !== identity.subject) {
+        throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+      }
+      if (row.resolution === 'login') {
+        // Login receipts never authorize unified continue/confirm recovery.
+        throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+      }
+      if (input.sourceGuestPlayerId !== undefined) {
+        if (row.source_guest_player_id !== input.sourceGuestPlayerId) {
+          throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+        }
+      }
+      if (input.expectedTargetPlayerId !== undefined) {
+        if (row.player_id !== input.expectedTargetPlayerId) {
+          throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+        }
+      }
+      const existing = await client.query<{ player_id: string }>(
+        `SELECT player_id FROM public.pzd_identity_links
+         WHERE provider=$1 AND provider_subject=$2`,
+        [identity.provider, identity.subject],
+      );
+      if (existing.rowCount !== 1) {
+        throw new ProviderAuthError('RECOVERY_NOT_LINKED');
+      }
+      const playerId = existing.rows[0]!.player_id;
+      if (playerId !== row.player_id) {
+        throw new ProviderAuthError('RECOVERY_OPERATION_INCOMPLETE');
+      }
+      await client.query(
+        `UPDATE public.pzd_guest_accounts
+         SET account_class='verified'
+         WHERE player_id=$1 AND account_class='guest'`,
+        [playerId],
+      );
+      const bundle = await this.#issueVerifiedFamily(client, playerId, now);
+      await client.query('COMMIT');
+      return bundle;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw mapError(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  async #recordAuthReceipt(
+    client: pg.PoolClient,
+    input: {
+      operationId: string;
+      provider: Provider;
+      subject: string;
+      playerId: string;
+      sourceGuestPlayerId: string | null;
+      sourceFamilyId: string | null;
+      resolution:
+        | 'link_guest'
+        | 'existing_account'
+        | 'created_account'
+        | 'same_account'
+        | 'switch_confirmed'
+        | 'login';
+      now: Date;
+    },
+  ): Promise<void> {
+    try {
+      await client.query(
+        `INSERT INTO public.pzd_provider_auth_receipts
+           (operation_id, provider, provider_subject, player_id,
+            source_guest_player_id, source_family_id, resolution, committed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          input.operationId,
+          input.provider,
+          input.subject,
+          input.playerId,
+          input.sourceGuestPlayerId,
+          input.sourceFamilyId,
+          input.resolution,
+          input.now,
+        ],
+      );
+    } catch (error) {
+      if (isUniqueViolation(error)) throw new ProviderAuthError('ACCOUNT_CONFLICT');
+      throw error;
+    }
+  }
+
+  async #requireActiveGuest(
+    client: pg.PoolClient,
+    guestPlayerId: string,
+    guestFamilyId: string,
+  ): Promise<boolean> {
+    const guest = await client.query<{
+      account_class: string;
+      active_refresh: boolean;
+    }>(
+      `SELECT a.account_class,
+          EXISTS (
+            SELECT 1 FROM public.pzd_guest_refresh r
+            WHERE r.family_id = f.family_id
+              AND r.used_at IS NULL
+              AND r.expires_at > clock_timestamp()
+          ) AS active_refresh
+       FROM public.pzd_guest_accounts a
+       JOIN public.pzd_guest_families f ON f.player_id = a.player_id
+       WHERE a.player_id=$1 AND f.family_id=$2 AND f.revoked_at IS NULL`,
+      [guestPlayerId, guestFamilyId],
+    );
+    return guest.rowCount === 1
+      && guest.rows[0]!.account_class === 'guest'
+      && guest.rows[0]!.active_refresh;
+  }
+
+  /**
+   * Server-owned progression for the guest player.
+   * Practice is client-local — never treat absence of these rows as proof
+   * that the guest is empty when localProgressProtected is true.
+   */
+  async #guestHasServerProgression(
+    client: pg.PoolClient,
+    playerId: string,
+  ): Promise<boolean> {
+    // Resolve table presence first. A single SQL CASE still analyzes every
+    // FROM-clause relation and fails if optional tournament tables are absent.
+    const candidates = [
+      'public.tournament_daily_claim',
+      'public.tournament_on_time_badge',
+      'public.tournament_daily_series_completion',
+    ] as const;
+    for (const table of candidates) {
+      const present = await client.query<{ ok: boolean }>(
+        'SELECT to_regclass($1) IS NOT NULL AS ok',
+        [table],
+      );
+      if (present.rows[0]?.ok !== true) continue;
+      // Identifier is a fixed allowlisted literal — never client input.
+      const hit = await client.query(
+        `SELECT 1 FROM ${table} WHERE player_id=$1 LIMIT 1`,
+        [playerId],
+      );
+      if ((hit.rowCount ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
   #verify(input: {
     provider: Provider;
     idToken: string;
@@ -364,5 +992,7 @@ function mapError(error: unknown): Error {
   if (error instanceof Error && error.message === 'INVALID_PROVIDER_CHALLENGE') {
     return new ProviderAuthError('INVALID_PROVIDER_CHALLENGE');
   }
+  // Surface unique/FK failures as conflict when possible; otherwise fail closed.
+  if (isUniqueViolation(error)) return new ProviderAuthError('ACCOUNT_CONFLICT');
   return new ProviderAuthError('AUTH_UNAVAILABLE');
 }

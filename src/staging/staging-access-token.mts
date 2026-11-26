@@ -174,6 +174,42 @@ export function linkChallengeBinding(playerId: string, familyId: string): string
   return `link:${playerId}:${familyId}`;
 }
 
+/** Unified continue challenge bound to exact guest family when a guest is present. */
+export function continueChallengeBinding(playerId: string, familyId: string): string {
+  return `continue:${playerId}:${familyId}`;
+}
+
+const CONTINUE_GUEST_BINDING =
+  /^continue:([0-9a-fA-F-]{36}):([0-9a-fA-F-]{36})$/;
+
+/** Parse guest-bound continue challenge bindings; null ⇒ guestless continue binding. */
+export function parseContinueGuestBinding(
+  binding: string,
+): { playerId: string; familyId: string } | null {
+  const match = CONTINUE_GUEST_BINDING.exec(binding);
+  if (!match) return null;
+  return { playerId: match[1]!, familyId: match[2]! };
+}
+
+/** 0008 continue/continuation tables ready (purpose check + continuations). */
+export async function detectProviderContinueSchemaReady(pool: pg.Pool): Promise<boolean> {
+  const result = await pool.query<{ ready: boolean }>(
+    `SELECT (
+       to_regclass('public.pzd_provider_continuations') IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM pg_constraint c
+         JOIN pg_class t ON t.oid = c.conrelid
+         JOIN pg_namespace n ON n.oid = t.relnamespace
+         WHERE n.nspname = 'public'
+           AND t.relname = 'pzd_provider_challenges'
+           AND c.conname = 'pzd_provider_challenges_purpose_check'
+           AND pg_get_constraintdef(c.oid) LIKE '%continue%'
+       )
+     ) AS ready`,
+  );
+  return result.rows[0]?.ready === true;
+}
+
 export function identityAdvisoryKey(provider: string, subject: string): string {
   return `pzd-id:${provider}:${subject}`;
 }

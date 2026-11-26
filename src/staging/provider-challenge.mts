@@ -2,13 +2,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import type pg from 'pg';
 import type { Provider } from './provider-token-verifier.mts';
 
-export type ChallengePurpose = 'login' | 'link';
+export type ChallengePurpose = 'login' | 'link' | 'continue';
 export type ChallengeScope = { provider: Provider; purpose: ChallengePurpose; binding: string };
 const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
 function validate(scope: ChallengeScope): void {
   if (!['apple', 'google'].includes(scope.provider) ||
-      !['login', 'link'].includes(scope.purpose) ||
+      !['login', 'link', 'continue'].includes(scope.purpose) ||
       !scope.binding || scope.binding.length > 1024) {
     throw new Error('INVALID_PROVIDER_CHALLENGE');
   }
