@@ -36,6 +36,10 @@ import {
 } from '../results/f2c-rankings.mts';
 import { loadPlayerBadgeCollection } from '../results/player-badges.mts';
 import {
+  loadPersonalRecordsSnapshot,
+  syncPracticePersonalRecords,
+} from '../results/player-personal-records.mts';
+import {
   RANKED_HTTP_DISABLED_ERROR,
   resolveRankedHttpFeatureGate,
   type RankedHttpGateConfig,
@@ -49,16 +53,20 @@ import type { VerifiedJwtIdentity } from './pinned-jwt-verifier.mts';
 
 const MAX_BODY = 16_384;
 export const RANKED_AUTH_REQUIRED_ERROR = 'RANKED_AUTH_REQUIRED' as const;
+const PERSONAL_RECORDS_PATH = '/v1/profile/me/personal-records';
+const PRACTICE_RECORDS_SYNC_PATH = '/v1/profile/me/personal-records/practice/sync';
 const writerDiagnostics = new WeakMap<ServerResponse, WriterDenialCategory>();
 /** Staging ingress reads this for correlated privacy-safe HTTP diagnostics only. */
 export function writerDenialDiagnostic(res: ServerResponse): WriterDenialCategory | undefined {
   return writerDiagnostics.get(res);
 }
 
-/** Account-scoped reads — no tournament gameplay session required. */
+/** Account-scoped reads/writes — no tournament gameplay session required. */
 export function isAccountScopedReadPath(path: string): boolean {
   return path === '/v1/tournament/me/badges'
     || path === '/v1/profile/me/badges'
+    || path === PERSONAL_RECORDS_PATH
+    || path === PRACTICE_RECORDS_SYNC_PATH
     || path === '/v1/diagnostics/reports';
 }
 
@@ -68,6 +76,8 @@ export function rankedRouteRequiresVerifiedAccount(path: string): boolean {
   if (path.startsWith('/v1/tournament/leaderboards/')) return false;
   if (path === '/v1/tournament/me/badges') return false;
   if (path === '/v1/profile/me/badges') return false;
+  if (path === PERSONAL_RECORDS_PATH) return false;
+  if (path === PRACTICE_RECORDS_SYNC_PATH) return false;
   if (path.startsWith('/v1/tournament/manifests/')) return false;
   return path.startsWith('/v1/tournament/');
 }
@@ -240,6 +250,43 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         if ((path === '/v1/tournament/me/badges' || path === '/v1/profile/me/badges')
             && method === 'GET') {
           await sendPlayerBadges(res, deps, account.playerId, url);
+          return;
+        }
+        if (path === PERSONAL_RECORDS_PATH && method === 'GET') {
+          if (!accountScopedRequiresVerified(identity)) {
+            send(res, 403, { error: RANKED_AUTH_REQUIRED_ERROR });
+            return;
+          }
+          await sendPersonalRecords(res, deps, account.playerId);
+          return;
+        }
+        if (path === PRACTICE_RECORDS_SYNC_PATH && method === 'POST') {
+          if (!accountScopedRequiresVerified(identity)) {
+            send(res, 403, { error: RANKED_AUTH_REQUIRED_ERROR });
+            return;
+          }
+          const raw = await readBody(req);
+          if (!raw) {
+            send(res, 400, { error: 'MALFORMED_REQUEST' });
+            return;
+          }
+          let payload: unknown;
+          try { payload = JSON.parse(raw.toString('utf8')); }
+          catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
+          const result = await syncPracticePersonalRecords(
+            deps.pool,
+            account.playerId,
+            payload,
+          );
+          if (!result.ok) {
+            send(res, result.status, { error: result.error });
+            return;
+          }
+          send(res, 200, {
+            records: result.snapshot.records,
+            schemaReady: result.snapshot.schemaReady,
+            acknowledgements: result.acknowledgements,
+          });
           return;
         }
         send(res, 404, { error: 'NOT_FOUND' });
@@ -723,6 +770,19 @@ async function authenticateAccountScoped(
 }
 
 /**
+ * Personal-record cloud APIs require a verified account class.
+ * Guests keep local-only practice records and never read another account's remote rows.
+ */
+function accountScopedRequiresVerified(identity: VerifiedJwtIdentity): boolean {
+  if (identity.accountType === 'guest') return false;
+  if (identity.issuer === GUEST_ISSUER) {
+    return identity.accountType === 'verified';
+  }
+  // Non-staging verified JWTs may omit accountType; guest already denied above.
+  return true;
+}
+
+/**
  * PZD-43: authenticated player's badge collection (account-scoped).
  * Bound to the server-resolved player id — query playerId is ignored.
  */
@@ -745,6 +805,19 @@ async function sendPlayerBadges(
     grantLimit,
   });
   send(res, 200, payload);
+}
+
+/** PZD-53: coherent account-scoped personal-record snapshot (no session required). */
+async function sendPersonalRecords(
+  res: ServerResponse,
+  deps: TournamentHttpDeps,
+  playerId: string,
+): Promise<void> {
+  const payload = await loadPersonalRecordsSnapshot(deps.pool, playerId);
+  send(res, 200, {
+    records: payload.records,
+    schemaReady: payload.schemaReady,
+  });
 }
 
 async function sendOwnedResults(

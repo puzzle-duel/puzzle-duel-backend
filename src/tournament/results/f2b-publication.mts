@@ -41,6 +41,11 @@ import {
   publicationIdempotencyKey,
   type LeaderboardReadEligibility,
 } from './f2a-publication-schema.mts';
+import {
+  projectTournamentBoardPersonalBest,
+  TOURNAMENT_GENERATOR_VERSION,
+  TOURNAMENT_RULES_VERSION,
+} from './player-personal-records.mts';
 
 export const F2B_PROVENANCE_KEY_MIN_LENGTH = 32;
 
@@ -1098,6 +1103,17 @@ export class F2BPublicationService {
           game.admissionId,
         ],
       );
+      // PZD-53: max-only personal-best projection from individual board score.
+      // Never uses category/series aggregates. No-ops if schema not yet applied.
+      await projectTournamentBoardPersonalBest(client, {
+        playerId: proof.playerId,
+        seriesId: proof.seriesId,
+        subgameOrdinal: game.ordinal,
+        score: game.score,
+        achievedAtMs: proof.completedAtMs,
+        rulesVersion: TOURNAMENT_RULES_VERSION,
+        generatorVersion: TOURNAMENT_GENERATOR_VERSION,
+      });
       await this.#step(`after_subgame_${game.ordinal}` as F2BFaultPoint, client);
     }
 
