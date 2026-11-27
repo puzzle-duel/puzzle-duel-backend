@@ -33,9 +33,13 @@ function csvAudiences(value: string | undefined): string[] {
 export function isStagingRankedRoute(url: string | undefined, method: string | undefined): boolean {
   if (!url) return false;
   const path = url.split('?', 1)[0] ?? '';
+  const verb = (method ?? '').toUpperCase();
   return (path.startsWith('/v1/tournament/') && path !== '/v1/tournament/session') ||
     path === '/v1/profile/me/badges' ||
-    (path === '/v1/diagnostics/reports' && method === 'POST');
+    // PZD-53: exact method+path only — never wildcard /v1/profile/*
+    (path === '/v1/profile/me/personal-records' && verb === 'GET') ||
+    (path === '/v1/profile/me/personal-records/practice/sync' && verb === 'POST') ||
+    (path === '/v1/diagnostics/reports' && verb === 'POST');
 }
 
 export function stagingConfig(env: NodeJS.ProcessEnv = process.env) {
