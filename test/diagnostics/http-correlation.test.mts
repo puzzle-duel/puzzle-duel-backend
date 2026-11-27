@@ -66,6 +66,8 @@ test('HTTP route classifier never includes series IDs or query strings', () => {
   assert.equal(diagnosticRoute('/v1/auth/guest'), 'guest_auth');
   assert.equal(diagnosticRoute('/v1/auth/providers/continue'), 'provider_auth');
   assert.equal(diagnosticRoute('/v1/auth/providers/challenge'), 'provider_auth');
+  assert.equal(diagnosticRoute('/v1/profile/me/badges'), 'profile_badges');
+  assert.equal(diagnosticRoute('/v1/tournament/me/badges'), 'profile_badges');
   assert.equal(diagnosticRoute('/malicious/secret'), 'other');
 });
 

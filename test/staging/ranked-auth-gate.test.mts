@@ -16,6 +16,7 @@ test('ranked mutations require verified account; diagnostics/leaderboards do not
   assert.equal(rankedRouteRequiresVerifiedAccount('/v1/diagnostics/reports'), false);
   assert.equal(rankedRouteRequiresVerifiedAccount('/v1/tournament/leaderboards/daily'), false);
   assert.equal(rankedRouteRequiresVerifiedAccount('/v1/tournament/me/badges'), false);
+  assert.equal(rankedRouteRequiresVerifiedAccount('/v1/profile/me/badges'), false);
   assert.equal(RANKED_AUTH_REQUIRED_ERROR, 'RANKED_AUTH_REQUIRED');
 });
 

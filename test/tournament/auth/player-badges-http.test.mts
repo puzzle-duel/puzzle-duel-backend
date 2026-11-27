@@ -274,6 +274,22 @@ describe('PZD-43 GET /v1/tournament/me/badges', () => {
     assert.equal(bodyA.badges[0]?.earnedCount, 1);
     assert.equal(bodyA.badges[0]?.grants[0]?.seriesId, seriesA);
 
+    // Account-scoped: bearer alone (no tournament session secret) must succeed.
+    const bearerOnly = await fetch(`${base}/v1/profile/me/badges`, {
+      headers: { authorization: bearer('badge-user-a') },
+    });
+    assert.equal(bearerOnly.status, 200);
+    const bearerBody = (await bearerOnly.json()) as {
+      badges: Array<{ earnedCount: number; grants: Array<{ seriesId: string }> }>;
+    };
+    assert.equal(bearerBody.badges[0]?.earnedCount, 1);
+    assert.equal(bearerBody.badges[0]?.grants[0]?.seriesId, seriesA);
+
+    const legacyBearerOnly = await fetch(`${base}/v1/tournament/me/badges`, {
+      headers: { authorization: bearer('badge-user-a') },
+    });
+    assert.equal(legacyBearerOnly.status, 200);
+
     const forB = await fetch(`${base}/v1/tournament/me/badges`, {
       headers: headersB,
     });

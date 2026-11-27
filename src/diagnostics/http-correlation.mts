@@ -64,6 +64,10 @@ export function safeDiagnosticErrorCode(value: unknown): string | undefined {
 export function diagnosticRoute(url: string | undefined): string {
   const path = url?.split('?', 1)[0] ?? '';
   if (path === '/v1/diagnostics/reports') return 'diagnostic_report';
+  if (path === '/v1/profile/me/badges' || path === '/v1/tournament/me/badges') {
+    return 'profile_badges';
+  }
+  if (path.startsWith('/v1/profile/')) return 'profile_other';
   if (path === '/v1/tournament/session') return 'tournament_session';
   if (path.includes('/leaderboards/daily')) return 'leaderboard_daily';
   if (path.includes('/leaderboards/weekly')) return 'leaderboard_weekly';

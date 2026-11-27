@@ -247,7 +247,7 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
     assert.notEqual(bundle.playerId, guestId);
   });
 
-  await t.test('progressed guest requires confirmation; cancel leaves guest; confirm switches', async () => {
+  await t.test('progressed guest + existing provider authenticates directly; guest rows preserved', async () => {
     const bindingLogin = 'cont-progress-login';
     const nonceLogin = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: bindingLogin,
@@ -279,45 +279,36 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       privateKey, kid: 't', provider: 'google', subject: 'cont-progress-google',
       audience: 'client', rawNonce: nonce, now,
     });
-    let continuation = '';
-    await assert.rejects(
-      () => auth.continue({
-        operationId,
-        provider: 'google', idToken: token, nonce, binding,
-        guestPlayerId: guestId, guestFamilyId: familyId,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) => {
-        if (!(error instanceof ProviderAuthError)) return false;
-        if (error.code !== 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED') return false;
-        continuation = error.continuationToken ?? '';
-        assert.equal(error.targetPlayerId, original.playerId);
-        return continuation.length > 0;
-      },
-    );
+    const switched = await auth.continue({
+      operationId,
+      provider: 'google', idToken: token, nonce, binding,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      localProgressProtected: true,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(switched.resolution, 'existing_account');
+    assert.equal(switched.playerId, original.playerId);
+    assert.notEqual(switched.playerId, guestId);
 
-    // Cancel: guest family still active; no verified family for guest.
+    // Guest account/progression remain under the original guest player_id.
     const guestClass = await runtimePool.query<{ account_class: string }>(
       'SELECT account_class FROM public.pzd_guest_accounts WHERE player_id=$1',
       [guestId],
     );
     assert.equal(guestClass.rows[0]?.account_class, 'guest');
-
-    const switched = await auth.confirmContinue({
-      operationId, continuationToken: continuation,
-    });
-    assert.equal(switched.resolution, 'existing_account');
-    assert.equal(switched.playerId, original.playerId);
-
-    await assert.rejects(
-      () => auth.confirmContinue({
-        operationId, continuationToken: continuation,
-      }),
-      (error: unknown) => error instanceof ProviderAuthError && error.code === 'INVALID_CONTINUATION',
+    const guestClaim = await runtimePool.query(
+      'SELECT 1 FROM public.tournament_daily_claim WHERE player_id=$1',
+      [guestId],
     );
+    assert.equal(guestClaim.rowCount, 1);
+    const guestFamily = await runtimePool.query<{ revoked_at: Date | null }>(
+      'SELECT revoked_at FROM public.pzd_guest_families WHERE family_id=$1',
+      [familyId],
+    );
+    assert.equal(guestFamily.rows[0]?.revoked_at, null);
   });
 
-  await t.test('logout/revocation before confirmation rejects; continuation not consumed', async () => {
+  await t.test('revoked guest family rejects continue before issuing credentials', async () => {
     const bindingLogin = 'cont-revoke-login';
     const nonceLogin = await issueProviderChallenge(runtimePool, {
       provider: 'apple', purpose: 'login', binding: bindingLogin,
@@ -326,7 +317,7 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       privateKey, kid: 't', provider: 'apple', subject: 'cont-revoke-apple',
       audience: 'client', rawNonce: nonceLogin, now,
     });
-    const original = await auth.login({
+    await auth.login({
       provider: 'apple', idToken: tokenLogin, nonce: nonceLogin, binding: bindingLogin,
       audiences: ['client'], keys: [key], nowSeconds: now,
     });
@@ -335,6 +326,11 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
     const claims = claimsFromJwt(guest.accessToken);
     const guestId = String(claims.sub);
     const familyId = String(claims.fid);
+    await runtimePool.query(
+      'UPDATE public.pzd_guest_families SET revoked_at=clock_timestamp() WHERE family_id=$1',
+      [familyId],
+    );
+
     const operationId = randomUUID();
     const binding = continueChallengeBinding(guestId, familyId);
     const nonce = await issueProviderChallenge(runtimePool, {
@@ -344,7 +340,6 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       privateKey, kid: 't', provider: 'apple', subject: 'cont-revoke-apple',
       audience: 'client', rawNonce: nonce, now,
     });
-    let continuation = '';
     await assert.rejects(
       () => auth.continue({
         operationId,
@@ -353,34 +348,9 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
         localProgressProtected: true,
         audiences: ['client'], keys: [key], nowSeconds: now,
       }),
-      (error: unknown) => {
-        if (!(error instanceof ProviderAuthError)) return false;
-        continuation = error.continuationToken ?? '';
-        return error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED' && continuation.length > 0;
-      },
+      (error: unknown) =>
+        error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED',
     );
-
-    await runtimePool.query(
-      'UPDATE public.pzd_guest_families SET revoked_at=clock_timestamp() WHERE family_id=$1',
-      [familyId],
-    );
-
-    await assert.rejects(
-      () => auth.confirmContinue({
-        operationId, continuationToken: continuation,
-      }),
-      (error: unknown) => error instanceof ProviderAuthError && error.code === 'GUEST_PROOF_REQUIRED',
-    );
-
-    // Token remains usable only after guest restored — prove not consumed.
-    await runtimePool.query(
-      'UPDATE public.pzd_guest_families SET revoked_at=NULL WHERE family_id=$1',
-      [familyId],
-    );
-    const restored = await auth.confirmContinue({
-      operationId, continuationToken: continuation,
-    });
-    assert.equal(restored.playerId, original.playerId);
   });
 
   await t.test('guest-bound continue without guest proof fails closed (no create)', async () => {
@@ -498,7 +468,7 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
     );
   });
 
-  await t.test('confirmation-required writes no receipt; confirm writes receipt for recovery', async () => {
+  await t.test('continue writes receipt; lost-response recovery restores same player', async () => {
     const bindingLogin = 'cont-consent-login';
     const nonceLogin = await issueProviderChallenge(runtimePool, {
       provider: 'apple', purpose: 'login', binding: bindingLogin,
@@ -525,43 +495,12 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
       audience: 'client', rawNonce: nonce, now,
     });
-    let continuation = '';
-    await assert.rejects(
-      () => auth.continue({
-        operationId,
-        provider: 'apple', idToken: token, nonce, binding,
-        guestPlayerId: guestId, guestFamilyId: familyId,
-        localProgressProtected: true,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) => {
-        if (!(error instanceof ProviderAuthError)) return false;
-        continuation = error.continuationToken ?? '';
-        return error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED';
-      },
-    );
-
-    const incompleteBinding = 'cont-consent-incomplete';
-    const incompleteNonce = await issueProviderChallenge(runtimePool, {
-      provider: 'apple', purpose: 'login', binding: incompleteBinding,
-    });
-    const incompleteToken = mintAssertion({
-      privateKey, kid: 't', provider: 'apple', subject: 'cont-consent-apple',
-      audience: 'client', rawNonce: incompleteNonce, now,
-    });
-    await assert.rejects(
-      () => auth.recoverLinked({
-        operationId,
-        provider: 'apple', idToken: incompleteToken, nonce: incompleteNonce,
-        binding: incompleteBinding,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) =>
-        error instanceof ProviderAuthError && error.code === 'RECOVERY_OPERATION_INCOMPLETE',
-    );
-
-    const switched = await auth.confirmContinue({
-      operationId, continuationToken: continuation,
+    const switched = await auth.continue({
+      operationId,
+      provider: 'apple', idToken: token, nonce, binding,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      localProgressProtected: true,
+      audiences: ['client'], keys: [key], nowSeconds: now,
     });
     assert.equal(switched.playerId, original.playerId);
 
@@ -625,43 +564,16 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
       privateKey, kid: 't', provider: 'google', subject: 'cont-opbind-google',
       audience: 'client', rawNonce: nonceB, now,
     });
-    let continuation = '';
-    // 3) Operation B returns confirmation-required (response lost).
-    await assert.rejects(
-      () => auth.continue({
-        operationId: operationB,
-        provider: 'google', idToken: tokenB, nonce: nonceB, binding,
-        guestPlayerId: guestId, guestFamilyId: familyId,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) => {
-        if (!(error instanceof ProviderAuthError)) return false;
-        continuation = error.continuationToken ?? '';
-        return error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED' && continuation.length > 0;
-      },
-    );
+    // 3) Operation B commits directly (response may be lost).
+    const continued = await auth.continue({
+      operationId: operationB,
+      provider: 'google', idToken: tokenB, nonce: nonceB, binding,
+      guestPlayerId: guestId, guestFamilyId: familyId,
+      audiences: ['client'], keys: [key], nowSeconds: now,
+    });
+    assert.equal(continued.playerId, original.playerId);
 
-    // 4) Recovery of B MUST fail despite committed receipt A.
-    const failBinding = 'cont-opbind-fail';
-    const failNonce = await issueProviderChallenge(runtimePool, {
-      provider: 'google', purpose: 'login', binding: failBinding,
-    });
-    const failToken = mintAssertion({
-      privateKey, kid: 't', provider: 'google', subject: 'cont-opbind-google',
-      audience: 'client', rawNonce: failNonce, now,
-    });
-    await assert.rejects(
-      () => auth.recoverLinked({
-        operationId: operationB,
-        provider: 'google', idToken: failToken, nonce: failNonce, binding: failBinding,
-        sourceGuestPlayerId: guestId,
-        expectedTargetPlayerId: original.playerId,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) =>
-        error instanceof ProviderAuthError && error.code === 'RECOVERY_OPERATION_INCOMPLETE',
-    );
-    // Historical receipt A also cannot authorize B.
+    // 4) Historical receipt A cannot authorize recovery of operation B.
     const failABinding = 'cont-opbind-fail-a';
     const failANonce = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: failABinding,
@@ -680,13 +592,7 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
         error instanceof ProviderAuthError && error.code === 'RECOVERY_OPERATION_INCOMPLETE',
     );
 
-    // 5) Confirm B; lose response.
-    const confirmed = await auth.confirmContinue({
-      operationId: operationB, continuationToken: continuation,
-    });
-    assert.equal(confirmed.playerId, original.playerId);
-
-    // 6) Recovery of B now succeeds for the exact authorized target.
+    // 5) Recovery of B succeeds for the exact authorized target.
     const okBinding = 'cont-opbind-ok';
     const okNonce = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: okBinding,
@@ -822,7 +728,7 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
     assert.equal(links.rows[0]!.player_id, [...playerIds][0]);
   });
 
-  await t.test('concurrent duplicate confirmation: only one succeeds', async () => {
+  await t.test('legacy confirmContinue: concurrent duplicate consume — only one succeeds', async () => {
     const bindingLogin = 'cont-dup-confirm-login';
     const nonceLogin = await issueProviderChallenge(runtimePool, {
       provider: 'google', purpose: 'login', binding: bindingLogin,
@@ -840,31 +746,19 @@ describePg('unified provider continue PostgreSQL (0005–0009)', async (t) => {
     const guestId = String(claims.sub);
     const familyId = String(claims.fid);
     const operationId = randomUUID();
-    const binding = continueChallengeBinding(guestId, familyId);
-    const nonce = await issueProviderChallenge(runtimePool, {
-      provider: 'google', purpose: 'continue', binding,
-    });
-    const token = mintAssertion({
-      privateKey, kid: 't', provider: 'google', subject: 'cont-dup-confirm',
-      audience: 'client', rawNonce: nonce, now,
-    });
-    let continuation = '';
-    await assert.rejects(
-      () => auth.continue({
-        operationId,
-        provider: 'google', idToken: token, nonce, binding,
-        guestPlayerId: guestId, guestFamilyId: familyId,
-        localProgressProtected: true,
-        audiences: ['client'], keys: [key], nowSeconds: now,
-      }),
-      (error: unknown) => {
-        if (!(error instanceof ProviderAuthError)) return false;
-        continuation = error.continuationToken ?? '';
-        return error.code === 'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED';
-      },
+    // Manually seed a legacy continuation (normal continue no longer emits one).
+    const continuation = Buffer.alloc(48, 7).toString('base64url');
+    const continuationDigest = createHash('sha256')
+      .update(continuation, 'utf8')
+      .digest('hex');
+    await adminPool.query(
+      `INSERT INTO public.pzd_provider_continuations (
+         continuation_digest, provider, provider_subject, target_player_id,
+         source_guest_player_id, source_family_id, expires_at, operation_id
+       ) VALUES ($1,'google','cont-dup-confirm',$2,$3,$4,clock_timestamp() + interval '5 minutes',$5)`,
+      [continuationDigest, original.playerId, guestId, familyId, operationId],
     );
 
-    // Hold family lock so both confirms queue for serialization.
     const barrier = await runtimePool.connect();
     try {
       await barrier.query('BEGIN');
