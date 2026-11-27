@@ -42,7 +42,7 @@ import {
   type LeaderboardReadEligibility,
 } from './f2a-publication-schema.mts';
 import {
-  projectTournamentBoardPersonalBest,
+  projectTournamentBoardPersonalBestIsolated,
   TOURNAMENT_GENERATOR_VERSION,
   TOURNAMENT_RULES_VERSION,
 } from './player-personal-records.mts';
@@ -1103,9 +1103,11 @@ export class F2BPublicationService {
           game.admissionId,
         ],
       );
-      // PZD-53: max-only personal-best projection from individual board score.
-      // Never uses category/series aggregates. No-ops if schema not yet applied.
-      await projectTournamentBoardPersonalBest(client, {
+      // PZD-53: isolate only personal-best projection. Authoritative
+      // verified_subgame_score insert above is never inside this SAVEPOINT.
+      // Recoverable projection failures emit a privacy-safe diagnostic and
+      // continue; connection/transaction failures rethrow.
+      await projectTournamentBoardPersonalBestIsolated(client, {
         playerId: proof.playerId,
         seriesId: proof.seriesId,
         subgameOrdinal: game.ordinal,

@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   difficultyForSubgameOrdinal,
+  isFatalPersonalBestProjectionError,
+  isIsolatablePersonalBestProjectionError,
   parsePracticeSyncBody,
   PRACTICE_PROVENANCE,
 } from '../../../src/tournament/results/player-personal-records.mts';
@@ -146,4 +148,27 @@ test('practice sync allows explicit practice provenance', () => {
   });
   assert.ok(parsed);
   assert.equal(parsed![0]!.score, 0);
+});
+
+test('projection error classification isolates check violations but not connection failures', () => {
+  assert.equal(
+    isIsolatablePersonalBestProjectionError({ code: '23514' }),
+    true,
+  );
+  assert.equal(
+    isIsolatablePersonalBestProjectionError({ code: '42P01' }),
+    true,
+  );
+  assert.equal(
+    isFatalPersonalBestProjectionError({ code: '08006' }),
+    true,
+  );
+  assert.equal(
+    isIsolatablePersonalBestProjectionError({ code: '08006' }),
+    false,
+  );
+  assert.equal(
+    isFatalPersonalBestProjectionError(new Error('Connection terminated unexpectedly')),
+    true,
+  );
 });

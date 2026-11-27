@@ -271,6 +271,150 @@ export async function projectTournamentBoardPersonalBest(
   });
 }
 
+/** Allowlisted SQLSTATE classes that may be isolated behind a SAVEPOINT. */
+const ISOLATABLE_PROJECTION_SQLSTATES = new Set([
+  '42P01', // undefined_table
+  '42703', // undefined_column
+  '23514', // check_violation
+  '23502', // not_null_violation
+  '23505', // unique_violation (unexpected but non-fatal for competitive path)
+  '22P02', // invalid_text_representation
+  '22001', // string_data_right_truncation
+]);
+
+/** Connection / transaction-level failures must never be swallowed. */
+const FATAL_PROJECTION_SQLSTATES = new Set([
+  '08000', '08003', '08006', '08001', '08004',
+  '57P01', '57P02', '57P03',
+  '25P02', // in_failed_sql_transaction
+  '25P03',
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+]);
+
+export type PersonalBestProjectionOutcome =
+  | 'projected'
+  | 'skipped_schema'
+  | 'failed_isolated';
+
+export interface PersonalBestProjectionDiagnostic {
+  readonly code: 'tournament_record_projection_failed';
+  readonly operation: 'tournament_record_projection';
+  readonly ordinal: number;
+  readonly sqlstate: string;
+  readonly safeReason: string;
+}
+
+function sqlStateOf(err: unknown): string {
+  if (typeof err === 'object' && err !== null && 'code' in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return code;
+  }
+  return 'XXXXX';
+}
+
+function safeProjectionReason(sqlstate: string): string {
+  switch (sqlstate) {
+    case '42P01': return 'undefined_table';
+    case '42703': return 'undefined_column';
+    case '23514': return 'check_violation';
+    case '23502': return 'not_null_violation';
+    case '23505': return 'unique_violation';
+    case '22P02': return 'invalid_text_representation';
+    case '22001': return 'string_data_right_truncation';
+    default: return 'projection_error';
+  }
+}
+
+export function isFatalPersonalBestProjectionError(err: unknown): boolean {
+  const state = sqlStateOf(err);
+  if (FATAL_PROJECTION_SQLSTATES.has(state)) return true;
+  // Node driver connection termination often surfaces as Error without SQLSTATE.
+  if (err instanceof Error) {
+    const message = err.message.toLowerCase();
+    if (
+      message.includes('connection terminated')
+      || message.includes('client was closed')
+      || message.includes('connection refused')
+      || message.includes('cannot use a pool after calling end')
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isIsolatablePersonalBestProjectionError(err: unknown): boolean {
+  if (isFatalPersonalBestProjectionError(err)) return false;
+  const state = sqlStateOf(err);
+  return ISOLATABLE_PROJECTION_SQLSTATES.has(state) || state === 'XXXXX';
+}
+
+/** Privacy-safe structured diagnostic — never includes player/series/score/PII. */
+export function emitPersonalBestProjectionFailure(
+  diagnostic: PersonalBestProjectionDiagnostic,
+  write: (line: string) => void = (line) => process.stderr.write(`${line}\n`),
+): void {
+  write(JSON.stringify(diagnostic));
+}
+
+/**
+ * Runs tournament personal-best projection inside a SAVEPOINT so recoverable
+ * projection failures cannot abort the authoritative F2-B publication txn.
+ * Connection/transaction-level failures are rethrown.
+ */
+export async function projectTournamentBoardPersonalBestIsolated(
+  client: pg.PoolClient,
+  input: {
+    playerId: string;
+    seriesId: string;
+    subgameOrdinal: number;
+    score: number;
+    achievedAtMs: number;
+    rulesVersion?: string;
+    generatorVersion?: string;
+  },
+  options?: {
+    onFailure?: (diagnostic: PersonalBestProjectionDiagnostic) => void;
+  },
+): Promise<PersonalBestProjectionOutcome> {
+  if (!(await tableReady(client))) return 'skipped_schema';
+
+  const savepoint = `pzd_pb_ord_${input.subgameOrdinal}`;
+  await client.query(`SAVEPOINT ${savepoint}`);
+  try {
+    await projectTournamentBoardPersonalBest(client, input);
+    await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+    return 'projected';
+  } catch (err) {
+    if (isFatalPersonalBestProjectionError(err)) {
+      // Do not attempt savepoint recovery — outer txn/connection is not usable.
+      throw err;
+    }
+    if (!isIsolatablePersonalBestProjectionError(err)) {
+      throw err;
+    }
+    const sqlstate = sqlStateOf(err);
+    const diagnostic: PersonalBestProjectionDiagnostic = {
+      code: 'tournament_record_projection_failed',
+      operation: 'tournament_record_projection',
+      ordinal: input.subgameOrdinal,
+      sqlstate,
+      safeReason: safeProjectionReason(sqlstate),
+    };
+    try {
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await client.query(`RELEASE SAVEPOINT ${savepoint}`);
+    } catch (rollbackErr) {
+      // Savepoint cleanup failure is fatal for the surrounding transaction.
+      throw rollbackErr;
+    }
+    if (options?.onFailure) options.onFailure(diagnostic);
+    else emitPersonalBestProjectionFailure(diagnostic);
+    return 'failed_isolated';
+  }
+}
+
 /**
  * Derive tournament personal bests from immutable verified_subgame_score when
  * the projection table is absent or empty for this player.
@@ -374,15 +518,28 @@ export async function loadPersonalRecordsSnapshot(
     }
   }
 
-  const hasTournament = records.some((r) => r.source === 'tournament');
-  if (!hasTournament) {
-    try {
-      const derived = await deriveTournamentPersonalBests(pool, playerId);
-      records.push(...derived);
-    } catch (err) {
-      // Historical tables may be absent in unit harnesses that only mock badges.
-      if (!isUndefinedTable(err)) throw err;
+  // Always merge derived tournament maxima so partial projections never hide
+  // higher historical verified boards for a difficulty.
+  try {
+    const derived = await deriveTournamentPersonalBests(pool, playerId);
+    const byDifficulty = new Map<string, PersonalRecordDto>();
+    for (const record of records) {
+      if (record.source === 'tournament') {
+        byDifficulty.set(record.difficulty, record);
+      }
     }
+    for (const derivedRecord of derived) {
+      const existing = byDifficulty.get(derivedRecord.difficulty);
+      if (!existing || derivedRecord.score > existing.score) {
+        byDifficulty.set(derivedRecord.difficulty, derivedRecord);
+      }
+    }
+    const withoutTournament = records.filter((r) => r.source !== 'tournament');
+    records.length = 0;
+    records.push(...withoutTournament, ...byDifficulty.values());
+  } catch (err) {
+    // Historical tables may be absent in unit harnesses that only mock badges.
+    if (!isUndefinedTable(err)) throw err;
   }
 
   return {
