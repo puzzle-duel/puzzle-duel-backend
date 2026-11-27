@@ -58,3 +58,28 @@ test('staging diagnostic report POST reaches authenticated ranked handler', () =
   assert.equal(isStagingRankedRoute('/v1/tournament/session', 'POST'), false);
   assert.equal(isStagingRankedRoute('/v1/auth/guest', 'POST'), false);
 });
+
+test('staging personal-records routes use exact method+path matching', () => {
+  assert.equal(isStagingRankedRoute('/v1/profile/me/personal-records', 'GET'), true);
+  assert.equal(
+    isStagingRankedRoute('/v1/profile/me/personal-records/practice/sync', 'POST'),
+    true,
+  );
+  // Wrong methods must not forward.
+  assert.equal(isStagingRankedRoute('/v1/profile/me/personal-records', 'POST'), false);
+  assert.equal(isStagingRankedRoute('/v1/profile/me/personal-records', 'PUT'), false);
+  assert.equal(
+    isStagingRankedRoute('/v1/profile/me/personal-records/practice/sync', 'GET'),
+    false,
+  );
+  // No broad profile wildcard.
+  assert.equal(isStagingRankedRoute('/v1/profile/me', 'GET'), false);
+  assert.equal(isStagingRankedRoute('/v1/profile/me/personal-records/extra', 'GET'), false);
+  assert.equal(isStagingRankedRoute('/v1/profile/me/personal-records-extra', 'GET'), false);
+  assert.equal(
+    isStagingRankedRoute('/v1/profile/me/personal-records/practice/sync/extra', 'POST'),
+    false,
+  );
+  // Existing badge route remains forwarded.
+  assert.equal(isStagingRankedRoute('/v1/profile/me/badges', 'GET'), true);
+});
