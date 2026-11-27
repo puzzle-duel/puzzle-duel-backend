@@ -48,6 +48,7 @@ const SAFE_ERROR_CODES = new Set([
   'ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', 'INVALID_CONTINUATION',
   'AUTH_CONTINUE_SUCCESS', 'AUTH_CONTINUE_CONFIRMED', 'RECOVERY_NOT_LINKED',
   'RECOVERY_OPERATION_INCOMPLETE',
+  'SCHEMA_NOT_READY',
 ]);
 
 const AUTH_SQLSTATE = /^AUTH_SQLSTATE_\d{5}$/;
@@ -66,6 +67,12 @@ export function diagnosticRoute(url: string | undefined): string {
   if (path === '/v1/diagnostics/reports') return 'diagnostic_report';
   if (path === '/v1/profile/me/badges' || path === '/v1/tournament/me/badges') {
     return 'profile_badges';
+  }
+  if (
+    path === '/v1/profile/me/personal-records'
+    || path === '/v1/profile/me/personal-records/practice/sync'
+  ) {
+    return 'profile_personal_records';
   }
   if (path.startsWith('/v1/profile/')) return 'profile_other';
   if (path === '/v1/tournament/session') return 'tournament_session';

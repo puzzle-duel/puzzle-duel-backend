@@ -41,6 +41,11 @@ import {
   publicationIdempotencyKey,
   type LeaderboardReadEligibility,
 } from './f2a-publication-schema.mts';
+import {
+  projectTournamentBoardPersonalBestIsolated,
+  TOURNAMENT_GENERATOR_VERSION,
+  TOURNAMENT_RULES_VERSION,
+} from './player-personal-records.mts';
 
 export const F2B_PROVENANCE_KEY_MIN_LENGTH = 32;
 
@@ -1098,6 +1103,19 @@ export class F2BPublicationService {
           game.admissionId,
         ],
       );
+      // PZD-53: isolate only personal-best projection. Authoritative
+      // verified_subgame_score insert above is never inside this SAVEPOINT.
+      // Recoverable projection failures emit a privacy-safe diagnostic and
+      // continue; connection/transaction failures rethrow.
+      await projectTournamentBoardPersonalBestIsolated(client, {
+        playerId: proof.playerId,
+        seriesId: proof.seriesId,
+        subgameOrdinal: game.ordinal,
+        score: game.score,
+        achievedAtMs: proof.completedAtMs,
+        rulesVersion: TOURNAMENT_RULES_VERSION,
+        generatorVersion: TOURNAMENT_GENERATOR_VERSION,
+      });
       await this.#step(`after_subgame_${game.ordinal}` as F2BFaultPoint, client);
     }
 
