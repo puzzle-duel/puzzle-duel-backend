@@ -40,6 +40,11 @@ import {
   resolveRankedHttpFeatureGate,
   type RankedHttpGateConfig,
 } from './ranked-feature-gate.mts';
+import {
+  assertExactActiveFamily,
+  detectAccountClassColumn,
+} from '../../staging/staging-access-token.mts';
+import type { VerifiedJwtIdentity } from './pinned-jwt-verifier.mts';
 
 const MAX_BODY = 16_384;
 export const RANKED_AUTH_REQUIRED_ERROR = 'RANKED_AUTH_REQUIRED' as const;
@@ -49,11 +54,19 @@ export function writerDenialDiagnostic(res: ServerResponse): WriterDenialCategor
   return writerDiagnostics.get(res);
 }
 
+/** Account-scoped reads — no tournament gameplay session required. */
+export function isAccountScopedReadPath(path: string): boolean {
+  return path === '/v1/tournament/me/badges'
+    || path === '/v1/profile/me/badges'
+    || path === '/v1/diagnostics/reports';
+}
+
 /** Official ranked mutations require verified Apple/Google identity (PZD-26). */
 export function rankedRouteRequiresVerifiedAccount(path: string): boolean {
   if (path === '/v1/diagnostics/reports') return false;
   if (path.startsWith('/v1/tournament/leaderboards/')) return false;
   if (path === '/v1/tournament/me/badges') return false;
+  if (path === '/v1/profile/me/badges') return false;
   if (path.startsWith('/v1/tournament/manifests/')) return false;
   return path.startsWith('/v1/tournament/');
 }
@@ -192,6 +205,46 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       const identity = deps.verifier.verifyAuthorizationHeader(
         req.headers.authorization,
       );
+
+      // Account-scoped profile/diagnostics: Bearer + exact-family (when present).
+      // Does not require an active tournament gameplay session secret.
+      if (isAccountScopedReadPath(path)) {
+        const account = await authenticateAccountScoped(deps, identity);
+        if (!account) {
+          send(res, 401, { error: 'UNAUTHENTICATED' });
+          return;
+        }
+        if (!checkRate(account.playerId)) {
+          send(res, 429, { error: 'RATE_LIMITED' });
+          return;
+        }
+        if (path === '/v1/diagnostics/reports' && method === 'POST') {
+          if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod') {
+            send(res, 404, { error: 'NOT_FOUND' });
+            return;
+          }
+          const raw = await readBody(req);
+          if (!raw) {
+            send(res, 400, { error: 'MALFORMED_REQUEST' });
+            return;
+          }
+          let payload: unknown;
+          try { payload = JSON.parse(raw.toString('utf8')); }
+          catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
+          const result = diagnosticReports.submit(account.playerId, payload);
+          send(res, result.ok ? 201 : result.status,
+            result.ok ? { reportId: result.reportId } : { error: result.error });
+          return;
+        }
+        if ((path === '/v1/tournament/me/badges' || path === '/v1/profile/me/badges')
+            && method === 'GET') {
+          await sendPlayerBadges(res, deps, account.playerId, url);
+          return;
+        }
+        send(res, 404, { error: 'NOT_FOUND' });
+        return;
+      }
+
       const secret = req.headers['x-pzd-session-secret'];
       if (typeof secret !== 'string') {
         send(res, 401, { error: 'UNAUTHENTICATED' });
@@ -213,29 +266,6 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
       // Non-staging verifiers omit accountType and already reject guest claims.
       if (identity.accountType === 'guest' && rankedRouteRequiresVerifiedAccount(path)) {
         send(res, 403, { error: RANKED_AUTH_REQUIRED_ERROR });
-        return;
-      }
-
-      // Diagnostic reports are strictly staging/UAT only, behind the same
-      // verified JWT, active session, and player rate-limit as gameplay.
-      if (path === '/v1/diagnostics/reports' && method === 'POST') {
-        if (process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod') {
-          send(res, 404, { error: 'NOT_FOUND' });
-          return;
-        }
-        const raw = await readBody(req);
-        if (!raw) {
-          send(res, 400, { error: 'MALFORMED_REQUEST' });
-          return;
-        }
-        let payload: unknown;
-        try { payload = JSON.parse(raw.toString('utf8')); }
-        catch { send(res, 400, { error: 'MALFORMED_REQUEST' }); return; }
-        const result = diagnosticReports.submit(session.playerId, payload);
-        // Never print diagnostic events to stdout/journald. The staging-only
-        // injected sink stores already-validated events in a private file.
-        send(res, result.ok ? 201 : result.status,
-          result.ok ? { reportId: result.reportId } : { error: result.error });
         return;
       }
 
@@ -532,11 +562,6 @@ export function createTournamentHttpHandler(deps: TournamentHttpDeps) {
         await sendLeaderboard(res, deps, session.playerId, 'weekly', url);
         return;
       }
-      if (path === '/v1/tournament/me/badges' && method === 'GET') {
-        await sendPlayerBadges(res, deps, session.playerId, url);
-        return;
-      }
-
       send(res, 404, { error: 'NOT_FOUND' });
     } catch (error) {
       if (
@@ -635,8 +660,53 @@ async function sendOwnedBoard(
 }
 
 /**
- * PZD-43 candidate: authenticated player's badge collection.
- * Bound to the verified session player id — query playerId is ignored.
+ * Resolve the account player for profile/diagnostics without a gameplay session.
+ *
+ * - Staging family JWTs: exact active refresh-family ownership check.
+ * - Tournament player id comes from `tournament_verified_identity` when present
+ *   (same mapping session open uses) so badge grants stay consistent.
+ * - Never trusts a client-supplied player id. Never opens/mutates a session.
+ */
+async function authenticateAccountScoped(
+  deps: TournamentHttpDeps,
+  identity: VerifiedJwtIdentity,
+): Promise<{ playerId: string } | null> {
+  try {
+    if (identity.familyId && identity.accountType) {
+      const accountClassEnabled = await detectAccountClassColumn(deps.pool);
+      await assertExactActiveFamily({
+        pool: deps.pool,
+        playerId: identity.subject,
+        familyId: identity.familyId,
+        expectedAccountType: identity.accountType,
+        accountClassEnabled,
+      });
+    }
+    const mapped = await deps.pool.query<{ player_id: string }>(
+      `SELECT player_id FROM tournament_verified_identity
+       WHERE issuer=$1 AND subject=$2`,
+      [identity.issuer, identity.subject],
+    );
+    if (mapped.rowCount === 1) {
+      return { playerId: String(mapped.rows[0]!.player_id) };
+    }
+    // No tournament identity yet: use JWT subject (empty badge collection /
+    // diagnostic ownership key). Does not create tournament_verified_identity.
+    if (typeof identity.subject === 'string' && identity.subject.length > 0) {
+      return { playerId: identity.subject };
+    }
+    return null;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'UNAUTHENTICATED') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * PZD-43: authenticated player's badge collection (account-scoped).
+ * Bound to the server-resolved player id — query playerId is ignored.
  */
 async function sendPlayerBadges(
   res: ServerResponse,

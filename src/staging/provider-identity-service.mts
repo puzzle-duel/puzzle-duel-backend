@@ -357,8 +357,11 @@ export class PostgresProviderIdentityAuth {
 
   /**
    * Unified Apple/Google continue. Backend resolves link vs existing account.
-   * Progressed guests with a foreign provider identity require confirmation
-   * (ACCOUNT_SWITCH_CONFIRMATION_REQUIRED) — no silent merge or credential replace.
+   * Existing verified (provider, subject) authenticates that account directly.
+   * A concurrent guest (with or without progression) is not merged or deleted;
+   * guest-scoped rows remain under the original guest player_id.
+   * Legacy `/continue/confirm` remains for older clients that still hold a
+   * continuation token; normal continue no longer emits confirmation-required.
    */
   async continue(input: {
     provider: Provider;
@@ -369,7 +372,10 @@ export class PostgresProviderIdentityAuth {
     operationId: string;
     guestPlayerId?: string;
     guestFamilyId?: string;
-    /** Client-asserted local Practice progression; never trust alone for empty. */
+    /**
+     * Legacy client hint (local Practice progression). Ignored for confirmation
+     * gating after the Phase-1 direct-login decision; retained for wire compat.
+     */
     localProgressProtected?: boolean;
     audiences: readonly string[];
     keys: readonly ProviderKey[];
@@ -404,9 +410,6 @@ export class PostgresProviderIdentityAuth {
     };
     const now = input.now ?? new Date();
     const client = await this.pool.connect();
-    // Confirmation outcome is raised after COMMIT + client release so a post-commit
-    // ROLLBACK cannot convert it into AUTH_UNAVAILABLE.
-    let switchConfirmation: ProviderAuthError | null = null;
     let success: ProviderContinueBundle | null = null;
     try {
       await client.query('BEGIN');
@@ -522,64 +525,29 @@ export class PostgresProviderIdentityAuth {
           await client.query('COMMIT');
           success = { ...bundle, resolution: 'same_account' };
         } else if (hasGuest) {
-          // Scenario B / C — foreign verified identity.
-          const serverProgress = await this.#guestHasServerProgression(
-            client,
-            input.guestPlayerId!,
+          // Existing verified (provider, subject) while a different guest is active.
+          // Owner Phase-1 decision: provider button intent authenticates that account
+          // directly — no ACCOUNT_SWITCH_CONFIRMATION_REQUIRED for normal login.
+          // Guest rows stay under the original guest player_id (not deleted, not merged).
+          await client.query(
+            `UPDATE public.pzd_guest_accounts
+             SET account_class='verified'
+             WHERE player_id=$1 AND account_class='guest'`,
+            [targetPlayerId],
           );
-          const requireConfirm = serverProgress || input.localProgressProtected === true;
-          if (requireConfirm) {
-            const continuation = opaqueToken();
-            const expiresAt = new Date(now.getTime() + 5 * 60_000);
-            try {
-              await client.query(
-                `INSERT INTO public.pzd_provider_continuations (
-                   continuation_digest, provider, provider_subject, target_player_id,
-                   source_guest_player_id, source_family_id, expires_at, operation_id
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-                [
-                  digest(continuation),
-                  identity.provider,
-                  identity.subject,
-                  targetPlayerId,
-                  input.guestPlayerId,
-                  input.guestFamilyId,
-                  expiresAt,
-                  operationId,
-                ],
-              );
-            } catch (error) {
-              if (isUniqueViolation(error)) throw new ProviderAuthError('ACCOUNT_CONFLICT');
-              throw error;
-            }
-            // No auth receipt — confirmation not committed; recoverLinked must fail closed.
-            await client.query('COMMIT');
-            switchConfirmation = new ProviderAuthError('ACCOUNT_SWITCH_CONFIRMATION_REQUIRED', {
-              continuationToken: continuation,
-              expiresAt: expiresAt.toISOString(),
-              targetPlayerId,
-            });
-          } else {
-            await client.query(
-              `UPDATE public.pzd_guest_accounts
-               SET account_class='verified'
-               WHERE player_id=$1 AND account_class='guest'`,
-              [targetPlayerId],
-            );
-            const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
-            await this.#recordAuthReceipt(client, {
-              operationId,
-              provider: identity.provider,
-              subject: identity.subject,
-              playerId: targetPlayerId,
-              sourceGuestPlayerId: input.guestPlayerId!,
-              sourceFamilyId: input.guestFamilyId!,
-              resolution: 'existing_account',
-              now,
-            });
-            await client.query('COMMIT');
-            success = { ...bundle, resolution: 'existing_account' };
-          }
+          const bundle = await this.#issueVerifiedFamily(client, targetPlayerId, now);
+          await this.#recordAuthReceipt(client, {
+            operationId,
+            provider: identity.provider,
+            subject: identity.subject,
+            playerId: targetPlayerId,
+            sourceGuestPlayerId: input.guestPlayerId!,
+            sourceFamilyId: input.guestFamilyId!,
+            resolution: 'existing_account',
+            now,
+          });
+          await client.query('COMMIT');
+          success = { ...bundle, resolution: 'existing_account' };
         } else {
           // Scenario D — no guest, existing provider.
           await client.query(
@@ -609,13 +577,13 @@ export class PostgresProviderIdentityAuth {
     } finally {
       client.release();
     }
-    if (switchConfirmation) throw switchConfirmation;
     if (success) return success;
     throw new ProviderAuthError('AUTH_UNAVAILABLE');
   }
 
   /**
-   * Commit a previously issued account-switch continuation.
+   * Legacy confirm for older clients that still hold a continuation token.
+   * Normal continue no longer issues confirmation; this path remains available.
    * Does not transfer guest progression. Does not re-consume provider nonce.
    * Revalidates source guest family (when present) before issuing credentials.
    */

@@ -1,6 +1,6 @@
 # PZD-26/27 — Unified provider continue (staging contract addendum)
 
-Status: implemented on `feature/PZD-26-27-unified-provider-continue`.  
+Status: implemented on `feature/PZD-26-43-auth-lifecycle-stabilization`.  
 Extends `PZD-26-PROVIDER-AUTH-CONTRACT.md`. Legacy `login` / `link` / `recover` remain compatible.
 
 ## Product intent
@@ -9,13 +9,34 @@ One Apple button and one Google button. Backend resolves whether the verified
 `(provider, subject)` is new or already linked. Clients must not choose
 login vs link locally.
 
+### Phase-1 owner decision (direct existing-account login)
+
+When the verified provider subject already belongs to an existing Puzzle Duel
+account, **authenticate that account directly**:
+
+- Preserve the original immutable player ID.
+- Do **not** emit `ACCOUNT_SWITCH_CONFIRMATION_REQUIRED` for normal continue.
+- Do **not** require a second provider authentication.
+- Do **not** display a guest-account decision dialog for returning users.
+- Applies even when a different guest scope (with or without progression) is active.
+
+Guest-scoped rows remain under the original guest `player_id` — they are **not**
+deleted and **not** merged into the verified account. Local Practice for that
+guest stays isolated under the guest Practice scope.
+
+If the provider subject is **new** and a valid guest is present: link that guest
+player ID (preserve associated legitimate progression) per existing security
+rules. Never merge two existing verified identities.
+
+Recovery-specific flows remain separate from normal authentication.
+
 ## HTTP surface (additive)
 
 | Method | Path | Notes |
 |---|---|---|
 | POST | `/v1/auth/providers/challenge` | New `purpose=continue`. **Absent** Authorization → guestless binding. **Valid guest** → `continue:{playerId}:{familyId}`. **Present but invalid/revoked** Authorization → `401 GUEST_PROOF_REQUIRED` (never guestless). |
-| POST | `/v1/auth/providers/continue` | Body `{ provider, idToken, nonce, binding, localProgressProtected? }`. Guest-bound binding requires matching active guest; invalid Authorization never downgrades to account creation. |
-| POST | `/v1/auth/providers/continue/confirm` | Body `{ continuationToken }` — single-use switch commit. Revalidates source guest family when present. No provider token. |
+| POST | `/v1/auth/providers/continue` | Body `{ provider, idToken, nonce, binding, localProgressProtected? }`. Guest-bound binding requires matching active guest; invalid Authorization never downgrades to account creation. Existing provider → direct `existing_account`. |
+| POST | `/v1/auth/providers/continue/confirm` | **Legacy** — Body `{ continuationToken }` — single-use switch commit for older clients that still hold a continuation. Normal continue no longer issues confirmation. |
 | POST | `/v1/auth/providers/recover` | Legacy: `{ …, expectedPlayerId }`. Unified lost-response: `{ …, recoveryKind: "provider_linked" }` — create-forbidden resolve by verified `(provider, subject)` only. |
 
 ### Success (201)
@@ -27,7 +48,9 @@ Same credential fields as login/link, plus `resolution`:
 - `created_account` — new verified player (no guest session)
 - `same_account` — provider already linked to this guest
 
-### Confirmation required (409)
+### Confirmation required (409) — legacy only
+
+Older backends/clients may still observe:
 
 ```json
 {
@@ -38,32 +61,19 @@ Same credential fields as login/link, plus `resolution`:
 }
 ```
 
-`targetPlayerId` is an opaque recovery hint (not proof). No credential mutation until
-`/continue/confirm`. Cancel = do nothing.
+Current continue no longer emits this for normal returning-user login.
+`/continue/confirm` remains for tokens already issued.
 
-### Confirm authorization
+## Guest progression isolation
 
-Before consume: lock `source_family_id` (when set), `#requireActiveGuest` (class,
-revocation, active refresh), re-check `expires_at`, then single-use consume + issue.
-Logout/revoke of the source guest fails closed with `GUEST_PROOF_REQUIRED` and does
-**not** consume the continuation (transaction rolls back).
+Server meaningful progression on a guest (claims, completions, badges joined via
+completion) does **not** gate confirmation after Phase-1. Guest rows stay under
+the guest `player_id`.
 
-## Guest progression predicate
+`localProgressProtected` remains on the wire for compatibility and is **ignored**
+for confirmation gating.
 
-**Server meaningful progression** (any true ⇒ protect):
-
-- Row in `tournament_daily_claim` for guest `player_id`, or
-- Row in `tournament_daily_series_completion` for guest `player_id`, or
-- Row in `tournament_on_time_badge` joined via `tournament_daily_series_completion`
-  (badge has no `player_id` column in F2 schema — never query it with `WHERE player_id`)
-
-Tables absent ⇒ treated as no server progression.
-
-**Client** may set `localProgressProtected: true` when local Practice has
-completed games or personal bests. If either side flags protection, confirmation
-is required. Never trust a client claim that server progression is empty.
-
-## Continuation security
+## Continuation security (legacy confirm)
 
 - Short-lived (5 minutes), single-use, server-stored digest.
 - Bound to provider subject, target player, optional source guest + family.
@@ -75,33 +85,14 @@ is required. Never trust a client claim that server progression is empty.
 Client must persist a durable unified pending marker **before** the first mutating
 `continue` / `confirm` request. Recovery uses `recoveryKind=provider_linked`
 (create-forbidden) and requires a **server auth receipt** proving the mutating
-operation committed. An existing identity link alone is insufficient — unconfirmed
-or cancelled account switches leave no receipt (`RECOVERY_OPERATION_INCOMPLETE`).
-
-Client pending kinds:
-- `continue|…` — mutating continue in flight
-- `awaiting|…` — confirmation required; user has **not** approved (recovery clears, keeps guest)
-- `confirm|…` — user approved; confirm mutate may be in flight (receipt-backed recovery only)
-
-Never treat the source guest id as the expected target for an account switch.
+operation committed. An existing identity link alone is insufficient.
 
 ## Migration
 
 - `0008_provider_continue` (+ verify) — purpose CHECK includes `continue`;
   `pzd_provider_continuations`; least-privilege runtime grants.
-- `0009_provider_auth_receipts` (+ verify) — insert-once per `operation_id` on
-  credential-issuing continue/confirm (and login); `recoverLinked` requires the
-  exact operation receipt plus verified provider identity — never a historical
-  `(provider, subject)` row alone. Continuations also store `operation_id`.
-- Apply only with owner approval: `0008` then `0009` on `pzd_staging`.
-- Prerequisites: `0005` → `0006` → `0007` already applied.
-
-## Rollout
-
-1. Apply `0008` on staging (owner).
-2. Deploy backend with continue routes.
-3. Deploy client that calls continue (two-button sheet) with durable pending recovery.
-4. Legacy endpoints stay for older builds.
+- `0009_provider_auth_receipts` (+ verify) — insert-once per `operation_id`.
+- Already applied on staging — **do not modify contents/checksums**.
 
 ## Compatibility
 
