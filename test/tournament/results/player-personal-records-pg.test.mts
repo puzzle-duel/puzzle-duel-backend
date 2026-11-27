@@ -299,75 +299,106 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
     assert.equal(row.rows[0]!.score, '18000');
   });
 
-  await t.test('isolated projection failure does not abort surrounding transaction', async () => {
+  await t.test('isolated projection failure does not abort F2-B; derive reconciles PB', async () => {
+    await adminPool.query(`
+      CREATE TABLE IF NOT EXISTS tournament_daily_series_completion (
+        series_id uuid PRIMARY KEY,
+        player_id text NOT NULL,
+        completed_at_ms bigint NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS tournament_verified_subgame_score (
+        series_id uuid NOT NULL,
+        subgame_ordinal int NOT NULL,
+        score bigint NOT NULL,
+        PRIMARY KEY (series_id, subgame_ordinal)
+      );
+      CREATE TABLE IF NOT EXISTS trusted_challenge_binding (
+        series_key uuid NOT NULL,
+        subgame_ordinal int NOT NULL,
+        rules_version text,
+        generator_version text,
+        PRIMARY KEY (series_key, subgame_ordinal)
+      );
+    `);
+
+    const playerId = 'player-e-projection-fail';
+    const seriesId = '00000000-0000-4000-8000-0000000000ee';
+    const score = 7777;
+    const achievedAtMs = 90;
+    await adminPool.query('DELETE FROM public.player_personal_best WHERE player_id=$1', [playerId]);
+    await adminPool.query(
+      'DELETE FROM tournament_verified_subgame_score WHERE series_id=$1::uuid',
+      [seriesId],
+    );
+    await adminPool.query(
+      'DELETE FROM tournament_daily_series_completion WHERE series_id=$1::uuid',
+      [seriesId],
+    );
+    await adminPool.query(
+      'DELETE FROM trusted_challenge_binding WHERE series_key=$1::uuid',
+      [seriesId],
+    );
+
     const client = await adminPool.connect();
-    const diagnostics: Array<{ code: string; sqlstate: string; ordinal: number }> = [];
+    const diagnostics: Array<{
+      code: string;
+      sqlstate: string;
+      ordinal: number;
+      safeReason: string;
+    }> = [];
     try {
       await client.query('BEGIN');
+
+      // Authoritative F2-B publication work (outside the projection SAVEPOINT).
       await client.query(
-        `CREATE TEMP TABLE IF NOT EXISTS pzd_f2b_probe (
-           marker text PRIMARY KEY
-         ) ON COMMIT DROP`,
+        `INSERT INTO tournament_daily_series_completion(series_id, player_id, completed_at_ms)
+         VALUES ($1::uuid, $2, $3)`,
+        [seriesId, playerId, achievedAtMs],
       );
-      await client.query(`INSERT INTO pzd_f2b_probe(marker) VALUES ('before_projection')`);
-
-      // Force a recoverable check_violation inside the SAVEPOINT by inserting
-      // an invalid difficulty through a raw statement mimicking projection.
-      const outcome = await (async (): Promise<string> => {
-        const savepoint = 'pzd_pb_ord_1';
-        await client.query(`SAVEPOINT ${savepoint}`);
-        try {
-          await client.query(
-            `INSERT INTO public.player_personal_best (
-               player_id, source, difficulty, rules_version, generator_version,
-               score, achieved_at_ms, provenance
-             ) VALUES ($1,'tournament','not-a-difficulty',$2,$3,100,1,$4)`,
-            [
-              'player-e-projection-fail',
-              TOURNAMENT_RULES_VERSION,
-              TOURNAMENT_GENERATOR_VERSION,
-              TOURNAMENT_PROVENANCE,
-            ],
-          );
-          await client.query(`RELEASE SAVEPOINT ${savepoint}`);
-          return 'projected';
-        } catch (err) {
-          await client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
-          await client.query(`RELEASE SAVEPOINT ${savepoint}`);
-          const code = typeof err === 'object' && err && 'code' in err
-            ? String((err as { code?: string }).code ?? 'XXXXX')
-            : 'XXXXX';
-          diagnostics.push({
-            code: 'tournament_record_projection_failed',
-            sqlstate: code,
-            ordinal: 1,
-          });
-          return 'failed_isolated';
-        }
-      })();
-      assert.equal(outcome, 'failed_isolated');
-      assert.equal(diagnostics.length, 1);
-      assert.equal(diagnostics[0]!.sqlstate, '23514');
-
-      // Surrounding txn remains usable — authoritative work can continue.
-      await client.query(`INSERT INTO pzd_f2b_probe(marker) VALUES ('after_projection')`);
-      const probe = await client.query<{ marker: string }>(
-        `SELECT marker FROM pzd_f2b_probe ORDER BY marker`,
+      await client.query(
+        `INSERT INTO tournament_verified_subgame_score(series_id, subgame_ordinal, score)
+         VALUES ($1::uuid, 1, $2)`,
+        [seriesId, score],
       );
-      assert.deepEqual(probe.rows.map((r) => r.marker), [
-        'after_projection',
-        'before_projection',
-      ]);
+      await client.query(
+        `INSERT INTO trusted_challenge_binding(
+           series_key, subgame_ordinal, rules_version, generator_version
+         ) VALUES ($1::uuid, 1, $2, $3)`,
+        [seriesId, TOURNAMENT_RULES_VERSION, TOURNAMENT_GENERATOR_VERSION],
+      );
 
-      // Valid isolated projection still succeeds in the same txn.
-      const projected = await projectTournamentBoardPersonalBestIsolated(
+      // Player-scoped trigger forces recoverable check_violation inside the
+      // production SAVEPOINT helper without touching other players' rows.
+      await client.query(`
+        CREATE OR REPLACE FUNCTION public.pzd_pb_force_projection_fail()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $fn$
+        BEGIN
+          IF NEW.player_id = '${playerId}' THEN
+            RAISE EXCEPTION 'forced projection check_violation'
+              USING ERRCODE = '23514';
+          END IF;
+          RETURN NEW;
+        END;
+        $fn$
+      `);
+      await client.query(`
+        DROP TRIGGER IF EXISTS pzd_pb_force_projection_fail ON public.player_personal_best;
+        CREATE TRIGGER pzd_pb_force_projection_fail
+          BEFORE INSERT OR UPDATE ON public.player_personal_best
+          FOR EACH ROW
+          EXECUTE FUNCTION public.pzd_pb_force_projection_fail()
+      `);
+
+      const failed = await projectTournamentBoardPersonalBestIsolated(
         client,
         {
-          playerId: 'player-e-projection-fail',
-          seriesId: '00000000-0000-4000-8000-0000000000ee',
+          playerId,
+          seriesId,
           subgameOrdinal: 1,
-          score: 4242,
-          achievedAtMs: 50,
+          score,
+          achievedAtMs,
         },
         {
           onFailure: (d) => {
@@ -375,25 +406,84 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
               code: d.code,
               sqlstate: d.sqlstate,
               ordinal: d.ordinal,
+              safeReason: d.safeReason,
             });
           },
         },
       );
-      assert.equal(projected, 'projected');
-      await client.query('COMMIT');
+      assert.equal(failed, 'failed_isolated');
+      assert.equal(diagnostics.length, 1);
+      assert.equal(diagnostics[0]!.code, 'tournament_record_projection_failed');
+      assert.equal(diagnostics[0]!.sqlstate, '23514');
+      assert.equal(diagnostics[0]!.ordinal, 1);
+      assert.equal(diagnostics[0]!.safeReason, 'check_violation');
 
-      const stored = await adminPool.query<{ score: string }>(
-        `SELECT score::text FROM public.player_personal_best
-         WHERE player_id=$1 AND source='tournament' AND difficulty='easy'`,
-        ['player-e-projection-fail'],
-      );
-      assert.equal(stored.rows[0]!.score, '4242');
+      // Drop the fault injection; authoritative F2-B rows must still commit.
+      await client.query('DROP TRIGGER IF EXISTS pzd_pb_force_projection_fail ON public.player_personal_best');
+      await client.query('DROP FUNCTION IF EXISTS public.pzd_pb_force_projection_fail()');
+      await client.query('COMMIT');
     } catch (err) {
+      try {
+        await client.query('DROP TRIGGER IF EXISTS pzd_pb_force_projection_fail ON public.player_personal_best');
+        await client.query('DROP FUNCTION IF EXISTS public.pzd_pb_force_projection_fail()');
+      } catch { /* ignore */ }
       try { await client.query('ROLLBACK'); } catch { /* ignore */ }
       throw err;
     } finally {
       client.release();
     }
+
+    const authoritative = await adminPool.query<{ score: string }>(
+      `SELECT score::text FROM tournament_verified_subgame_score
+       WHERE series_id=$1::uuid AND subgame_ordinal=1`,
+      [seriesId],
+    );
+    assert.equal(authoritative.rows[0]!.score, String(score));
+
+    const projected = await adminPool.query(
+      `SELECT 1 FROM public.player_personal_best
+       WHERE player_id=$1 AND source='tournament' AND difficulty='easy'`,
+      [playerId],
+    );
+    assert.equal(projected.rowCount, 0);
+
+    // Historical GET derivation reconciles the correct tournament personal best.
+    const snap = await loadPersonalRecordsSnapshot(adminPool, playerId);
+    const easy = snap.records.find(
+      (r) => r.source === 'tournament' && r.difficulty === 'easy',
+    );
+    assert.equal(easy?.score, score);
+    assert.equal(easy?.provenance, TOURNAMENT_PROVENANCE);
+
+    // Later reconciliation projection succeeds once the table is healthy again.
+    const reconcileClient = await adminPool.connect();
+    try {
+      await reconcileClient.query('BEGIN');
+      const projectedOk = await projectTournamentBoardPersonalBestIsolated(
+        reconcileClient,
+        {
+          playerId,
+          seriesId,
+          subgameOrdinal: 1,
+          score,
+          achievedAtMs,
+        },
+      );
+      assert.equal(projectedOk, 'projected');
+      await reconcileClient.query('COMMIT');
+    } catch (err) {
+      try { await reconcileClient.query('ROLLBACK'); } catch { /* ignore */ }
+      throw err;
+    } finally {
+      reconcileClient.release();
+    }
+
+    const stored = await adminPool.query<{ score: string }>(
+      `SELECT score::text FROM public.player_personal_best
+       WHERE player_id=$1 AND source='tournament' AND difficulty='easy'`,
+      [playerId],
+    );
+    assert.equal(stored.rows[0]!.score, String(score));
   });
 
   await t.test('GET merges derived tournament bests over stale/partial projections', async () => {
