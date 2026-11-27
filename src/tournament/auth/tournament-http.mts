@@ -43,6 +43,7 @@ import {
 import {
   assertExactActiveFamily,
   detectAccountClassColumn,
+  GUEST_ISSUER,
 } from '../../staging/staging-access-token.mts';
 import type { VerifiedJwtIdentity } from './pinned-jwt-verifier.mts';
 
@@ -662,7 +663,10 @@ async function sendOwnedBoard(
 /**
  * Resolve the account player for profile/diagnostics without a gameplay session.
  *
- * - Staging family JWTs: exact active refresh-family ownership check.
+ * - Staging issuer JWTs (`GUEST_ISSUER`): require familyId + accountType and
+ *   exact active refresh-family ownership. Missing claims fail closed (cannot
+ *   skip family validation by omitting fields).
+ * - Non-staging / legacy JWTs: no family claims expected; skip family check.
  * - Tournament player id comes from `tournament_verified_identity` when present
  *   (same mapping session open uses) so badge grants stay consistent.
  * - Never trusts a client-supplied player id. Never opens/mutates a session.
@@ -672,7 +676,21 @@ async function authenticateAccountScoped(
   identity: VerifiedJwtIdentity,
 ): Promise<{ playerId: string } | null> {
   try {
-    if (identity.familyId && identity.accountType) {
+    const isStagingIssuer = identity.issuer === GUEST_ISSUER;
+    if (isStagingIssuer) {
+      if (!identity.familyId || !identity.accountType) {
+        return null;
+      }
+      const accountClassEnabled = await detectAccountClassColumn(deps.pool);
+      await assertExactActiveFamily({
+        pool: deps.pool,
+        playerId: identity.subject,
+        familyId: identity.familyId,
+        expectedAccountType: identity.accountType,
+        accountClassEnabled,
+      });
+    } else if (identity.familyId && identity.accountType) {
+      // Non-staging tokens normally omit family claims; if present, enforce.
       const accountClassEnabled = await detectAccountClassColumn(deps.pool);
       await assertExactActiveFamily({
         pool: deps.pool,
