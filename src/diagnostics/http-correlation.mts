@@ -50,8 +50,14 @@ const SAFE_ERROR_CODES = new Set([
   'RECOVERY_OPERATION_INCOMPLETE',
 ]);
 
+const AUTH_SQLSTATE = /^AUTH_SQLSTATE_\d{5}$/;
+
 export function safeDiagnosticErrorCode(value: unknown): string | undefined {
-  return typeof value === 'string' && SAFE_ERROR_CODES.has(value) ? value : undefined;
+  if (typeof value !== 'string') return undefined;
+  if (SAFE_ERROR_CODES.has(value)) return value;
+  // Privacy-safe PostgreSQL SQLSTATE class only — never message/detail/params.
+  if (AUTH_SQLSTATE.test(value)) return value;
+  return undefined;
 }
 
 /** Categorizes only static route patterns; no series/player/manifest IDs or query strings. */

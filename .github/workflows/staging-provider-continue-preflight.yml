@@ -1,0 +1,171 @@
+name: PZD Staging Provider Continue Preflight (read-only)
+
+# Public repository: only boolean / allowlisted identifiers leave Oracle.
+# READ-ONLY — no schema, grant, or data mutation.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-provider-continue-readonly
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: pzd-staging
+    steps:
+      - name: Configure pinned SSH identity
+        env:
+          SSH_KEY: ${{ secrets.PZD_STAGING_SSH_PRIVATE_KEY }}
+          KNOWN_HOSTS: ${{ secrets.PZD_STAGING_SSH_KNOWN_HOSTS }}
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$SSH_KEY" && test -n "$KNOWN_HOSTS" && test -n "$HOST" && test -n "$USER"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Check progression/receipt privileges as pzd_app_runtime (read-only)
+        env:
+          HOST: ${{ secrets.PZD_STAGING_HOST }}
+          USER: ${{ secrets.PZD_STAGING_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+            -o ConnectTimeout=10 "$USER@$HOST" \
+            'cd /home/pzd-staging/pzd-staging/current && /opt/pzd-node26/bin/node --input-type=module -' <<'JS' | tee -a "$GITHUB_STEP_SUMMARY"
+          import { readFileSync } from 'node:fs';
+          import pg from 'pg';
+
+          const config = readFileSync('/home/pzd-staging/pzd-staging/staging.env', 'utf8');
+          const line = config.split(/\r?\n/).find((x) => /^PZD_STAGING_DATABASE_URL=/.test(x));
+          if (!line) throw new Error('Staging DB configuration unavailable');
+          let value = line.slice('PZD_STAGING_DATABASE_URL='.length).trim();
+          if ((value.startsWith('"') && value.endsWith('"')) ||
+              (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+          const url = new URL(value);
+          if (url.hostname !== '127.0.0.1' && url.hostname !== 'localhost') {
+            throw new Error('Refusing non-loopback database');
+          }
+          if (url.pathname !== '/pzd_staging') throw new Error('Refusing non-staging database');
+
+          // Connect as the configured runtime URL (least privilege), not a superuser.
+          const db = new pg.Client({ connectionString: value, connectionTimeoutMillis: 3000 });
+          const yn = (v) => (v === true ? 'yes' : v === false ? 'no' : 'unknown');
+          try {
+            await db.connect();
+            await db.query('BEGIN READ ONLY');
+            const role = await db.query('SELECT current_user AS u, current_database() AS d');
+            const u = role.rows[0]?.u;
+            const d = role.rows[0]?.d;
+            if (d !== 'pzd_staging') throw new Error('Refusing non-staging database session');
+            console.log('## Staging provider-continue preflight (read-only)');
+            console.log('- database: pzd_staging');
+            console.log('- session_user_is_runtime_role:', yn(u === 'pzd_app_runtime'));
+
+            const objects = await db.query(`
+              SELECT
+                to_regclass('public.pzd_provider_continuations') IS NOT NULL AS continuations,
+                to_regclass('public.pzd_provider_auth_receipts') IS NOT NULL AS receipts,
+                to_regclass('public.tournament_daily_claim') IS NOT NULL AS daily_claim,
+                to_regclass('public.tournament_daily_series_completion') IS NOT NULL AS series_completion,
+                to_regclass('public.tournament_on_time_badge') IS NOT NULL AS on_time_badge,
+                EXISTS (
+                  SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='tournament_daily_claim'
+                    AND column_name='player_id'
+                ) AS claim_has_player_id,
+                EXISTS (
+                  SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='tournament_daily_series_completion'
+                    AND column_name='player_id'
+                ) AS completion_has_player_id,
+                EXISTS (
+                  SELECT 1 FROM information_schema.columns
+                  WHERE table_schema='public' AND table_name='tournament_on_time_badge'
+                    AND column_name='player_id'
+                ) AS badge_has_player_id
+            `);
+            const o = objects.rows[0];
+            console.log('- continuations_table:', yn(o.continuations));
+            console.log('- receipts_table:', yn(o.receipts));
+            console.log('- daily_claim_table:', yn(o.daily_claim));
+            console.log('- series_completion_table:', yn(o.series_completion));
+            console.log('- on_time_badge_table:', yn(o.on_time_badge));
+            console.log('- claim_has_player_id:', yn(o.claim_has_player_id));
+            console.log('- completion_has_player_id:', yn(o.completion_has_player_id));
+            console.log('- badge_has_player_id:', yn(o.badge_has_player_id));
+
+            const priv = await db.query(`
+              SELECT
+                has_table_privilege(current_user,'public.tournament_daily_claim','SELECT') AS claim_select,
+                has_table_privilege(current_user,'public.tournament_daily_series_completion','SELECT') AS completion_select,
+                has_table_privilege(current_user,'public.tournament_on_time_badge','SELECT') AS badge_select,
+                has_table_privilege(current_user,'public.pzd_provider_auth_receipts','SELECT') AS receipt_select,
+                has_table_privilege(current_user,'public.pzd_provider_auth_receipts','INSERT') AS receipt_insert,
+                has_table_privilege(current_user,'public.pzd_provider_continuations','SELECT') AS continuation_select,
+                has_table_privilege(current_user,'public.pzd_provider_continuations','INSERT') AS continuation_insert
+            `);
+            const p = priv.rows[0];
+            console.log('- claim_select:', yn(p.claim_select));
+            console.log('- completion_select:', yn(p.completion_select));
+            console.log('- badge_select:', yn(p.badge_select));
+            console.log('- receipt_select:', yn(p.receipt_select));
+            console.log('- receipt_insert:', yn(p.receipt_insert));
+            console.log('- continuation_select:', yn(p.continuation_select));
+            console.log('- continuation_insert:', yn(p.continuation_insert));
+
+            // Probe SELECT shapes without returning row content.
+            let claimProbe = 'skipped';
+            if (o.daily_claim && o.claim_has_player_id && p.claim_select) {
+              try {
+                await db.query(
+                  `SELECT 1 FROM public.tournament_daily_claim
+                   WHERE player_id::text = $1::text LIMIT 1`,
+                  ['00000000-0000-4000-8000-000000000000'],
+                );
+                claimProbe = 'ok';
+              } catch (error) {
+                const code = error && typeof error === 'object' && 'code' in error
+                  ? String(error.code) : 'unknown';
+                claimProbe = /^\d{5}$/.test(code) ? `sqlstate_${code}` : 'failed';
+              }
+            }
+            let badgeProbe = 'skipped';
+            if (o.on_time_badge && o.series_completion && o.completion_has_player_id &&
+                p.badge_select && p.completion_select) {
+              try {
+                await db.query(
+                  `SELECT 1
+                   FROM public.tournament_on_time_badge AS badge
+                   INNER JOIN public.tournament_daily_series_completion AS completion
+                     ON completion.series_id = badge.series_id
+                   WHERE completion.player_id::text = $1::text
+                   LIMIT 1`,
+                  ['00000000-0000-4000-8000-000000000000'],
+                );
+                badgeProbe = 'ok';
+              } catch (error) {
+                const code = error && typeof error === 'object' && 'code' in error
+                  ? String(error.code) : 'unknown';
+                badgeProbe = /^\d{5}$/.test(code) ? `sqlstate_${code}` : 'failed';
+              }
+            }
+            console.log('- claim_player_id_probe:', claimProbe);
+            console.log('- badge_join_probe:', badgeProbe);
+            console.log('');
+            console.log('No identifiers, SQL text, grants DDL, or row data are printed.');
+            await db.query('ROLLBACK');
+          } finally {
+            await db.end().catch(() => {});
+          }
+          JS
