@@ -312,8 +312,9 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
         score bigint NOT NULL,
         PRIMARY KEY (series_id, subgame_ordinal)
       );
+      -- Staging-real type: series_key TEXT (not UUID). UUID here masked 42883.
       CREATE TABLE IF NOT EXISTS trusted_challenge_binding (
-        series_key uuid NOT NULL,
+        series_key text NOT NULL,
         subgame_ordinal int NOT NULL,
         rules_version text,
         generator_version text,
@@ -335,7 +336,7 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
       [seriesId],
     );
     await adminPool.query(
-      'DELETE FROM trusted_challenge_binding WHERE series_key=$1::uuid',
+      'DELETE FROM trusted_challenge_binding WHERE series_key=$1',
       [seriesId],
     );
 
@@ -363,7 +364,7 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
       await client.query(
         `INSERT INTO trusted_challenge_binding(
            series_key, subgame_ordinal, rules_version, generator_version
-         ) VALUES ($1::uuid, 1, $2, $3)`,
+         ) VALUES ($1, 1, $2, $3)`,
         [seriesId, TOURNAMENT_RULES_VERSION, TOURNAMENT_GENERATOR_VERSION],
       );
 
@@ -499,8 +500,9 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
         score bigint NOT NULL,
         PRIMARY KEY (series_id, subgame_ordinal)
       );
+      -- Staging-real type: series_key TEXT (not UUID).
       CREATE TABLE IF NOT EXISTS trusted_challenge_binding (
-        series_key uuid NOT NULL,
+        series_key text NOT NULL,
         subgame_ordinal int NOT NULL,
         rules_version text,
         generator_version text,
@@ -557,4 +559,67 @@ describePg('player personal best PostgreSQL max-only upsert', async (t) => {
     );
     assert.equal(easy?.score, 50000);
   });
+
+  await t.test(
+    'PZD-53: staging TEXT series_key + UUID series_id derive must not raise 42883',
+    async () => {
+      // Rebuild with staging-real TEXT series_key (prior cases may leave tables).
+      await adminPool.query(`
+        DROP TABLE IF EXISTS trusted_challenge_binding CASCADE;
+        DROP TABLE IF EXISTS tournament_verified_subgame_score CASCADE;
+        DROP TABLE IF EXISTS tournament_daily_series_completion CASCADE;
+        CREATE TABLE tournament_daily_series_completion (
+          series_id uuid PRIMARY KEY,
+          player_id text NOT NULL,
+          completed_at_ms bigint NOT NULL
+        );
+        CREATE TABLE tournament_verified_subgame_score (
+          series_id uuid NOT NULL,
+          subgame_ordinal int NOT NULL,
+          score bigint NOT NULL,
+          PRIMARY KEY (series_id, subgame_ordinal)
+        );
+        CREATE TABLE trusted_challenge_binding (
+          series_key text NOT NULL,
+          player_id text NOT NULL,
+          subgame_ordinal int NOT NULL,
+          rules_version text NOT NULL,
+          generator_version text NOT NULL,
+          PRIMARY KEY (series_key, player_id, subgame_ordinal)
+        );
+      `);
+
+      const playerId = 'player-g-text-series-key';
+      const seriesId = '00000000-0000-4000-8000-0000000000aa';
+      await adminPool.query('DELETE FROM public.player_personal_best WHERE player_id=$1', [
+        playerId,
+      ]);
+      await adminPool.query(
+        `INSERT INTO tournament_daily_series_completion(series_id, player_id, completed_at_ms)
+         VALUES ($1::uuid, $2, 42)`,
+        [seriesId, playerId],
+      );
+      await adminPool.query(
+        `INSERT INTO tournament_verified_subgame_score(series_id, subgame_ordinal, score)
+         VALUES ($1::uuid, 6, 9000)`,
+        [seriesId],
+      );
+      await adminPool.query(
+        `INSERT INTO trusted_challenge_binding(
+           series_key, player_id, subgame_ordinal, rules_version, generator_version
+         ) VALUES ($1, $2, 6, $3, $4)`,
+        [seriesId, playerId, TOURNAMENT_RULES_VERSION, TOURNAMENT_GENERATOR_VERSION],
+      );
+
+      // No projection row — GET must derive via the TEXT=UUID-safe JOIN.
+      const snap = await loadPersonalRecordsSnapshot(adminPool, playerId);
+      const hard = snap.records.find(
+        (r) => r.source === 'tournament' && r.difficulty === 'hard',
+      );
+      assert.equal(hard?.score, 9000);
+      assert.equal(hard?.rulesVersion, TOURNAMENT_RULES_VERSION);
+      assert.equal(hard?.generatorVersion, TOURNAMENT_GENERATOR_VERSION);
+      assert.equal(hard?.provenance, TOURNAMENT_PROVENANCE);
+    },
+  );
 });

@@ -456,7 +456,9 @@ export async function deriveTournamentPersonalBests(
        INNER JOIN tournament_verified_subgame_score AS score
          ON score.series_id = completion.series_id
        LEFT JOIN trusted_challenge_binding AS binding
-         ON binding.series_key = completion.series_id
+         -- Staging/prod schema: series_key is TEXT; completion.series_id is UUID.
+         -- Uncast equality raises SQLSTATE 42883 and collapses to HTTP 503 AUTH_UNAVAILABLE.
+         ON binding.series_key = completion.series_id::text
         AND binding.subgame_ordinal = score.subgame_ordinal
        WHERE completion.player_id = $1
      )
@@ -746,7 +748,7 @@ export async function backfillTournamentPersonalBests(
        INNER JOIN tournament_verified_subgame_score AS score
          ON score.series_id = completion.series_id
        LEFT JOIN trusted_challenge_binding AS binding
-         ON binding.series_key = completion.series_id
+         ON binding.series_key = completion.series_id::text
         AND binding.subgame_ordinal = score.subgame_ordinal
        WHERE ($1::text IS NULL OR completion.player_id = $1)
        ORDER BY completion.completed_at_ms ASC, score.subgame_ordinal ASC`,

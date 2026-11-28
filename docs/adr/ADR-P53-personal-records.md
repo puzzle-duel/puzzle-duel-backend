@@ -52,6 +52,12 @@ same publication transaction. GET also derives tournament bests from verified
 subgame scores when the projection table is empty/missing (rollout safety +
 historical recovery).
 
+Derive/backfill JOINs must cast `completion.series_id::text` when comparing to
+`trusted_challenge_binding.series_key` (TEXT in staging/prod). Uncast
+`text = uuid` raises SQLSTATE 42883 and collapses to HTTP 503 AUTH_UNAVAILABLE
+via the tournament-http catch path (PZD-53 staging incident
+`b3e21fcf-0673-4aff-97e9-696ec79ddedf`).
+
 ### API (account-scoped; no tournament session)
 
 - `GET /v1/profile/me/personal-records`

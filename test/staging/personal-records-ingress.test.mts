@@ -113,8 +113,9 @@ describePg('staging ingress personal-records forwarding', async (t) => {
         score bigint NOT NULL,
         PRIMARY KEY (series_id, subgame_ordinal)
       );
+      -- Staging-real type: series_key TEXT (UUID masked the 42883 derive bug).
       CREATE TABLE trusted_challenge_binding (
-        series_key uuid NOT NULL,
+        series_key text NOT NULL,
         subgame_ordinal int NOT NULL,
         rules_version text,
         generator_version text,
